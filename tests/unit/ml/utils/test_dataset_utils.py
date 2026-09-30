@@ -108,14 +108,15 @@ def test_split_stratifies_by_robot() -> None:
     assert _episode_ids(train).isdisjoint(val_episodes)
 
 
-def test_split_falls_back_when_every_robot_has_one_episode() -> None:
+def test_split_rejects_when_no_robot_has_two_episodes() -> None:
     dataset = _FakeEpisodeDataset(
         [3, 3, 3],
         robot_ids=["a", "b", "c"],
     )
-    train, val = _split(dataset, validation_split=0.34)
-    assert len(_episode_ids(val)) == 1
-    assert len(_episode_ids(train)) == 2
+    with pytest.raises(
+        ValueError, match=r"'a' has 1 episode\(s\).*'c' has 1 episode\(s\)"
+    ):
+        _split(dataset, validation_split=0.34)
 
 
 def test_split_rekeys_val_preprocessing_cache() -> None:

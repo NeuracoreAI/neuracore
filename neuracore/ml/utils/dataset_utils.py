@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from copy import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch.utils.data import Subset
+
+from neuracore.core.data.synced_recording import SynchronizedRecording
 
 if TYPE_CHECKING:
     from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -36,18 +38,15 @@ def _get_episode_sample_ranges(dataset: PytorchSynchronizedDataset) -> list[rang
 
 def _get_episode_robot_ids(
     dataset: PytorchSynchronizedDataset, n_episodes: int
-) -> list[str] | None:
-    """Return per-episode robot ids, or None when they cannot be resolved."""
-    synchronized = getattr(dataset, "synchronized_dataset", None)
-    if synchronized is None:
-        return None
+) -> list[str]:
+    """Return the robot id of each episode's synchronized recording."""
+    synchronized_dataset = dataset.synchronized_dataset
     robot_ids: list[str] = []
     for episode_idx in range(n_episodes):
-        recording = synchronized[episode_idx]
-        robot_id = getattr(recording, "robot_id", None)
-        if not robot_id:
-            return None
-        robot_ids.append(str(robot_id))
+        synced_recording = cast(
+            SynchronizedRecording, synchronized_dataset[episode_idx]
+        )
+        robot_ids.append(synced_recording.robot_id)
     return robot_ids
 
 
@@ -64,46 +63,48 @@ def _shuffle_indices(n: int, generator: torch.Generator) -> list[int]:
 
 
 def _assign_episodes(
-    n_episodes: int,
     validation_split: float,
     seed: int,
-    robot_ids: list[str] | None,
+    robot_ids: list[str],
 ) -> tuple[list[int], list[int]]:
     """Return ``(train_episode_indices, val_episode_indices)``.
 
-    When robot ids are available, shuffle and split within each robot so a
-    multi-recording embodiment is not held out entirely. Single-recording
-    robots stay in train. If that would leave either split empty, fall back
-    to an unstratified shuffle of every episode.
+    Shuffle and split within each robot so a multi-recording embodiment is
+    not held out entirely. Single-recording robots stay in train. If no
+    robot has two episodes to split, raise ValueError.
     """
     generator = torch.Generator().manual_seed(seed)
 
-    def global_split() -> tuple[list[int], list[int]]:
-        order = _shuffle_indices(n_episodes, generator)
-        n_val = _count_val_episodes(n_episodes, validation_split)
-        return order[n_val:], order[:n_val]
-
-    if not robot_ids:
-        return global_split()
-
-    groups: dict[str, list[int]] = defaultdict(list)
+    episode_groups_by_robot: dict[str, list[int]] = defaultdict(list)
     for episode_idx, robot_id in enumerate(robot_ids):
-        groups[robot_id].append(episode_idx)
+        episode_groups_by_robot[robot_id].append(episode_idx)
 
     train_episodes: list[int] = []
     val_episodes: list[int] = []
-    for robot_id in sorted(groups):
-        members = groups[robot_id]
+    for robot_id in sorted(episode_groups_by_robot):
+        members = episode_groups_by_robot[robot_id]
         order = [members[i] for i in _shuffle_indices(len(members), generator)]
         if len(order) < 2:
             train_episodes.extend(order)
+            logger.warning(
+                "Robot %s has only one episode, so it is not held out for validation.",
+                robot_id,
+            )
             continue
         n_val = _count_val_episodes(len(order), validation_split)
         val_episodes.extend(order[:n_val])
         train_episodes.extend(order[n_val:])
 
-    if not train_episodes or not val_episodes:
-        return global_split()
+    if not val_episodes:
+        counts = ", ".join(
+            f"{robot_id!r} has {len(members)} episode(s)"
+            for robot_id, members in sorted(episode_groups_by_robot.items())
+        )
+        raise ValueError(
+            "Need at least 2 episodes for a robot to hold one out for "
+            f"validation. {counts}."
+        )
+
     return train_episodes, val_episodes
 
 
@@ -165,7 +166,6 @@ def split_train_val_datasets(
         )
 
     train_episodes, val_episodes = _assign_episodes(
-        n_episodes,
         validation_split,
         seed,
         _get_episode_robot_ids(dataset, n_episodes),
