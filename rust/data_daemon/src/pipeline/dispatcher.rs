@@ -1034,6 +1034,20 @@ impl Dispatcher {
                     robot_id = source.0,
                     "closing a recording the backend reported stopped"
                 );
+                let live_index = self
+                    .windows
+                    .get(&source)
+                    .and_then(|entry| entry.live.as_ref())
+                    .map(|window| window.recording_index);
+                if let Some(recording_index) = live_index {
+                    if let Err(error) = self
+                        .store
+                        .mark_recording_stop_notified(recording_index)
+                        .await
+                    {
+                        tracing::warn!(%error, recording_index, "failed to mark backend stop notified");
+                    }
+                }
                 self.handle_stop(source, observed_at_ns, observed_at_ns, recv_at)
                     .await;
             }
@@ -3344,6 +3358,70 @@ mod tests {
                 .is_some(),
             "B's window must still be live"
         );
+    }
+
+    #[tokio::test]
+    async fn a_remote_stop_leaves_the_backend_end_time_alone() {
+        // The web's stop already set the recording's end time; a stop POST
+        // from here would replace it with the notification's receipt time.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Close {
+                    recording_id: "rec-a".into(),
+                    observed_at_ns: 150,
+                },
+                now,
+            )
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert!(recordings[0].stopped_at.is_some());
+        assert!(
+            recordings[0].backend_stop_notified_at.is_some(),
+            "the stop notifier would POST this stop back to the backend"
+        );
+        assert!(store
+            .recordings_pending_stop_notify()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_local_stop_still_needs_its_backend_stop() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher.handle_inbound(start("robot-1", 100), now).await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+        dispatcher.handle_inbound(stop("robot-1", 120), now).await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert!(recordings[0].stopped_at.is_some());
+        assert!(recordings[0].backend_stop_notified_at.is_none());
     }
 
     #[tokio::test]
