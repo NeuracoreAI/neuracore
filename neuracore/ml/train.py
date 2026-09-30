@@ -66,6 +66,26 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
+MACOS_OPEN_MAX = 10240
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft open file limit to the hard limit.
+
+    Use MACOS_OPEN_MAX as the target when the hard limit is unlimited.
+    """
+    if sys.platform == "win32":
+        return
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = MACOS_OPEN_MAX if hard == resource.RLIM_INFINITY else hard
+    if soft >= target:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
+        logger.warning("Could not raise the open file limit from %d", soft)
 
 
 def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
@@ -604,6 +624,8 @@ def _main(cfg: DictConfig) -> None:
     Args:
         cfg: Fully resolved Hydra configuration.
     """
+    _raise_open_file_limit()
+
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
 
