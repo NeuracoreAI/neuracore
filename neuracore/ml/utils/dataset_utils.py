@@ -145,10 +145,11 @@ def split_train_val_datasets(
     Returns:
         ``(train_subset, val_subset)`` as ``torch.utils.data.Subset`` instances.
     """
-    if validation_split <= 0:
-        raise ValueError(f"The validation set is empty. {_EMPTY_SPLIT_HINT}")
-    if validation_split >= 1:
-        raise ValueError(f"The training set is empty. {_EMPTY_SPLIT_HINT}")
+    if not 0 < validation_split < 1:
+        raise ValueError(
+            f"validation_split is {validation_split}; "
+            "it must be strictly between 0 and 1."
+        )
 
     ranges = _get_episode_sample_ranges(dataset)
     n_episodes = len(ranges)

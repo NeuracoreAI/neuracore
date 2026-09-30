@@ -132,8 +132,8 @@ def test_split_rekeys_val_preprocessing_cache() -> None:
     [
         ([], 0.2, "training and validation sets are both empty"),
         ([5], 0.2, "Need at least 2 recordings"),
-        ([2, 2], 0.0, "validation set is empty"),
-        ([2, 2], 1.0, "training set is empty"),
+        ([2, 2], 0.0, r"validation_split is 0\.0.*strictly between 0 and 1"),
+        ([2, 2], 1.0, r"validation_split is 1\.0.*strictly between 0 and 1"),
     ],
 )
 def test_split_rejects_empty_sides(
