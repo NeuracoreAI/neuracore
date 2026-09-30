@@ -8,6 +8,7 @@
 //! daemon starts.
 
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use iceoryx2::config::Config;
@@ -115,6 +116,56 @@ pub fn reclaim_stale_pid_file(pid_path: &Path) -> std::io::Result<PidReclaim> {
     }
 }
 
+/// Remove spool files under `spool_root` not modified within `max_age`.
+fn reclaim_stale_spool(spool_root: &Path, max_age: Duration) -> usize {
+    let cutoff = SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut removed = 0;
+    let mut stack = vec![spool_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // The spool root may not exist yet on a first start.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %dir.display(),
+                    "failed to read spool directory; its chunks may relink"
+                );
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified < cutoff);
+            if !stale {
+                continue;
+            }
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    path = %entry.path().display(),
+                    "failed to reclaim stale spool chunk; it may relink"
+                ),
+            }
+        }
+    }
+    removed
+}
+
 /// Outcome counters for [`sweep_partial_recordings`], surfaced for logging.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PartialSweepReport {
@@ -152,22 +203,18 @@ async fn sweep_partial_recordings(
     recordings_root: &Path,
 ) -> Result<PartialSweepReport, StateStoreError> {
     let mut report = PartialSweepReport::default();
-    // Reclaim the producer video spool up front: any recording in flight at
-    // restart is corrupt, so the spooled NUT chunks staged under the spool dir
-    // are reclaimed wholesale rather than resumed. `tokio::fs` keeps the
-    // possibly-large tree removal off the runtime worker. A failure here is worth
-    // surfacing — a surviving spool can let a stale chunk relink into the next
-    // recording (cf. the `video_chunk_spans_recording` history).
+    // Reclaim the producer video spool, sparing chunks a live producer is still
+    // writing: the producer spools with no daemon running, so a recording whose
+    // start launches this daemon opens inside a chunk already on disk. A
+    // surviving stale chunk can relink into the next recording (cf. the
+    // `video_chunk_spans_recording` history).
     let spool_root = crate::storage::paths::spool_root(recordings_root);
-    match tokio::fs::remove_dir_all(&spool_root).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let max_age = Duration::from_secs(STALE_WRITE_THRESHOLD_SECS as u64);
+    match tokio::task::spawn_blocking(move || reclaim_stale_spool(&spool_root, max_age)).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "reclaimed stale producer video spool chunks"),
         Err(error) => {
-            tracing::warn!(
-                %error,
-                path = %spool_root.display(),
-                "failed to purge producer video spool at recovery; stale chunks may relink"
-            );
+            tracing::warn!(%error, "producer video spool reclaim panicked; stale chunks may relink")
         }
     }
     let recordings = store.list_recordings().await?;
@@ -412,6 +459,28 @@ mod tests {
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(recording.cancelled_at.is_none());
+    }
+
+    #[test]
+    fn stale_spool_chunks_are_reclaimed_and_live_ones_kept() {
+        let dir = tempdir().unwrap();
+        let spool_root = crate::storage::paths::spool_root(dir.path());
+        let sensor_dir = spool_root.join("robot-1/0/RGB_IMAGES/camera_0");
+        std::fs::create_dir_all(&sensor_dir).unwrap();
+        let stale = sensor_dir.join("chunk_1_1.nut");
+        let live = sensor_dir.join("chunk_2_1.nut");
+        std::fs::write(&stale, b"abandoned").unwrap();
+        std::fs::write(&live, b"open").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(120))
+            .unwrap();
+
+        assert_eq!(reclaim_stale_spool(&spool_root, Duration::from_secs(30)), 1);
+        assert!(!stale.exists());
+        assert!(live.exists());
     }
 
     #[test]

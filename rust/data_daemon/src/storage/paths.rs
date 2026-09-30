@@ -26,7 +26,7 @@ pub const CHUNKS_DIRNAME: &str = "chunks";
 /// chunks into before the daemon knows which recording they belong to. Keyed
 /// by source + sensor because the producer cannot reference a recording. The
 /// daemon relinks a chunk under its recording once routing resolves a window,
-/// and reclaims the whole tree on startup (a daemon restart mid-recording
+/// and reclaims stale chunks on startup (a daemon restart mid-recording
 /// corrupts that recording).
 pub const SPOOL_DIRNAME: &str = ".rgb_spool";
 
@@ -88,7 +88,7 @@ pub fn spool_chunk_path(
     .join(spool_chunk_filename(publish_ns, thread_id))
 }
 
-/// Resolve the top-level spool directory, reclaimed wholesale on daemon start.
+/// Resolve the top-level spool directory, whose stale chunks are reclaimed on daemon start.
 pub fn spool_root(recordings_root: &Path) -> PathBuf {
     recordings_root.join(SPOOL_DIRNAME)
 }
