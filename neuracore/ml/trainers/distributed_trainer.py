@@ -65,6 +65,11 @@ class NestedModule(nn.Module):
         return self.neuracore_model.training_step(batch)
 
 
+def _supports_tf32(device: torch.device) -> bool:
+    """Return whether the device runs TF32 matrix multiplies."""
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) >= (8, 0)
+
+
 class DistributedTrainer:
     """Trainer for distributed multi-GPU training with TensorBoard logging."""
 
@@ -129,8 +134,17 @@ class DistributedTrainer:
 
         logger.info(f"Process {rank} using device: {self.device}")
 
+        use_tf32 = _supports_tf32(self.device)
+        if use_tf32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info("Training with TF32 matrix multiplies and channels_last")
+
         # Set up the model for distributed training
-        self.model = model.to(self.device)
+        if use_tf32:
+            self.model = model.to(self.device, memory_format=torch.channels_last)
+        else:
+            self.model = model.to(self.device)
 
         if torch.cuda.is_available() and world_size > 1:
             self.model = NestedModule(self.model).to(self.device)
