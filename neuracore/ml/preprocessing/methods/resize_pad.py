@@ -56,10 +56,12 @@ class ResizePad(PreprocessingMethod):
                 f"Unsupported batched data type for resize_pad: {type(batched_data)!r}"
             )
         resized = torch.nn.functional.interpolate(
-            reshaped,
+            reshaped.to(torch.float32),
             size=(resized_h, resized_w),
             mode=mode,
         )
+        if frame.dtype == torch.uint8:
+            resized = resized.round().clamp(0, 255).to(torch.uint8)
 
         pad_h = target_h - resized_h
         pad_w = target_w - resized_w
