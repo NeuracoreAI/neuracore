@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import time
 import uuid
+from collections.abc import Callable
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
@@ -155,8 +156,17 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
         publish_timer_stats(spec.context_index)
 
 
-def context_worker(spec: ContextSpec) -> ContextResult:
-    """Execute recordings for a single parallel context."""
+def context_worker(
+    spec: ContextSpec,
+    *,
+    before_first_recording: Callable[[], None] | None = None,
+) -> ContextResult:
+    """Execute recordings for a single parallel context.
+
+    Args:
+        before_first_recording: Runs once the producer is logging, before the
+            first recording opens.
+    """
     from tests.integration.platform.data_daemon.shared.db_helpers import (
         wait_for_recording_index_for_source,
     )
@@ -197,6 +207,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         marker_names = session.marker_names
         try:
             session.start()
+            if before_first_recording is not None:
+                before_first_recording()
             for recording_ordinal in range(spec.recordings_per_context):
                 recording_capture_start_s = time.time()
                 recording_capture_stop_s = recording_capture_start_s + case.duration_sec
@@ -358,6 +370,7 @@ def run_case_contexts(
     *,
     specs: list[ContextSpec] | None = None,
     wait_for_traces: bool = False,
+    before_first_recording: Callable[[], None] | None = None,
 ) -> list[ContextResult]:
     """Run all parallel contexts for a matrix test case.
 
@@ -371,6 +384,8 @@ def run_case_contexts(
             via :func:`build_context_specs`.
         wait_for_traces: When ``True``, waits for all traces to be written to
             disk after running.
+        before_first_recording: Runs once the producer is logging, before the
+            first recording opens. Single-context cases only.
 
     Returns:
         List of result dicts from each context worker, one per spec.
@@ -385,7 +400,7 @@ def run_case_contexts(
             nc.create_dataset(specs[0].dataset_name)
 
     if not wait_for_traces:
-        return _run_context_specs(case, specs)
+        return _run_context_specs(case, specs, before_first_recording)
 
     from tests.integration.platform.data_daemon.shared.db_helpers import (
         latching_trace_write_observer,
@@ -394,7 +409,7 @@ def run_case_contexts(
 
     # A late writer is reaped during the wait below, so observe across it.
     with latching_trace_write_observer() as observed:
-        results = _run_context_specs(case, specs)
+        results = _run_context_specs(case, specs, before_first_recording)
         wait_for_all_traces_written(
             results=results,
             observed=observed,
@@ -406,10 +421,16 @@ def run_case_contexts(
 def _run_context_specs(
     case: DataDaemonTestCase,
     specs: list[ContextSpec],
+    before_first_recording: Callable[[], None] | None = None,
 ) -> list[ContextResult]:
     """Run *specs* in-process or across a pool, per the case's parallelism."""
     if case.parallel_contexts == 1:
-        return [context_worker(specs[0])]
+        return [context_worker(specs[0], before_first_recording=before_first_recording)]
+    if before_first_recording is not None:
+        raise ValueError(
+            "before_first_recording needs parallel_contexts=1: pool workers "
+            "cannot call back into this process"
+        )
 
     process_context = multiprocessing.get_context("spawn")
     with (
