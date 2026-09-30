@@ -130,6 +130,8 @@ class DistributedTrainer:
 
         logger.info(f"Process {rank} using device: {self.device}")
 
+        torch.set_float32_matmul_precision("high")
+
         # Set up the model for distributed training
         self.model = model.to(self.device)
 
