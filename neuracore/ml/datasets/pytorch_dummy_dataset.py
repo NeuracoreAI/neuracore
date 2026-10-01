@@ -21,7 +21,10 @@ from neuracore_types import (
 
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import (
+    PytorchNeuracoreDataset,
+    SampleIdentity,
+)
 from neuracore.ml.utils.embodiment_names import normalize_data_names
 
 logger = logging.getLogger(__name__)
@@ -115,6 +118,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         )
 
         self._initialize_dataset_statistics()
+        self._build_episode_layout()
         self._samples_by_robot = {
             robot_id: self._generate_sample(robot_id) for robot_id in self._robot_ids
         }
@@ -268,6 +272,55 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             outputs=outputs,
             outputs_mask=outputs_mask,
             batch_size=1,
+        )
+
+    def _build_episode_layout(self) -> None:
+        """Spread samples across episodes in contiguous blocks.
+
+        Rollout folders need a recording id and a timestep. Dummy episodes are
+        synthetic, so the layout is built once and then read by
+        ``get_sample_identity``.
+        """
+        episode_count = max(self.num_recordings, 1)
+        base, extra = divmod(self.num_samples, episode_count)
+        self.episode_indices: list[int] = []
+        self.episode_start_offsets: list[int] = []
+        self._episode_recording_ids: list[str] = []
+        self._episode_robot_ids: list[str] = []
+        offset = 0
+        for episode_idx in range(episode_count):
+            count = base + (1 if episode_idx < extra else 0)
+            self.episode_start_offsets.append(offset)
+            self.episode_indices.extend([episode_idx] * count)
+            self._episode_recording_ids.append(f"dummy-episode-{episode_idx}")
+            self._episode_robot_ids.append(
+                self._robot_ids[episode_idx % len(self._robot_ids)]
+            )
+            offset += count
+
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return the recording, timestep, and robot for a sample index.
+
+        Args:
+            idx: Flat sample index, the same index ``__getitem__`` accepts.
+
+        Returns:
+            Identity used to name a saved rollout.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        if idx < 0:
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(
+                f"Index {idx} out of bounds for dataset of size {len(self)}"
+            )
+        episode_idx = self.episode_indices[idx]
+        return SampleIdentity(
+            recording_id=self._episode_recording_ids[episode_idx],
+            timestep=idx - self.episode_start_offsets[episode_idx],
+            robot_id=self._episode_robot_ids[episode_idx],
         )
 
     def load_sample(
