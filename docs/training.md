@@ -141,7 +141,7 @@ algorithm_name: diffusion_policy
 epochs: 100
 batch_size: auto
 frequency: 10
-validation_split: 0.2
+validation_split: 0.2  # recording-wise split
 
 input_data_types:
   - JOINT_POSITIONS
@@ -190,7 +190,7 @@ defaults:
 seed: 42
 epochs: 100
 output_prediction_horizon: 100
-validation_split: 0.2
+validation_split: 0.2  # recording-wise split
 logging_frequency: 50
 keep_last_n_checkpoints: 5
 device: null  # e.g., "cuda:0", "mps", "cpu"
