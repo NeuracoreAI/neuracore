@@ -699,6 +699,44 @@ class TestConvertOmegaconfToPython:
         assert isinstance(result["optimizer"]["betas"], list)
 
 
+class TestUploadValidationRollouts:
+    def test_enqueues_png_and_json_under_the_job_prefix(self, handler):
+        epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
+        point_dir = epoch_dir / "rec" / "point_000001"
+        image_path = point_dir / "inputs" / "images" / "rgb" / "cam.png"
+        json_path = point_dir / "inputs" / "state_input.json"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(b"png")
+        json_path.write_text("{}\n", encoding="utf-8")
+
+        with patch.object(handler, "_submit_upload") as submit:
+            handler.upload_validation_rollouts(epoch_dir)
+
+        uploaded = {
+            call.kwargs["remote_filepath"]: (
+                call.kwargs["content_type"],
+                call.kwargs["delete_on_success"],
+            )
+            for call in submit.call_args_list
+        }
+        assert uploaded[
+            "validation-rollouts/epoch_0005/rec/point_000001/inputs/images/rgb/cam.png"
+        ] == ("image/png", True)
+        assert uploaded[
+            "validation-rollouts/epoch_0005/rec/point_000001/inputs/state_input.json"
+        ] == ("application/json", True)
+
+    def test_local_training_does_not_upload(self, local_handler):
+        epoch_dir = local_handler.local_dir / "validation-rollouts" / "epoch_0005"
+        epoch_dir.mkdir(parents=True)
+        (epoch_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+        with patch.object(local_handler, "_submit_upload") as submit:
+            local_handler.upload_validation_rollouts(epoch_dir)
+
+        submit.assert_not_called()
+
+
 def _serialize_checkpoint(data: dict) -> bytes:
     """Serialize a checkpoint dict to bytes via torch.save."""
     buffer = io.BytesIO()
