@@ -3,7 +3,10 @@
 from neuracore_types import CrossEmbodimentDescription, DataType, NCDataStats
 
 from neuracore.ml import BatchedTrainingSamples
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import (
+    PytorchNeuracoreDataset,
+    SampleIdentity,
+)
 
 
 class SingleSampleDataset(PytorchNeuracoreDataset):
@@ -42,6 +45,34 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
     def __getitem__(self, idx: int) -> BatchedTrainingSamples:
         """Get a training sample."""
         return self.load_sample(idx)
+
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return a synthetic identity for this decoy dataset.
+
+        Args:
+            idx: Flat sample index.
+
+        Returns:
+            One recording per index at timestep 0, using a robot from the
+            embodiment description.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        if idx < 0:
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(
+                f"Index {idx} out of bounds for dataset of size {len(self)}"
+            )
+        robot_ids = list(self.input_cross_embodiment_description) or list(
+            self.output_cross_embodiment_description
+        )
+        return SampleIdentity(
+            recording_id=f"single-sample-{idx}",
+            timestep=0,
+            robot_id=robot_ids[idx % len(robot_ids)],
+        )
 
     def load_sample(
         self, episode_idx: int, timestep: int | None = None
