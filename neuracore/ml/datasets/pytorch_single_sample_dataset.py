@@ -3,7 +3,10 @@
 from neuracore_types import CrossEmbodimentDescription, DataType, NCDataStats
 
 from neuracore.ml import BatchedTrainingSamples
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import (
+    PytorchNeuracoreDataset,
+    SampleIdentity,
+)
 
 
 class SingleSampleDataset(PytorchNeuracoreDataset):
@@ -16,13 +19,24 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
     def __init__(
         self,
         sample: BatchedTrainingSamples,
+        robot_id: str,
         input_cross_embodiment_description: CrossEmbodimentDescription,
         output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int,
         num_recordings: int,
         dataset_statistics: dict[str, dict[DataType, list[NCDataStats]]],
     ):
-        """Initialize the decoy dataset."""
+        """Initialize the SingleSampleDataset.
+
+        Args:
+            sample: The sample every index returns.
+            robot_id: ID of the robot the sample was loaded from.
+            input_cross_embodiment_description: Per-robot input names.
+            output_cross_embodiment_description: Per-robot output names.
+            output_prediction_horizon: Number of future timesteps predicted.
+            num_recordings: How many samples the dataset reports.
+            dataset_statistics: Statistics of the mimicked dataset.
+        """
         super().__init__(
             num_recordings=num_recordings,
             input_cross_embodiment_description=input_cross_embodiment_description,
@@ -32,6 +46,7 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
 
         # Create a template sample from the first sample of the dataset
         self._sample = sample
+        self._robot_id = robot_id
         self._num_recordings = num_recordings
         self._dataset_statistics = dataset_statistics
 
@@ -42,6 +57,26 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
     def __getitem__(self, idx: int) -> BatchedTrainingSamples:
         """Get a training sample."""
         return self.load_sample(idx)
+
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return a synthetic identity for this SingleSampleDataset.
+
+        Args:
+            idx: Flat sample index.
+
+        Returns:
+            One recording per index at timestep 0, on the robot the stored
+            sample came from.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        self._require_valid_sample_index(idx)
+        return SampleIdentity(
+            recording_id=f"single-sample-{idx}",
+            timestep=0,
+            robot_id=self._robot_id,
+        )
 
     def load_sample(
         self, episode_idx: int, timestep: int | None = None

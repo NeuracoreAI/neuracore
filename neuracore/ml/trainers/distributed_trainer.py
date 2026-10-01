@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -11,12 +12,13 @@ import torch.distributed as dist
 import torch.nn as nn
 from neuracore_types import TrainingJobStatus, TrainingProgress
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
+from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.logging.system_metrics import (
     SYSTEM_METRIC_PREFIX,
     SystemMetricsCollector,
@@ -28,6 +30,13 @@ from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
+from neuracore.ml.utils.validation_rollouts import (
+    ValidationRolloutConfig,
+    rollout_root_dir,
+    save_validation_rollouts,
+    select_validation_rollout_indices,
+    write_rollout_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +87,7 @@ class DistributedTrainer:
         storage_handler: TrainingStorageHandler,
         output_dir: Path,
         num_epochs: int,
+        validation_rollout_config: ValidationRolloutConfig,
         log_freq: int = 50,
         system_log_freq: int = 0,
         train_device_preprocessing: (
@@ -105,6 +115,8 @@ class DistributedTrainer:
             storage_handler: Handler for model storage
             output_dir: Directory for output files
             num_epochs: Number of epochs to train
+            validation_rollout_config: Configuration for validation rollouts.
+                A config with ``num_points=0`` disables them.
             log_freq: Frequency to log metrics (in steps)
             system_log_freq: Frequency to log host and accelerator utilisation
                 (in steps). 0 disables it. Sampled far less often than the
@@ -125,9 +137,13 @@ class DistributedTrainer:
             rank: Rank of this process
             world_size: Total number of processes/GPUs
             device: Optional device to use for training
+
         """
         if keep_last_n_checkpoints <= 0:
-            raise ValueError("keep_last_n_checkpoints must be greater than 0")
+            raise ValueError(
+                "keep_last_n_checkpoints must be greater than 0, "
+                f"got {keep_last_n_checkpoints}."
+            )
         if checkpoint_saving_frequency <= 0:
             raise ValueError("checkpoint_saving_frequency must be greater than 0")
 
@@ -172,6 +188,10 @@ class DistributedTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
+        self.validation_rollout_config = validation_rollout_config
+        self._selected_rollout_validation_indices: list[int] = []
+        self._input_points_saved = False
+        self._run_rollout_validation = self._can_run_rollout_validation()
         self.global_train_step = 0
         self.global_val_step = 0
         self._seconds_per_epoch_ema: float | None = None
@@ -343,6 +363,64 @@ class DistributedTrainer:
         self._log_scalars(avg_metrics, epoch, prefix="val/epoch/metrics")
         return avg_losses
 
+    def _can_run_rollout_validation(self) -> bool:
+        """Return whether rank, rollout config and num_epochs allow rollouts."""
+        config = self.validation_rollout_config
+        if self.rank != 0 or config.num_points == 0:
+            return False
+        if config.frequency > self.num_epochs:
+            logger.warning(
+                "Validation rollout frequency is %s but only %s epoch(s) will "
+                "run, so no rollouts will be saved.",
+                config.frequency,
+                self.num_epochs,
+            )
+            return False
+        return True
+
+    def _save_rollout_validation_manifest(self) -> None:
+        """Queue writing and uploading the manifest of the selected rollout points."""
+        validation_subset = cast(Subset, self.val_loader.dataset)
+        validation_dataset = cast(PytorchNeuracoreDataset, validation_subset.dataset)
+        points = [
+            validation_dataset.get_sample_identity(i)
+            for i in self._selected_rollout_validation_indices
+        ]
+        root_dir = rollout_root_dir(self.output_dir)
+        self.storage_handler.submit_rollout_save(
+            partial(write_rollout_manifest, root_dir, points)
+        )
+        self.storage_handler.submit_rollout_save(
+            partial(self.storage_handler.upload_rollout_manifest, root_dir)
+        )
+
+    def _save_validation_rollouts(self, epoch: int) -> None:
+        """Save rollouts for the selected validation points if epoch is due."""
+        try:
+            validation_dataset = cast(
+                PytorchNeuracoreDataset, self.val_loader.dataset.dataset
+            )
+            save_validation_rollouts(
+                model=cast(NeuracoreModel, self.get_model_without_ddp()),
+                dataset=validation_dataset,
+                selected_indices=self._selected_rollout_validation_indices,
+                batch_size=self.val_loader.batch_size,
+                device=self.device,
+                inference_device_preprocessing=self.inference_device_preprocessing,
+                output_dir=self.output_dir,
+                epoch=epoch,
+                storage_handler=self.storage_handler,
+                save_input_points=not self._input_points_saved,
+            )
+            self._input_points_saved = True
+        except Exception:
+            logger.error(
+                "Failed to save validation rollouts for epoch %s. "
+                "Training will continue.",
+                epoch,
+                exc_info=True,
+            )
+
     def train(self, start_epoch: int = 0) -> None:
         """Run the training loop.
 
@@ -360,9 +438,28 @@ class DistributedTrainer:
 
         self._seconds_per_epoch_ema = None
         self._seconds_per_checkpoint_ema = None
+        # A resumed run saves the input points again. Same seed, same points.
+        self._input_points_saved = False
 
         try:
             start_epoch = max(start_epoch, 1)
+            if self._run_rollout_validation:
+                try:
+                    self._selected_rollout_validation_indices = (
+                        select_validation_rollout_indices(
+                            self.val_loader,
+                            self.validation_rollout_config,
+                        )
+                    )
+                    self._save_rollout_validation_manifest()
+                except Exception:
+                    logger.error(
+                        "Failed to set up validation rollouts. Rollouts are "
+                        "disabled and training will continue.",
+                        exc_info=True,
+                    )
+                    self._run_rollout_validation = False
+
             for epoch in range(start_epoch, self.num_epochs + 1):
                 # Set epoch for distributed sampler to
                 # ensure different shuffling each epoch
@@ -402,6 +499,11 @@ class DistributedTrainer:
                 validate_t0 = time.perf_counter()
                 with torch.no_grad():
                     self.validate(epoch)
+                    if (
+                        self._run_rollout_validation
+                        and epoch % self.validation_rollout_config.frequency == 0
+                    ):
+                        self._save_validation_rollouts(epoch)
 
                 train_val_seconds = train_elapsed + (time.perf_counter() - validate_t0)
 
@@ -444,6 +546,7 @@ class DistributedTrainer:
                 # landed so the process can't exit — and the training
                 # VM/container be torn down — while the final checkpoint is
                 # still mid-upload.
+                self.storage_handler.wait_for_rollout_saves()
                 self.storage_handler.wait_for_pending_uploads()
                 # Progress updates are also sent off-thread, so flush the last
                 # one rather than letting it die with the worker.

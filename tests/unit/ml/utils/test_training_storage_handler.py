@@ -777,6 +777,98 @@ class TestConvertOmegaconfToPython:
         assert isinstance(result["optimizer"]["betas"], list)
 
 
+class TestUploadValidationRollouts:
+    @staticmethod
+    def _write_epoch(local_dir):
+        epoch_dir = local_dir / "validation_rollouts" / "outputs" / "epoch_0005"
+        json_path = epoch_dir / "rec" / "point_000001.json"
+        image_path = local_dir / "validation_rollouts" / "input_points" / "cam.jpeg"
+        json_path.parent.mkdir(parents=True)
+        image_path.parent.mkdir(parents=True)
+        json_path.write_text("{}\n", encoding="utf-8")
+        image_path.write_bytes(b"jpeg")
+        return epoch_dir, json_path, image_path
+
+    def test_uploads_json_under_its_path_in_the_output_directory(self, handler):
+        epoch_dir, json_path, _ = self._write_epoch(handler.local_dir)
+
+        with patch.object(handler, "upload_file", return_value=True) as upload:
+            handler.upload_validation_rollouts(epoch_dir)
+
+        uploaded = {call.args[1]: call.args[2] for call in upload.call_args_list}
+        assert uploaded == {
+            "validation_rollouts/outputs/epoch_0005/rec/point_000001.json": (
+                "application/json"
+            )
+        }
+        assert not json_path.exists()
+
+    def test_uploads_jpeg_with_its_content_type(self, handler):
+        _, _, image_path = self._write_epoch(handler.local_dir)
+
+        with patch.object(handler, "upload_file", return_value=True) as upload:
+            handler.upload_validation_rollouts(image_path.parent)
+
+        uploaded = {call.args[1]: call.args[2] for call in upload.call_args_list}
+        assert uploaded == {"validation_rollouts/input_points/cam.jpeg": "image/jpeg"}
+        assert not image_path.exists()
+
+    def test_failed_file_is_kept_and_the_rest_still_upload(self, handler):
+        epoch_dir, json_path, _ = self._write_epoch(handler.local_dir)
+        other = epoch_dir / "rec" / "point_000002.json"
+        other.write_text("{}\n", encoding="utf-8")
+
+        def _upload(path, remote_filepath, content_type):
+            if path == json_path:
+                raise RuntimeError("network down")
+            return True
+
+        with patch.object(handler, "upload_file", side_effect=_upload) as upload:
+            handler.upload_validation_rollouts(epoch_dir)
+
+        assert upload.call_count == 2
+        assert json_path.exists()
+        assert not other.exists()
+
+    def test_local_training_does_not_upload(self, local_handler):
+        epoch_dir = local_handler.local_dir / "validation_rollouts" / "outputs"
+        epoch_dir.mkdir(parents=True)
+        (epoch_dir / "point.json").write_text("{}\n", encoding="utf-8")
+
+        with patch.object(local_handler, "upload_file") as upload:
+            local_handler.upload_validation_rollouts(epoch_dir)
+            local_handler.upload_rollout_manifest(epoch_dir.parent)
+
+        upload.assert_not_called()
+        assert (epoch_dir / "point.json").exists()
+
+    def test_manifest_uploads_from_the_rollout_root(self, handler):
+        root = handler.local_dir / "validation_rollouts"
+        root.mkdir(parents=True)
+        manifest = root / "manifest.json"
+        manifest.write_text("{}\n", encoding="utf-8")
+
+        with patch.object(handler, "upload_file", return_value=True) as upload:
+            handler.upload_rollout_manifest(root)
+
+        assert [call.args[1] for call in upload.call_args_list] == [
+            "validation_rollouts/manifest.json"
+        ]
+        assert not manifest.exists()
+
+    def test_a_file_cannot_be_deleted_still_counts_as_uploaded(self, handler):
+        epoch_dir, _, _ = self._write_epoch(handler.local_dir)
+        (epoch_dir / "rec" / "point_000002.json").write_text("{}\n", encoding="utf-8")
+
+        with (
+            patch.object(handler, "upload_file", return_value=True) as upload,
+            patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+        ):
+            handler.upload_validation_rollouts(epoch_dir)
+
+        assert upload.call_count == 2
+
+
 def _serialize_checkpoint(data: dict) -> bytes:
     """Serialize a checkpoint dict to bytes via torch.save."""
     buffer = io.BytesIO()
