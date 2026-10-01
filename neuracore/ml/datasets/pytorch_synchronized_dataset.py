@@ -649,11 +649,11 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         Raises:
             IndexError: If ``idx`` is outside the dataset.
         """
-        if idx < 0:
-            idx += len(self)
         if idx < 0 or idx >= len(self):
             raise IndexError(
-                f"Index {idx} out of bounds for dataset of size {len(self)}"
+                f"Sample index {idx} is outside the dataset of length {len(self)}. "
+                "Expected an index in "
+                f"[0, {len(self)})."
             )
         episode_idx = self.episode_indices[idx]
         timestep = idx - self.episode_start_offsets[episode_idx]
