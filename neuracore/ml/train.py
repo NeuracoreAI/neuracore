@@ -539,6 +539,11 @@ def run_training(
             rank=rank,
             world_size=world_size,
             device=device,
+            validation_rollout_points=int(cfg.get("validation_rollout_points", 0)),
+            validation_rollout_frequency=int(
+                cfg.get("validation_rollout_frequency", 5)
+            ),
+            validation_rollout_seed=int(cfg.seed),
         )
 
         # Resume from checkpoint if specified
