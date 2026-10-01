@@ -241,12 +241,15 @@ class TrainingStorageHandler(UploadStorageMixin):
         for path in sorted(epoch_dir.rglob("*")):
             if not path.is_file():
                 continue
-            if path.suffix == ".png":
-                content_type = "image/png"
+            if path.suffix == ".jpeg":
+                content_type = "image/jpeg"
             elif path.suffix == ".json":
                 content_type = "application/json"
             else:
-                content_type = "application/octet-stream"
+                raise ValueError(
+                    f"Validation rollout file {path} has suffix {path.suffix!r}. "
+                    "Expected .jpeg or .json."
+                )
             self._submit_upload(
                 path,
                 remote_filepath=path.relative_to(remote_root).as_posix(),

@@ -700,10 +700,10 @@ class TestConvertOmegaconfToPython:
 
 
 class TestUploadValidationRollouts:
-    def test_enqueues_png_and_json_under_the_job_prefix(self, handler):
+    def test_enqueues_jpeg_and_json_under_the_job_prefix(self, handler):
         epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
         point_dir = epoch_dir / "rec" / "point_000001"
-        image_path = point_dir / "inputs" / "images" / "rgb" / "cam.png"
+        image_path = point_dir / "inputs" / "images" / "rgb" / "cam.jpeg"
         json_path = point_dir / "inputs" / "state_input.json"
         image_path.parent.mkdir(parents=True)
         image_path.write_bytes(b"png")
@@ -720,8 +720,8 @@ class TestUploadValidationRollouts:
             for call in submit.call_args_list
         }
         assert uploaded[
-            "validation-rollouts/epoch_0005/rec/point_000001/inputs/images/rgb/cam.png"
-        ] == ("image/png", True)
+            "validation-rollouts/epoch_0005/rec/point_000001/inputs/images/rgb/cam.jpeg"
+        ] == ("image/jpeg", True)
         assert uploaded[
             "validation-rollouts/epoch_0005/rec/point_000001/inputs/state_input.json"
         ] == ("application/json", True)

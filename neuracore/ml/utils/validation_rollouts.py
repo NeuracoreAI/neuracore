@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TypeAlias
@@ -64,61 +63,34 @@ _SKIPPED_TENSOR_FIELDS = frozenset({
 
 
 def select_validation_rollout_indices(
-    dataset: PytorchNeuracoreDataset,
     validation_indices: Sequence[int],
     num_points: int,
     seed: int,
 ) -> list[int]:
-    """Pick ``num_points`` validation samples, spread across episodes.
-
-    The same seed always returns the same indices, so later epochs snapshot
-    the same timesteps. Points are taken round-robin across recordings so one
-    long episode does not fill the budget.
+    """Randomly select ``num_points`` validation samples from the validation indices.
 
     Args:
-        dataset: Dataset that owns ``validation_indices``.
         validation_indices: Sample indices that belong to the validation split.
-        num_points: How many indices to return. Zero returns an empty list.
-        seed: Seed for the episode order and the timestep chosen in each one.
+        num_points: How many indices to return.
+        seed: Seed for the random draw.
 
     Returns:
-        Dataset indices. Fewer than ``num_points`` when the validation split
-        is smaller than the request.
+        ``num_points`` indices drawn from ``validation_indices`` without
+        replacement.
+
+    Raises:
+        ValueError: If ``num_points`` is not positive, or if it is greater
+            than the number of validation indices.
     """
-    if num_points <= 0 or len(validation_indices) == 0:
-        return []
-
-    indices_by_recording: dict[str, list[int]] = defaultdict(list)
-    for index in validation_indices:
-        identity = dataset.get_sample_identity(index)
-        indices_by_recording[identity.recording_id].append(index)
-
+    available = len(validation_indices)
+    if num_points <= 0 or num_points > available:
+        raise ValueError(
+            "num_points must be positive and no greater than the number of "
+            f"validation samples ({available}), got {num_points}."
+        )
     generator = np.random.default_rng(seed)
-    recording_ids = sorted(indices_by_recording)
-    recording_order = [
-        recording_ids[int(position)]
-        for position in generator.permutation(len(recording_ids))
-    ]
-    pools: dict[str, deque[int]] = {}
-    for recording_id in recording_order:
-        indices = indices_by_recording[recording_id]
-        order = generator.permutation(len(indices))
-        pools[recording_id] = deque(indices[int(position)] for position in order)
-
-    selected: list[int] = []
-    while len(selected) < num_points:
-        took_a_point = False
-        for recording_id in recording_order:
-            pool = pools[recording_id]
-            if not pool:
-                continue
-            selected.append(pool.popleft())
-            took_a_point = True
-            if len(selected) == num_points:
-                break
-        if not took_a_point:
-            break
-    return selected
+    positions = generator.choice(available, size=num_points, replace=False)
+    return [validation_indices[int(position)] for position in positions]
 
 
 def rollout_epoch_dir(output_dir: Path, epoch: int) -> Path:
@@ -186,7 +158,7 @@ def write_rollout_point(
 
     Args:
         point_dir: Destination directory for this recording timestep.
-        inputs: Named model inputs. Images are written as PNG files and the
+        inputs: Named model inputs. Images are written as JPEG files and the
             other traces go to ``state_input.json``.
         predictions: Named inference outputs, written as horizon lists.
         ground_truth: Named dataset outputs, written as horizon lists.
@@ -243,9 +215,7 @@ def save_validation_rollouts(
     Returns:
         The epoch directory, or None when no points were selected.
     """
-    selected = select_validation_rollout_indices(
-        dataset, validation_indices, num_points, seed
-    )
+    selected = select_validation_rollout_indices(validation_indices, num_points, seed)
     if not selected:
         return None
 
@@ -386,36 +356,49 @@ def _payload_tensor(data: BatchedNCData) -> torch.Tensor:
 
 
 def _write_input_images(image_root: Path, inputs: NamedTraces) -> None:
-    """Write RGB and depth PNGs for the input timestep."""
+    """Write RGB and depth JPEGs for the input timestep."""
     for data_type, traces in inputs.items():
         if data_type not in _IMAGE_DATA_TYPES:
             continue
         directory = image_root / _IMAGE_DIR_NAMES[data_type]
         directory.mkdir(parents=True, exist_ok=True)
+        expected = (
+            BatchedRGBData if data_type is DataType.RGB_IMAGES else BatchedDepthData
+        )
         for trace_name, data in traces.items():
-            path = directory / f"{to_safe_name(trace_name)}.png"
+            if not isinstance(data, expected):
+                raise TypeError(
+                    f"{data_type.value} trace {trace_name!r} must be "
+                    f"{expected.__name__} to save a validation rollout image, "
+                    f"got {type(data).__name__}."
+                )
+            path = directory / f"{to_safe_name(trace_name)}.jpeg"
+            frame = data.frame[0, 0].detach().cpu()
             if isinstance(data, BatchedRGBData):
-                _write_rgb_png(data.frame[0, 0].detach().cpu(), path)
-            elif isinstance(data, BatchedDepthData):
-                _write_depth_png(data.frame[0, 0].detach().cpu(), path)
+                _write_rgb_jpeg(frame, path)
+            else:
+                _write_depth_jpeg(frame, path)
 
 
-def _write_rgb_png(frame: torch.Tensor, path: Path) -> None:
+def _write_rgb_jpeg(frame: torch.Tensor, path: Path) -> None:
     """Write one RGB frame. Training frames are float pixels in ``[0, 255]``."""
     image = _channel_last_image(frame).numpy()
+    # Remove training frame trailing dimension if grayscale
+    if image.ndim == 3 and image.shape[-1] == 1:
+        image = image[..., 0]
     if image.dtype != np.uint8:
         if image.size and float(np.max(image)) <= 1.0:
             image = image * 255.0
         image = np.clip(image, 0, 255).astype(np.uint8)
-    Image.fromarray(image).save(path, format="PNG")
+    Image.fromarray(image).save(path, format="JPEG")
 
 
-def _write_depth_png(frame: torch.Tensor, path: Path) -> None:
+def _write_depth_jpeg(frame: torch.Tensor, path: Path) -> None:
     """Write one depth frame using the platform's RGB depth encoding."""
     depth = np.squeeze(frame.numpy()).astype(np.float32)
     if depth.ndim != 2:
         raise ValueError(f"Depth frame must be 2D after squeezing, got {depth.shape}.")
-    Image.fromarray(depth_to_rgb(depth)).save(path, format="PNG")
+    Image.fromarray(depth_to_rgb(depth)).save(path, format="JPEG")
 
 
 def _channel_last_image(frame: torch.Tensor) -> torch.Tensor:
