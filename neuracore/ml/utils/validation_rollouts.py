@@ -1,13 +1,14 @@
 """Save a fixed sample of validation timesteps as trajectory rollouts.
 
-Metric validation still walks every validation sample. This module only
-handles the smaller snapshot: which indices to keep, and how to write the
-images and JSON for one of those points.
+Metric validation still walks every validation sample. This module picks a
+smaller set of those timesteps, runs the inference forward on each one, and
+writes the images and JSON.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -15,16 +16,29 @@ from typing import TypeAlias
 
 import numpy as np
 import torch
-from neuracore_types import BatchedDepthData, BatchedNCData, BatchedRGBData, DataType
+from neuracore_types import (
+    BatchedDepthData,
+    BatchedNCData,
+    BatchedRGBData,
+    DataType,
+    EmbodimentDescription,
+)
 from neuracore_types.utils.depth_utils import depth_to_rgb
 from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 
+from neuracore.ml.core.ml_types import BatchedInferenceInputs
+from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.datasets.pytorch_neuracore_dataset import (
     PytorchNeuracoreDataset,
     SampleIdentity,
 )
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.utils.embodiment_names import assign_names_to_model_outputs
 from neuracore.ml.utils.json_serialization import JsonValue
+from neuracore.ml.utils.preprocessing import apply_device_preprocessing
+
+logger = logging.getLogger(__name__)
 
 NamedTraces: TypeAlias = Mapping[DataType, Mapping[str, BatchedNCData]]
 
@@ -193,6 +207,141 @@ def write_rollout_point(
         ground_truth,
         horizon=True,
     )
+
+
+def save_validation_rollouts(
+    model: NeuracoreModel,
+    dataset: PytorchNeuracoreDataset,
+    validation_indices: Sequence[int],
+    device: torch.device,
+    inference_device_preprocessing: tuple[
+        PreprocessingConfiguration, PreprocessingConfiguration
+    ],
+    output_dir: Path,
+    epoch: int,
+    num_points: int,
+    seed: int,
+) -> Path | None:
+    """Run inference on the chosen validation points and write their files.
+
+    Each index is loaded on its own. Samples are already batch size 1, which
+    is what ``forward`` expects, so this does not go through the validation
+    loader. The caller decides which epochs to call this on.
+
+    Args:
+        model: Unwrapped model. Called in eval mode for this function only.
+        dataset: Dataset that owns ``validation_indices``.
+        validation_indices: Every sample in the validation split.
+        device: Device the model is on.
+        inference_device_preprocessing: Device-side input and output
+            preprocessing, the same pair validation uses.
+        output_dir: Training output directory.
+        epoch: Epoch number used in the directory name.
+        num_points: How many points to save.
+        seed: Seed for which points are chosen.
+
+    Returns:
+        The epoch directory, or None when no points were selected.
+    """
+    selected = select_validation_rollout_indices(
+        dataset, validation_indices, num_points, seed
+    )
+    if not selected:
+        return None
+
+    epoch_dir = rollout_epoch_dir(output_dir, epoch)
+    logger.info(
+        "Saving %s validation rollout point(s) for epoch %s",
+        len(selected),
+        epoch,
+    )
+    was_training = model.training
+    model.eval()
+    identities: list[SampleIdentity] = []
+    try:
+        with torch.no_grad():
+            for index in selected:
+                identity = dataset.get_sample_identity(index)
+                _save_one_rollout_point(
+                    model=model,
+                    dataset=dataset,
+                    index=index,
+                    identity=identity,
+                    device=device,
+                    inference_device_preprocessing=inference_device_preprocessing,
+                    point_dir=rollout_point_dir(
+                        epoch_dir, identity.recording_id, identity.timestep
+                    ),
+                )
+                identities.append(identity)
+    finally:
+        model.train(was_training)
+
+    write_rollout_manifest(epoch_dir, epoch, identities)
+    return epoch_dir
+
+
+def _save_one_rollout_point(
+    model: NeuracoreModel,
+    dataset: PytorchNeuracoreDataset,
+    index: int,
+    identity: SampleIdentity,
+    device: torch.device,
+    inference_device_preprocessing: tuple[
+        PreprocessingConfiguration, PreprocessingConfiguration
+    ],
+    point_dir: Path,
+) -> None:
+    """Load one validation sample, predict its horizon, and write the point."""
+    batch = dataset[index].to(device)
+    apply_device_preprocessing(batch, *inference_device_preprocessing)
+    predictions = model.forward(
+        BatchedInferenceInputs(
+            inputs=batch.inputs,
+            inputs_mask=batch.inputs_mask,
+            batch_size=batch.batch_size,
+        )
+    )
+    input_description = _embodiment_description(
+        dataset.input_cross_embodiment_description, identity.robot_id
+    )
+    output_description = _embodiment_description(
+        dataset.output_cross_embodiment_description, identity.robot_id
+    )
+    write_rollout_point(
+        point_dir,
+        inputs=assign_names_to_model_outputs(
+            batch.inputs, input_description, masks=batch.inputs_mask
+        ),
+        predictions=assign_names_to_model_outputs(
+            predictions, output_description, masks=batch.outputs_mask
+        ),
+        ground_truth=assign_names_to_model_outputs(
+            batch.outputs, output_description, masks=batch.outputs_mask
+        ),
+    )
+
+
+def _embodiment_description(
+    descriptions: Mapping[str, EmbodimentDescription],
+    robot_id: str,
+) -> EmbodimentDescription:
+    """Return the embodiment description for one robot.
+
+    Args:
+        descriptions: Per-robot input or output descriptions.
+        robot_id: Robot that recorded the sample.
+
+    Returns:
+        The description ``assign_names_to_model_outputs`` names traces with.
+
+    Raises:
+        KeyError: If this robot has no description.
+    """
+    try:
+        return descriptions[robot_id]
+    except KeyError as error:
+        raise KeyError(f"No embodiment description for robot {robot_id}.") from error
 
 
 def write_rollout_manifest(
