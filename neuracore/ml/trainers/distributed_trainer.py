@@ -11,13 +11,12 @@ import torch.distributed as dist
 import torch.nn as nn
 from neuracore_types import TrainingJobStatus, TrainingProgress
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler, Subset
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.logging.system_metrics import (
     SYSTEM_METRIC_PREFIX,
     SystemMetricsCollector,
@@ -139,13 +138,22 @@ class DistributedTrainer:
                 saved. The same seed keeps those timesteps fixed across epochs.
         """
         if keep_last_n_checkpoints <= 0:
-            raise ValueError("keep_last_n_checkpoints must be greater than 0")
+            raise ValueError(
+                "keep_last_n_checkpoints must be greater than 0, "
+                f"got {keep_last_n_checkpoints}."
+            )
         if checkpoint_saving_frequency <= 0:
             raise ValueError("checkpoint_saving_frequency must be greater than 0")
         if validation_rollout_frequency <= 0:
-            raise ValueError("validation_rollout_frequency must be greater than 0")
+            raise ValueError(
+                "validation_rollout_frequency must be greater than 0, "
+                f"got {validation_rollout_frequency}."
+            )
         if validation_rollout_points < 0:
-            raise ValueError("validation_rollout_points must be 0 or greater")
+            raise ValueError(
+                "validation_rollout_points must be 0 or greater, "
+                f"got {validation_rollout_points}."
+            )
 
         self.device = device or get_default_device(gpu_index=rank)
 
@@ -377,25 +385,13 @@ class DistributedTrainer:
         if epoch % self.validation_rollout_frequency != 0:
             return
 
-        dataset = self.val_loader.dataset
-        if not isinstance(dataset, Subset):
-            logger.warning(
-                "Skipping validation rollouts because the validation "
-                "loader dataset is not a Subset."
-            )
-            return
-        base_dataset = dataset.dataset
-        if not isinstance(base_dataset, PytorchNeuracoreDataset):
-            logger.warning(
-                "Skipping validation rollouts because the validation "
-                "dataset has no sample identity."
-            )
-            return
+        validation_subset = self.val_loader.dataset
+        validation_neuracore_pytorch_dataset = validation_subset.dataset
 
         epoch_dir = save_validation_rollouts(
             model=cast(NeuracoreModel, self.get_model_without_ddp()),
-            dataset=base_dataset,
-            validation_indices=list(dataset.indices),
+            dataset=validation_neuracore_pytorch_dataset,
+            validation_indices=list(validation_subset.indices),
             device=self.device,
             inference_device_preprocessing=self.inference_device_preprocessing,
             output_dir=self.output_dir,
