@@ -222,6 +222,38 @@ class TrainingStorageHandler(UploadStorageMixin):
         for future in futures:
             future.result()
 
+    def upload_validation_rollouts(self, epoch_dir: Path) -> None:
+        """Upload one epoch of rollout files without blocking training.
+
+        Local runs keep the files in ``epoch_dir``. Cloud runs enqueue each
+        file on the same background worker checkpoints use, under
+        ``validation-rollouts/...`` within the training job.
+
+        Args:
+            epoch_dir: Directory produced by ``save_validation_rollouts``.
+        """
+        if not self.log_to_cloud:
+            return
+
+        # epoch_dir is ``<output>/validation-rollouts/epoch_XXXX``. The remote
+        # key is that suffix, which the backend places under the training job.
+        remote_root = epoch_dir.parent.parent
+        for path in sorted(epoch_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix == ".png":
+                content_type = "image/png"
+            elif path.suffix == ".json":
+                content_type = "application/json"
+            else:
+                content_type = "application/octet-stream"
+            self._submit_upload(
+                path,
+                remote_filepath=path.relative_to(remote_root).as_posix(),
+                content_type=content_type,
+                delete_on_success=True,
+            )
+
     def save_checkpoint(self, checkpoint: dict, relative_checkpoint_path: Path) -> None:
         """Save checkpoint to storage.
 
