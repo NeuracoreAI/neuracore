@@ -1,19 +1,36 @@
 """Tests for validation rollout selection and file layout."""
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 import torch
-from neuracore_types import (BatchedEndEffectorPoseData, BatchedJointData,
-                             DataType)
+from neuracore_types import BatchedEndEffectorPoseData, BatchedJointData, DataType
 from PIL import Image
 
 from neuracore.ml.core.ml_types import BatchedInferenceInputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.datasets.pytorch_neuracore_dataset import SampleIdentity
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
-    save_validation_rollouts, select_validation_rollout_indices)
+    save_validation_rollouts,
+    select_validation_rollout_indices,
+)
+
+
+def _storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "neuracore.ml.utils.training_storage_handler.get_current_org",
+        lambda: "test-org",
+    )
+    auth = MagicMock()
+    auth.get_headers.return_value = {"Authorization": "Bearer test"}
+    monkeypatch.setattr(
+        "neuracore.ml.utils.training_storage_handler.get_auth",
+        lambda: auth,
+    )
+    return TrainingStorageHandler(local_dir=str(tmp_path))
 
 
 def test_select_validation_rollout_indices_is_a_deterministic_sample():
@@ -45,7 +62,7 @@ class _ScriptedModel:
         return self.outputs
 
 
-def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path):
+def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path, monkeypatch):
     dataset = PytorchDummyDataset(
         input_cross_embodiment_description={
             "robot_0": {
@@ -74,34 +91,25 @@ def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path):
     sample.outputs[DataType.JOINT_TARGET_POSITIONS][0].value = torch.tensor(
         [[[1.0], [1.1]]]
     )
-    sample.outputs[DataType.END_EFFECTOR_POSES][0].pose = torch.tensor(
-        [
-            [
-                [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-                [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-            ]
-        ]
-    )
-    model = _ScriptedModel(
-        {
-            DataType.JOINT_TARGET_POSITIONS: [
-                BatchedJointData(value=torch.tensor([[[0.1], [0.2], [0.3]]])),
-            ],
-            DataType.END_EFFECTOR_POSES: [
-                BatchedEndEffectorPoseData(
-                    pose=torch.tensor(
-                        [
-                            [
-                                [0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-                                [0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-                            ]
-                        ]
-                    )
-                ),
-            ],
-        }
-    )
+    sample.outputs[DataType.END_EFFECTOR_POSES][0].pose = torch.tensor([[
+        [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    ]])
+    model = _ScriptedModel({
+        DataType.JOINT_TARGET_POSITIONS: [
+            BatchedJointData(value=torch.tensor([[[0.1], [0.2], [0.3]]])),
+        ],
+        DataType.END_EFFECTOR_POSES: [
+            BatchedEndEffectorPoseData(
+                pose=torch.tensor([[
+                    [0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                    [0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                ]])
+            ),
+        ],
+    })
 
+    storage = _storage(tmp_path, monkeypatch)
     epoch_dir = save_validation_rollouts(
         model=model,
         dataset=dataset,
@@ -116,7 +124,9 @@ def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path):
         num_points=1,
         seed=0,
         batch_size=1,
+        storage_handler=storage,
     )
+    storage.wait_for_rollout_saves()
 
     point_dir = epoch_dir / "dummy-sample-0" / "point_000000"
     rgb_path = point_dir / "inputs" / "images" / "rgb" / "wrist\\cam.jpeg"
@@ -204,7 +214,9 @@ class _DistinctSampleDataset(PytorchDummyDataset):
         )
 
 
-def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(tmp_path):
+def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(
+    tmp_path, monkeypatch
+):
     dataset = _DistinctSampleDataset(
         input_cross_embodiment_description={
             "robot_0": {DataType.JOINT_POSITIONS: {0: "shoulder"}},
@@ -219,6 +231,7 @@ def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(tmp_path):
         output_prediction_horizon=2,
     )
     model = _CountingModel()
+    storage = _storage(tmp_path, monkeypatch)
 
     epoch_dir = save_validation_rollouts(
         model=model,
@@ -234,7 +247,9 @@ def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(tmp_path):
         num_points=6,
         seed=0,
         batch_size=4,
+        storage_handler=storage,
     )
+    storage.wait_for_rollout_saves()
 
     assert model.batch_sizes == [4, 2]
     manifest = json.loads((epoch_dir / "manifest.json").read_text())

@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from functools import partial
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import torch
@@ -29,9 +31,9 @@ from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.embodiment_names import assign_names_to_batches
 from neuracore.ml.utils.json_serialization import JsonValue
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
+from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 logger = logging.getLogger(__name__)
-
 
 _IMAGE_DATA_TYPES = frozenset({DataType.RGB_IMAGES, DataType.DEPTH_IMAGES})
 _IMAGE_DIR_NAMES = {
@@ -92,12 +94,13 @@ def save_validation_rollouts(
     num_points: int,
     seed: int,
     batch_size: int,
+    storage_handler: TrainingStorageHandler,
 ) -> Path:
     """Run inference on the chosen validation points and write their files.
 
     Points are collated in chunks of ``batch_size``, and each chunk is one
     ``forward``. Each sample is then named with its own robot and written
-    as images and JSON values. 
+    as images and JSON values.
 
     Args:
         model: Unwrapped model. Called in eval mode for this function only.
@@ -111,9 +114,11 @@ def save_validation_rollouts(
         num_points: How many points to save.
         seed: Seed for which points are chosen.
         batch_size: Validation loader batch size. The last chunk may be smaller.
+        storage_handler: Queues the file write. The caller returns before the
+            files exist. ``wait_for_rollout_saves`` joins that write.
 
     Returns:
-        The epoch directory that holds the saved points.
+        The epoch directory the background write will fill.
     """
     selected = select_validation_rollout_indices(validation_indices, num_points, seed)
     epoch_dir = output_dir / "validation-rollouts" / f"epoch_{epoch:04d}"
@@ -150,6 +155,7 @@ def save_validation_rollouts(
                 }
                 for batch_index, index in enumerate(chunk):
                     identity = dataset.get_sample_identity(index)
+                    identities.append(identity)
                     named_inputs = assign_names_to_batches(
                         batch.inputs,
                         dataset.input_cross_embodiment_description[identity.robot_id],
@@ -165,25 +171,55 @@ def save_validation_rollouts(
                         dataset.output_cross_embodiment_description[identity.robot_id],
                         masks=_mask_at_index(batch.outputs_mask, batch_index),
                     )
-                    _write_rollout_point(
+                    point_dir = (
                         epoch_dir
                         / identity.recording_id
-                        / f"point_{identity.timestep:06d}",
-                        images=_read_image_frames(named_inputs, batch_index),
-                        state=_convert_traces_to_json(named_inputs, batch_index, horizon=False),
-                        predictions=_convert_traces_to_json(
-                            named_predictions, batch_index, horizon=True
-                        ),
-                        ground_truth=_convert_traces_to_json(
-                            named_ground_truth, batch_index, horizon=True
-                        ),
+                        / f"point_{identity.timestep:06d}"
                     )
-                    identities.append(identity)
+                    images = _read_image_frames(named_inputs, batch_index)
+                    state = _convert_traces_to_json(
+                        named_inputs, batch_index, horizon=False
+                    )
+                    prediction_values = _convert_traces_to_json(
+                        named_predictions, batch_index, horizon=True
+                    )
+                    ground_truth = _convert_traces_to_json(
+                        named_ground_truth, batch_index, horizon=True
+                    )
+                    storage_handler.submit_rollout_save(
+                        partial(
+                            _write_rollout_point,
+                            point_dir,
+                            images,
+                            state,
+                            prediction_values,
+                            ground_truth,
+                        )
+                    )
     finally:
         model.train(was_training)
 
-    write_rollout_manifest(epoch_dir, epoch, identities)
+    storage_handler.submit_rollout_save(
+        partial(
+            _write_manifest_and_upload,
+            epoch_dir,
+            epoch,
+            identities,
+            storage_handler,
+        )
+    )
     return epoch_dir
+
+
+def _write_manifest_and_upload(
+    epoch_dir: Path,
+    epoch: int,
+    identities: list[SampleIdentity],
+    storage_handler: TrainingStorageHandler,
+) -> None:
+    """Write the epoch manifest, then enqueue the upload of that epoch."""
+    write_rollout_manifest(epoch_dir, epoch, identities)
+    storage_handler.upload_validation_rollouts(epoch_dir)
 
 
 def _write_rollout_point(
@@ -257,7 +293,7 @@ def _convert_traces_to_json(
                 )
             else:
                 values[trace_name] = tensor.tolist()
-        document[data_type.value] = values
+        document[data_type.value] = cast(JsonValue, values)
     return document
 
 
