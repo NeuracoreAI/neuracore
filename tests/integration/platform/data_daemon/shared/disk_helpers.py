@@ -21,6 +21,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_COLOR_CHANNELS,
     FRAME_GRID_SIZE,
     LOSSLESS_CONTENT_BYTES_PER_PIXEL,
+    MICROSECONDS_PER_SECOND,
     TRAILING_RGB_GAP_FRAME_TOLERANCE,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
@@ -196,6 +197,11 @@ def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[flo
     return trace_timestamps
 
 
+def _round_to_microseconds(timestamp_s: float) -> float:
+    """Round *timestamp_s* the way the data models round a logged timestamp."""
+    return round(timestamp_s * MICROSECONDS_PER_SECOND) / MICROSECONDS_PER_SECOND
+
+
 def _assert_timestamps_match(
     *,
     recording_id: str,
@@ -207,7 +213,7 @@ def _assert_timestamps_match(
     unknowable_timestamps: frozenset[float] = frozenset(),
     condemned_timestamps: dict[float, str] | None = None,
 ) -> None:
-    """Assert all timestamps exactly match the expected list (no tolerance).
+    """Assert all timestamps match the expected list to the microsecond.
 
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
@@ -223,6 +229,16 @@ def _assert_timestamps_match(
     aggregate traces that share the same failure body (e.g. all joints failing
     with the same mismatch pattern).
     """
+    timestamps = [_round_to_microseconds(ts) for ts in timestamps]
+    expected_timestamps = [_round_to_microseconds(ts) for ts in expected_timestamps]
+    unknowable_timestamps = frozenset(
+        _round_to_microseconds(ts) for ts in unknowable_timestamps
+    )
+    condemned_timestamps = {
+        _round_to_microseconds(ts): reason
+        for ts, reason in (condemned_timestamps or {}).items()
+    }
+
     if unknowable_timestamps:
         timestamps = [ts for ts in timestamps if ts not in unknowable_timestamps]
         expected_timestamps = [
@@ -231,7 +247,7 @@ def _assert_timestamps_match(
 
     if len(timestamps) != len(expected_timestamps):
         located = _locate_count_mismatch(
-            timestamps, expected_timestamps, condemned_timestamps or {}
+            timestamps, expected_timestamps, condemned_timestamps
         )
         failures.append(
             TraceFailure(
