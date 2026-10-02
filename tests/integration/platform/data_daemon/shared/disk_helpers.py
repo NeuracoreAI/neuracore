@@ -179,15 +179,13 @@ def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[int
     """Return mapping of trace file key (joint/camera name) to timestamps in
     microseconds from every trace.json under a recording dir.
 
-    A joint or JSON entry must carry ``timestamp_us`` and a ``timestamp`` in
-    seconds that equals it. A video entry without ``timestamp_us`` is converted
-    from its ``timestamp`` in seconds.
+    Every entry must carry ``timestamp_us`` and a ``timestamp`` in seconds
+    that equals it.
     """
     trace_timestamps: dict[str, list[int]] = {}
     for trace_json_path in recording_dir.rglob(TRACE_JSON_NAME):
         # Key is the parent directory name (joint or camera name)
         key = trace_json_path.parent.name
-        is_video_trace = trace_json_path.parent.parent.name in VIDEO_TRACE_DATA_TYPES
         try:
             frames = json.loads(trace_json_path.read_bytes())
         except Exception:
@@ -198,18 +196,13 @@ def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[int
         for frame in frames:
             if not isinstance(frame, dict):
                 continue
-            if not is_video_trace:
-                assert (
-                    "timestamp_us" in frame
-                ), f"{trace_json_path} entry has no timestamp_us: {frame}"
-                assert (
-                    frame["timestamp"]
-                    == frame["timestamp_us"] / MICROSECONDS_PER_SECOND
-                ), f"{trace_json_path} entry seconds and microseconds differ: {frame}"
-            if "timestamp_us" in frame:
-                ts_list.append(frame["timestamp_us"])
-            elif isinstance(frame.get("timestamp"), (int, float)):
-                ts_list.append(seconds_to_us(frame["timestamp"]))
+            assert (
+                "timestamp_us" in frame
+            ), f"{trace_json_path} entry has no timestamp_us: {frame}"
+            assert (
+                frame["timestamp"] == frame["timestamp_us"] / MICROSECONDS_PER_SECOND
+            ), f"{trace_json_path} entry seconds and microseconds differ: {frame}"
+            ts_list.append(frame["timestamp_us"])
         trace_timestamps[key] = ts_list
     return trace_timestamps
 

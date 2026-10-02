@@ -150,7 +150,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
     monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: "rec-1")
 
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-    nc.log_rgb("front_camera", rgb_uint8)
+    nc.log_rgb("front_camera", rgb_uint8, timestamp=12.5)
     depth_f16 = np.ones((100, 100), dtype=np.float16)
     nc.log_depth("depth_camera_16", depth_f16)
     depth_f32 = np.ones((100, 100), dtype=np.float32)
@@ -161,6 +161,8 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
         call.args[2]: call.args[6] for call in native.log_frame.call_args_list
     }
     assert calls_by_dtype[DataType.RGB_IMAGES.value] == "uint8"
+    rgb_call = native.log_frame.call_args_list[0]
+    assert rgb_call.args[8] == 12_500_000
     assert calls_by_dtype[DataType.DEPTH_IMAGES.value] in ("float16", "float32")
     # Both depth calls are distinguishable by dtype even though they share a
     # data_type label, so inspect each call directly rather than the dict
