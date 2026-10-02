@@ -71,6 +71,7 @@ def recording():
         instance=0,
         start_time=1.25,
         end_time=2.0,
+        start_timestamp_us=None,
         deleted=False,
         metadata=Mock(model_dump=Mock(return_value={"name": "recording-1"})),
         data_types={
@@ -118,6 +119,7 @@ def test_round_trip_raw_timestamps_payloads_and_attachments(
             assert channel.message_encoding == "json"
             assert message.publish_time == message.log_time
         attachments = {a.name: a.data for a in reader.iter_attachments()}
+        assert {a.log_time for a in reader.iter_attachments()} == {1_250_000_000}
         assert attachments == {
             "RGB_IMAGES/front/lossless.mp4": recording._files[
                 "RGB_IMAGES/front/lossless.mp4"
@@ -172,6 +174,33 @@ def test_rejects_incomplete_recordings_before_writing(
     with pytest.raises(ValueError):
         export_recordings(dataset, [recording], output, McapExporter())
     assert not output.exists()
+
+
+def test_microsecond_timestamps_export_exactly(dataset, recording, tmp_path):
+    recording._files["JOINT_POSITIONS/arm\\joint/trace.json"] = json.dumps([
+        {"timestamp": 1.25, "timestamp_us": 1_250_001, "value": 0.75},
+        {"timestamp": 1.5, "value": -0.1},
+        {"timestamp_us": 1_750_001, "value": 0.2},
+    ]).encode()
+    recording.start_timestamp_us = 1_000_001
+
+    manifest_path = export_recordings(
+        dataset, [recording], tmp_path / "export", McapExporter(), Mock()
+    )
+
+    with (manifest_path.parent / "nc_recording-1.mcap").open("rb") as stream:
+        reader = mcap_reader.make_reader(stream, validate_crcs=True)
+        joints = [
+            message
+            for _, channel, message in reader.iter_messages()
+            if channel.topic == "/neuracore/JOINT_POSITIONS/arm%2Fjoint"
+        ]
+        assert [m.log_time for m in joints] == [
+            1_250_001_000,
+            1_500_000_000,
+            1_750_001_000,
+        ]
+        assert {a.log_time for a in reader.iter_attachments()} == {1_000_001_000}
 
 
 def test_video_fallback_only_on_not_found(dataset, recording, tmp_path):

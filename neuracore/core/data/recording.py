@@ -41,6 +41,7 @@ class Recording:
         encoding: Codec | None = None,
         sensor_manifest: dict[DataType, list[str]] | None = None,
         deleted: bool = False,
+        start_timestamp_us: int | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -61,6 +62,9 @@ class Recording:
                 captured at finalize. Empty for recordings finalized before
                 this field existed.
             deleted: Whether the recording has been deleted.
+            start_timestamp_us: Start of the recording in microseconds on its
+                data clock. None for a recording stored before the field
+                existed.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -69,6 +73,7 @@ class Recording:
         self.instance = instance
         self.start_time = start_time
         self.end_time = end_time
+        self.start_timestamp_us = start_timestamp_us
         self.name = metadata.name
         self.metadata = metadata
         self.data_types: set[DataType] = data_types or set()

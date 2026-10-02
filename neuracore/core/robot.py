@@ -24,6 +24,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
+from neuracore.core.utils.microseconds import resolve_timestamp_us
 from neuracore.data_daemon import bridge as recording_context
 
 from .auth import Auth, get_auth
@@ -270,7 +271,10 @@ class Robot:
         Raises:
             RobotError: If the robot is not initialized or if
                 the recording fails to start.
+            ValueError: If the timestamp is not finite or is outside the
+                supported microsecond range.
         """
+        timestamp_us = resolve_timestamp_us(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
@@ -280,7 +284,7 @@ class Robot:
             robot_name=self.name,
             dataset_id=dataset_id,
             dataset_name=None,
-            timestamp=timestamp,
+            timestamp_us=timestamp_us,
         )
 
     def stop_recording(
@@ -303,23 +307,26 @@ class Robot:
 
         Raises:
             RobotError: If the robot is not initialized.
+            ValueError: If the timestamp is not finite or is outside the
+                supported microsecond range.
         """
+        timestamp_us = resolve_timestamp_us(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
         # The gate closes inside the notify, not here.
-        self._notify_daemon_of_stop(recording_id, timestamp=timestamp)
+        self._notify_daemon_of_stop(recording_id, timestamp_us=timestamp_us)
 
     def _notify_daemon_of_stop(
         self,
         recording_id: str | None,
-        timestamp: float | None = None,
+        timestamp_us: int,
     ) -> None:
         """Send the recording-stopped IPC message to the daemon."""
         try:
             context = self._get_daemon_recording_context()
             try:
-                context.stop_recording(timestamp=timestamp)
+                context.stop_recording(timestamp_us=timestamp_us)
             finally:
                 # Runs even if the notify failed.
                 context.flush_source()
@@ -656,12 +663,18 @@ class Robot:
                 this source. Retained for call-site compatibility.
             timestamp: Optional capture time (Unix seconds) for the cancel,
                 mirroring ``stop_recording``: the recording's captured stop
-                time, with the producer stamping now when omitted.
+                time, the current time when omitted.
+
+        Raises:
+            RobotError: If the robot is not initialized.
+            ValueError: If the timestamp is not finite or is outside the
+                supported microsecond range.
         """
+        timestamp_us = resolve_timestamp_us(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        self._get_daemon_recording_context().cancel_recording(timestamp=timestamp)
+        self._get_daemon_recording_context().cancel_recording(timestamp_us=timestamp_us)
 
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:
         """Return a reusable daemon recording context, creating it lazily."""

@@ -83,6 +83,10 @@ nc.log_custom_1d("force_sensor", custom_sensor_data, timestamp=t)
 nc.stop_recording()
 ```
 
+A `timestamp` is float seconds. The SDK rounds it to whole microseconds.
+Stored and synchronized data keeps that integer in `timestamp_us` beside
+`timestamp`, which is the same instant in seconds.
+
 #### Live Data Streaming Control
 
 Data logs from your robot are automatically streamed to the web dashboard in real time for visualization and monitoring. You can stop this default behavior by calling:

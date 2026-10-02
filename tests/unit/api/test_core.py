@@ -1,5 +1,6 @@
 import json
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import requests
@@ -7,10 +8,13 @@ import requests_mock
 
 import neuracore as nc
 from neuracore.api import core as api_core
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core import robot as core_robot
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
+from neuracore.core.robot import Robot
+from neuracore.data_daemon import bridge as recording_context
 from neuracore.data_daemon.daemon_control import DaemonLifecycleError
 
 
@@ -508,3 +512,54 @@ def test_version_check_sends_sdk_and_types_versions():
         "neuracore_types_version": [types_version.lower()],
         "neuracore_version": [nc.__version__.lower()],
     }
+
+
+PATCHED_NOW_US = 42_000_000
+
+
+@pytest.fixture
+def recording_robot(monkeypatch):
+    """A recording robot whose daemon bridge is a mock."""
+    robot = Robot("test_robot", instance=0, org_id="org-1")
+    robot.id = "robot-1"
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    monkeypatch.setattr(recording_context, "ensure_daemon_running", lambda: None)
+    monkeypatch.setattr(api_core, "_get_robot", lambda *_args: robot)
+    monkeypatch.setattr(robot, "is_recording", lambda: True)
+    monkeypatch.setattr(GlobalSingleton(), "_active_dataset_id", "dataset-1")
+    monkeypatch.setattr(
+        GlobalSingleton(),
+        "_active_dataset",
+        SimpleNamespace(id="dataset-1", name="dataset", is_shared=False),
+    )
+    monkeypatch.setattr(
+        "neuracore.core.utils.microseconds.now_us", lambda: PATCHED_NOW_US
+    )
+    yield native
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
+@pytest.mark.parametrize(
+    "timestamp,expected_us", [(None, PATCHED_NOW_US), (12.5, 12_500_000)]
+)
+def test_recording_lifecycle_passes_microseconds_to_the_daemon(
+    recording_robot, timestamp, expected_us
+) -> None:
+    nc.start_recording(timestamp=timestamp)
+    nc.stop_recording(timestamp=timestamp)
+    nc.cancel_recording(timestamp=timestamp)
+
+    assert recording_robot.start_recording.call_args.args[5] == expected_us
+    assert recording_robot.stop_recording.call_args.args[2] == expected_us
+    assert recording_robot.cancel_recording.call_args.args[2] == expected_us
+
+
+def test_start_recording_rejects_a_timestamp_outside_the_microsecond_range(
+    recording_robot,
+) -> None:
+    with pytest.raises(ValueError):
+        nc.start_recording(timestamp=-1.0)
+
+    recording_robot.start_recording.assert_not_called()

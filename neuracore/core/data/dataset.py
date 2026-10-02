@@ -155,6 +155,7 @@ class Dataset:
             encoding=recording_model.encoding,
             sensor_manifest=recording_model.sensor_manifest,
             deleted=recording_model.deleted,
+            start_timestamp_us=recording_model.start_timestamp_us,
         )
 
     def _initialize_num_recordings(self) -> None:

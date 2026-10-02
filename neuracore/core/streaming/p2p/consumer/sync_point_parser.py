@@ -52,7 +52,7 @@ def parse_sync_point(
             data.frame = ImageStringEncoder.decode_image(data.frame)
 
         return SynchronizedPoint(
-            timestamp=data.timestamp,
+            timestamp_us=data.timestamp_us,
             data={data_type: {label: data}},
         )
 
@@ -78,7 +78,7 @@ def merge_sync_points(*args: SynchronizedPoint) -> SynchronizedPoint:
         return SynchronizedPoint()
 
     # Sort by timestamp so that later points override earlier ones.
-    sorted_points = sorted(args, key=lambda x: x.timestamp)
+    sorted_points = sorted(args, key=lambda x: x.timestamp_us)
 
     merged_synced_data: dict[DataType, dict[str, NCDataUnion]] = {}
 
@@ -89,6 +89,6 @@ def merge_sync_points(*args: SynchronizedPoint) -> SynchronizedPoint:
             merged_synced_data[data_type].update(values)
 
     return SynchronizedPoint(
-        timestamp=sorted_points[-1].timestamp,
+        timestamp_us=sorted_points[-1].timestamp_us,
         data=merged_synced_data,
     )
