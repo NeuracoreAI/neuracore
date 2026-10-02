@@ -39,6 +39,7 @@ def _trainer(
     trainer.storage_handler = MagicMock()
     trainer.get_model_without_ddp = MagicMock()
     trainer.val_loader = MagicMock()
+    trainer.val_loader.batch_size = 8
     trainer.val_loader.dataset = Subset(dataset, list(range(len(dataset))))
     return trainer
 
@@ -55,6 +56,7 @@ def test_rollouts_run_only_on_frequency_epochs_when_points_are_configured():
 
     assert [call.kwargs["epoch"] for call in save.call_args_list] == [5, 10]
     assert all(call.kwargs["num_points"] == 2 for call in save.call_args_list)
+    assert all(call.kwargs["batch_size"] == 8 for call in save.call_args_list)
 
 
 def test_rollouts_are_skipped_when_no_points_are_configured():
