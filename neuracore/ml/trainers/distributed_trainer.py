@@ -379,7 +379,7 @@ class DistributedTrainer:
         validation_subset = self.val_loader.dataset
         validation_neuracore_pytorch_dataset = validation_subset.dataset
 
-        epoch_dir = save_validation_rollouts(
+        save_validation_rollouts(
             model=cast(NeuracoreModel, self.get_model_without_ddp()),
             dataset=validation_neuracore_pytorch_dataset,
             validation_indices=list(validation_subset.indices),
@@ -390,8 +390,8 @@ class DistributedTrainer:
             num_points=self.validation_rollout_points,
             seed=self.validation_rollout_seed,
             batch_size=self.val_loader.batch_size,
+            storage_handler=self.storage_handler,
         )
-        self.storage_handler.upload_validation_rollouts(epoch_dir)
 
     def train(self, start_epoch: int = 0) -> None:
         """Run the training loop.
@@ -478,6 +478,7 @@ class DistributedTrainer:
                 # landed so the process can't exit — and the training
                 # VM/container be torn down — while the final checkpoint is
                 # still mid-upload.
+                self.storage_handler.wait_for_rollout_saves()
                 self.storage_handler.wait_for_pending_uploads()
                 # Progress updates are also sent off-thread, so flush the last
                 # one rather than letting it die with the worker.
