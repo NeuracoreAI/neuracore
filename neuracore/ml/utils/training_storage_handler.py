@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,12 @@ class TrainingStorageHandler(UploadStorageMixin):
         self._upload_executor: ThreadPoolExecutor | None = None
         self._pending_uploads_lock = threading.Lock()
         self._pending_uploads: dict[Path, Future] = {}
+
+        # Rollout JPEG/JSON writes run here, not on the checkpoint uploader,
+        # so encoding a rollout epoch cannot sit in front of a checkpoint PUT.
+        self._rollout_save_executor: ThreadPoolExecutor | None = None
+        self._pending_rollout_saves_lock = threading.Lock()
+        self._pending_rollout_saves: list[Future] = []
 
         # Progress updates are fire-and-forget from the training loop's point
         # of view. They get their own worker rather than sharing the upload
@@ -208,6 +215,48 @@ class TrainingStorageHandler(UploadStorageMixin):
         future = self._get_upload_executor().submit(_do_upload)
         with self._pending_uploads_lock:
             self._pending_uploads[local_path] = future
+
+    def _get_rollout_save_executor(self) -> ThreadPoolExecutor:
+        """Lazily create the single-worker background rollout-save executor."""
+        if self._rollout_save_executor is None:
+            self._rollout_save_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="nc-rollout-save"
+            )
+        return self._rollout_save_executor
+
+    def submit_rollout_save(self, save: Callable[[], None]) -> None:
+        """Write one rollout epoch on the background worker.
+
+        The training thread returns as soon as the job is queued. A failed
+        write is logged and does not propagate to training.
+
+        Args:
+            save: Writes the epoch files, then enqueues their upload.
+        """
+
+        def _do_save() -> None:
+            try:
+                save()
+            except Exception:
+                logger.error(
+                    "Unexpected error writing validation rollouts", exc_info=True
+                )
+
+        future = self._get_rollout_save_executor().submit(_do_save)
+        with self._pending_rollout_saves_lock:
+            self._pending_rollout_saves.append(future)
+
+    def wait_for_rollout_saves(self) -> None:
+        """Block until every submitted rollout write has finished.
+
+        Call this before waiting for uploads. The write job is what enqueues
+        those uploads, so they are not in the upload queue until the write
+        returns.
+        """
+        with self._pending_rollout_saves_lock:
+            futures = list(self._pending_rollout_saves)
+        for future in futures:
+            future.result()
 
     def wait_for_pending_uploads(self) -> None:
         """Block until every submitted checkpoint/artifact upload has finished.
