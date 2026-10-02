@@ -1,12 +1,15 @@
 """Tests for the concurrent metadata and video prefetch."""
 
 import asyncio
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
 from neuracore_types import DataType, SynchronizationDetails
 
 import neuracore as nc
+import neuracore.core.data.frame_cache as frame_cache
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.prefetch import VideoPrefetcher
 
@@ -163,6 +166,45 @@ class TestVideoStage:
         assert list(dataset_mock.cache_dir.rglob("*.recording.lock")) == []
         # Nothing was published, so a later attempt still sees work to do.
         assert prefetcher._collect_download_targets()
+
+    def test_progress_waits_for_decode(self, dataset_mock, details):
+        """Cloud progress must not count a recording until its videos decode."""
+        progress: list[tuple[int, int]] = []
+        entered_decode = threading.Event()
+        allow_decode = threading.Event()
+        original_decode = frame_cache.decode_video
+
+        def gated_decode(video_location, video_frame_cache_path):
+            entered_decode.set()
+            assert allow_decode.wait(timeout=10)
+            return original_decode(video_location, video_frame_cache_path)
+
+        def run_prefetch() -> None:
+            prefetcher = _prefetcher(
+                dataset_mock,
+                details,
+                download_videos=True,
+                decode_workers=1,
+                on_progress=lambda done, total: progress.append((done, total)),
+            )
+            with patch.object(frame_cache, "decode_video", gated_decode):
+                prefetcher.run()
+
+        thread = threading.Thread(target=run_prefetch)
+        thread.start()
+        assert entered_decode.wait(timeout=10)
+        # Downloads can finish while decode is blocked; done must stay 0.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            assert all(done == 0 for done, _ in progress)
+            time.sleep(0.05)
+
+        allow_decode.set()
+        thread.join(timeout=60)
+        assert not thread.is_alive()
+        assert progress[0][0] == 0
+        assert progress[-1] == (progress[-1][1], progress[-1][1])
+        assert any(done > 0 for done, _ in progress)
 
     def test_decode_failure_leaves_no_partial_cache(self, dataset_mock, details):
         """A failed decode must publish nothing rather than a partial directory."""
