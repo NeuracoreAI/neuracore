@@ -21,6 +21,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
+    FIRST_CONTEXT_START_S,
     MAX_RECORDING_DURATION_S,
     MODE_STAGGERED,
     STOP_RECORDING_NO_WAIT_SLA_S,
@@ -226,9 +227,9 @@ def build_context_specs(
     )
 
     for context_index in range(case.parallel_contexts):
-        timestamp_start_s = 0.0
+        timestamp_start_s = FIRST_CONTEXT_START_S
         if context_index > 0 and case.mode == MODE_STAGGERED:
-            timestamp_start_s = float(timestamp_stagger_s * context_index)
+            timestamp_start_s += timestamp_stagger_s * context_index
 
         if case.context_duration_mode == DURATION_MODE_VARIABLE:
             context_duration_sec = max(
