@@ -38,6 +38,11 @@ UPDATE_TRAINING_METADATA_EVERY = 20
 # interval the dataset uses for the same check.
 CHECK_MEMORY_INTERVAL = 100
 
+# Smooth epoch-duration estimates so remaining-time ETA does not thrash when a
+# single epoch is unusually fast or slow. Higher = more weight on the latest
+# sample.
+SECONDS_PER_EPOCH_EMA_ALPHA = 0.3
+
 
 class NestedModule(nn.Module):
     """A special case to allow NeuracoreModel to be used in DDP."""
@@ -160,6 +165,8 @@ class DistributedTrainer:
         self.world_size = world_size
         self.global_train_step = 0
         self.global_val_step = 0
+        self._seconds_per_epoch_ema: float | None = None
+        self._seconds_per_checkpoint_ema: float | None = None
 
         num_training_steps = self.num_epochs * len(self.train_loader)
         self.optimizers = model.configure_optimizers()
@@ -338,6 +345,9 @@ class DistributedTrainer:
                 epoch=start_epoch, step=self.global_train_step
             )
 
+        self._seconds_per_epoch_ema = None
+        self._seconds_per_checkpoint_ema = None
+
         try:
             start_epoch = max(start_epoch, 1)
             for epoch in range(start_epoch, self.num_epochs + 1):
@@ -352,6 +362,7 @@ class DistributedTrainer:
 
                 # Save checkpoint and artifacts periodically (only from rank 0)
                 if self.rank == 0 and epoch % self.save_freq == 0:
+                    save_t0 = time.perf_counter()
                     self.save_checkpoint(epoch, train_loss_metrics)
 
                     # Save model artifacts
@@ -359,22 +370,32 @@ class DistributedTrainer:
                         model=self.get_model_without_ddp(),
                         output_dir=self.output_dir,
                     )
+                    self._seconds_per_checkpoint_ema = self._update_ema(
+                        self._seconds_per_checkpoint_ema,
+                        time.perf_counter() - save_t0,
+                        SECONDS_PER_EPOCH_EMA_ALPHA,
+                    )
 
                 validate_t0 = time.perf_counter()
                 with torch.no_grad():
                     self.validate(epoch)
 
-                seconds_per_epoch = train_elapsed + (time.perf_counter() - validate_t0)
+                train_val_seconds = train_elapsed + (time.perf_counter() - validate_t0)
 
                 # Save metadata. Skip duration on the first epoch of this
-                # process — it includes cache warmup.
+                # process — it includes cache warmup. Report an EMA of
+                # train+validate plus amortized checkpoint overhead so ETA
+                # stays stable across save and non-save epochs.
                 if self.rank == 0:
+                    seconds_per_epoch = None
+                    if epoch > start_epoch:
+                        seconds_per_epoch = self._record_seconds_per_epoch(
+                            train_val_seconds
+                        )
                     self.storage_handler.update_training_progress(
                         epoch=epoch,
                         step=self.global_train_step,
-                        seconds_per_epoch=(
-                            seconds_per_epoch if epoch > start_epoch else None
-                        ),
+                        seconds_per_epoch=seconds_per_epoch,
                     )
                     # Flush logger to ensure data is written
                     if hasattr(self.training_logger, "flush"):
@@ -403,6 +424,45 @@ class DistributedTrainer:
                 self.storage_handler.wait_for_pending_progress_updates()
                 # Close the logger
                 self.training_logger.close()
+
+    @staticmethod
+    def _update_ema(current: float | None, value: float, alpha: float) -> float:
+        """Return an exponential moving average of ``value``.
+
+        Args:
+            current: Previous EMA, or None when this is the first sample.
+            value: Latest observation.
+            alpha: Weight given to ``value`` in ``[0, 1]``.
+
+        Returns:
+            Updated EMA.
+        """
+        if current is None:
+            return value
+        return alpha * value + (1.0 - alpha) * current
+
+    def _record_seconds_per_epoch(self, train_val_seconds: float) -> float:
+        """Update and return the smoothed per-epoch duration used for ETA.
+
+        Adds amortized checkpoint/artifact save time so save-freq epochs do not
+        spike the estimate and non-save epochs still budget for upcoming saves.
+
+        Args:
+            train_val_seconds: Wall-clock train + validate seconds for this epoch.
+
+        Returns:
+            EMA of effective seconds per epoch.
+        """
+        amortized_checkpoint = 0.0
+        if self._seconds_per_checkpoint_ema is not None:
+            amortized_checkpoint = self._seconds_per_checkpoint_ema / self.save_freq
+
+        self._seconds_per_epoch_ema = self._update_ema(
+            self._seconds_per_epoch_ema,
+            train_val_seconds + amortized_checkpoint,
+            SECONDS_PER_EPOCH_EMA_ALPHA,
+        )
+        return self._seconds_per_epoch_ema
 
     def get_model_without_ddp(self) -> nn.Module:
         """Get the model without DDP wrapper.
