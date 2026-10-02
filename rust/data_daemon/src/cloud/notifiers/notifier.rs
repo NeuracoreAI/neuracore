@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use data_daemon_shared::microseconds_to_seconds;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -176,9 +177,9 @@ async fn sweep<N: RecordingNotifier>(notifier: &N, ctx: &NotifierCtx) {
 }
 
 /// Which `/recording/*` endpoint a lifecycle notify targets. The stop and
-/// cancel notifiers run the *same* guard chain (row fetch → already-notified
-/// guard → cloud-id guard → org guard → `stop_timestamp_ns` guard → POST →
-/// 404-as-success → mark-notified); only these per-kind bits differ.
+/// cancel notifiers run the *same* guard chain (row fetch, then the
+/// already-notified, cloud-id, org and `stop_timestamp_us` guards, then POST,
+/// 404 as success and mark-notified); only these per-kind bits differ.
 #[derive(Clone, Copy)]
 pub enum LifecycleKind {
     Stop,
@@ -260,18 +261,18 @@ pub async fn notify_recording_lifecycle(
         );
         return;
     };
-    let Some(stop_timestamp_ns) = row.stop_timestamp_ns else {
+    let Some(stop_timestamp_us) = row.stop_timestamp_us else {
         tracing::warn!(
             recording_index,
             recording_id,
-            "recording has no stop_timestamp_ns at {action} time; skipping backend notify"
+            "recording has no stop_timestamp_us at {action} time; skipping backend notify"
         );
         return;
     };
     // The producer captured this as the recording window's real upper bound;
     // the backend requires it (seconds) and derives the reported duration from
     // it, so a late notify still reports correctly.
-    let end_time = stop_timestamp_ns as f64 / 1_000_000_000.0;
+    let end_time = microseconds_to_seconds(stop_timestamp_us);
 
     let post_result = match kind {
         LifecycleKind::Stop => {
