@@ -644,7 +644,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             idx: Flat sample index, the same index ``__getitem__`` accepts.
 
         Returns:
-            Identity used to name a saved rollout.
+            Identity (recording id, timestep, robot id) of the sample at ``idx``.
 
         Raises:
             IndexError: If ``idx`` is outside the dataset.
