@@ -48,7 +48,7 @@ def test_rollouts_run_only_on_frequency_epochs_when_points_are_configured():
 
     with patch(
         "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",
-        return_value=None,
+        return_value=Path("validation-rollouts"),
     ) as save:
         for epoch in range(1, 11):
             trainer._save_validation_rollouts(epoch)

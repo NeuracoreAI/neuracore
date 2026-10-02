@@ -193,7 +193,7 @@ def save_validation_rollouts(
     epoch: int,
     num_points: int,
     seed: int,
-) -> Path | None:
+) -> Path:
     """Run inference on the chosen validation points and write their files.
 
     Each index is loaded on its own. Samples are already batch size 1, which
@@ -213,12 +213,9 @@ def save_validation_rollouts(
         seed: Seed for which points are chosen.
 
     Returns:
-        The epoch directory, or None when no points were selected.
+        The epoch directory that holds the saved points.
     """
     selected = select_validation_rollout_indices(validation_indices, num_points, seed)
-    if not selected:
-        return None
-
     epoch_dir = rollout_epoch_dir(output_dir, epoch)
     logger.info(
         "Saving %s validation rollout point(s) for epoch %s",
@@ -383,12 +380,9 @@ def _write_input_images(image_root: Path, inputs: NamedTraces) -> None:
 def _write_rgb_jpeg(frame: torch.Tensor, path: Path) -> None:
     """Write one RGB frame. Training frames are float pixels in ``[0, 255]``."""
     image = _channel_last_image(frame).numpy()
-    # Remove training frame trailing dimension if grayscale
-    if image.ndim == 3 and image.shape[-1] == 1:
+    if image.shape[-1] == 1:
         image = image[..., 0]
     if image.dtype != np.uint8:
-        if image.size and float(np.max(image)) <= 1.0:
-            image = image * 255.0
         image = np.clip(image, 0, 255).astype(np.uint8)
     Image.fromarray(image).save(path, format="JPEG")
 
