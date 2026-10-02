@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 
 use data_daemon_shared::service_name::{MAX_VIDEO_CHUNK_FRAMES, VIDEO_SPOOL_TICKS_PER_SECOND};
 use data_daemon_shared::video_boundary::publish_offset_us;
-use data_daemon_shared::{Envelope, FrameDtype};
+use data_daemon_shared::{Envelope, FrameDtype, NANOSECONDS_PER_MICROSECOND};
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
 use crate::paths::{source_prefix, split_stream_key, spool_chunk_filename, spool_dir, stream_key};
@@ -1219,7 +1219,7 @@ fn append_frame_locked(
         state.last_pts_us = None;
         state.pts_synth_warned = false;
     }
-    let timestamp_us = timestamp_ns / 1_000;
+    let timestamp_us = timestamp_ns / NANOSECONDS_PER_MICROSECOND;
     let origin_us = *state.pts_origin_us.get_or_insert(timestamp_us);
     let relative_us = timestamp_us.saturating_sub(origin_us).max(0);
     let mut pts = relative_us as u64;
@@ -1565,6 +1565,7 @@ pub(crate) fn flush_source_detached(robot_id: &str, robot_instance: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data_daemon_shared::microseconds_to_seconds;
 
     const TEST_PUBLISH_NS: i64 = 1_700_000_000_000_000_000;
 
@@ -2424,7 +2425,7 @@ mod tests {
             &[0u8; 4],
             TEST_PUBLISH_NS + timestamp_us * 1_000,
             timestamp_us * 1_000,
-            timestamp_us as f64 / 1e6,
+            microseconds_to_seconds(timestamp_us),
         )
     }
 

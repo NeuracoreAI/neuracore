@@ -30,7 +30,7 @@
 //! The producer is a *thin shipper*: it knows nothing about recordings. Every
 //! envelope is tagged only with its **source** (`robot_id`, `robot_instance`)
 //! and — for data — its **sensor** (`data_type`, `sensor_name`) and capture
-//! `timestamp_ns`. The producer publishes three fire-and-forget lifecycle
+//! `timestamp_us`. The producer publishes three fire-and-forget lifecycle
 //! events ([`Envelope::StartRecording`] / [`Envelope::StopRecording`] /
 //! [`Envelope::CancelRecording`]) carrying the lifecycle wall-clock timestamp,
 //! and the daemon decides — from its per-source active-window map — which
@@ -240,7 +240,7 @@ pub mod service_name {
     ///
     /// All envelope payloads are now metadata-sized: non-video frames are
     /// small JSON, the integration matrix's 1000-joint batch encodes to
-    /// ~90 KiB, and `VideoChunkReady`'s `frame_timestamps_s` vector is
+    /// about 110 KiB, and `VideoChunkReady`'s `frame_timestamps_s` vector is
     /// ~30 KiB even for a 128 MiB 1080p chunk. 1 MiB leaves generous
     /// headroom for the worst case.
     pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -307,11 +307,11 @@ pub mod service_name {
     /// `max_subscribers × (buffer + borrowed) × initial_max_slice_len`, and
     /// the resident footprint is `buffer × actual_sample_size`. The largest
     /// `commands` sample is a [`crate::Envelope::BatchedData`] envelope — the
-    /// integration matrix's 1000-joint worst case encodes to ~90 KiB — so a
-    /// 1024-deep buffer would retain ~94 MiB of pages per publisher and
+    /// integration matrix's 1000-joint worst case encodes to about 110 KiB, so
+    /// a 1024-deep buffer would retain about 110 MiB of pages per publisher and
     /// exhaust the 64 MiB devcontainer `/dev/shm`.
     ///
-    /// 64 keeps that worst case at ~6 MiB per publisher while staying deep
+    /// 64 keeps that worst case at about 7 MiB per publisher while staying deep
     /// enough for steady state: the daemon drains every 1 ms and batched
     /// joint logging emits one envelope per timestep, so the buffer never
     /// fills under normal load.
@@ -438,7 +438,7 @@ pub type Source = (String, i64);
 ///
 /// Every variant is tagged with its **source** (`robot_id`, `robot_instance`).
 /// Data variants additionally carry their **sensor** (`data_type`,
-/// `sensor_name`) and capture `timestamp_ns`. No recording or trace identity
+/// `sensor_name`) and capture `timestamp_us`. No recording or trace identity
 /// travels on the wire — the daemon owns it (see the crate-level docs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Envelope {
@@ -507,7 +507,7 @@ pub enum Envelope {
     /// according to `data_type` and writes it through the JSON writer. The
     /// daemon holds the datum for the configured holdback, then routes it into
     /// the source's window whose `[started_at_ns, stopped_at_ns)` contains
-    /// `timestamp_ns`.
+    /// `publish_timestamp_ns`.
     ///
     /// Video frames do *not* travel as `Data` envelopes — they are spooled to
     /// disk by the producer and announced via [`Envelope::VideoChunkReady`]
@@ -529,13 +529,9 @@ pub enum Envelope {
         /// of publish-clock timestamp, so a datum belongs to the window whose
         /// `[started_at_ns, stopped_at_ns)` brackets its publish time.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time in nanoseconds since the Unix epoch —
-        /// the data's *own* clock, written into the trace content. Not used
-        /// for routing.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds (f64). Postcard
-        /// writes this bit-exact.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in microseconds on the data's *own*
+        /// clock, written into the trace content. Not used for routing.
+        timestamp_us: i64,
         /// Opaque per-sample bytes. Postcard transports these as
         /// length-prefix + raw bytes (no expansion).
         payload: Vec<u8>,
@@ -547,8 +543,8 @@ pub enum Envelope {
     /// Collapsing N [`Envelope::Data`] envelopes into one IPC message cuts the
     /// per-call iceoryx2 publish count (and the pressure on the lifecycle
     /// buffer) by a factor of N. Because every item shares the batch's
-    /// `timestamp_ns`, the whole batch belongs to one window — the daemon
-    /// holds and routes it as a single unit.
+    /// `publish_timestamp_ns`, the whole batch belongs to one window, and the
+    /// daemon holds and routes it as a single unit.
     BatchedData {
         robot_id: String,
         robot_instance: i64,
@@ -561,12 +557,9 @@ pub enum Envelope {
         /// Producer wall-clock publish time (Unix nanoseconds), shared by every
         /// item. The sole key for window membership (see [`Envelope::Data`]).
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (ns), shared by every item — content,
-        /// not routing.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds, shared by every
-        /// item.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in microseconds, shared by every item.
+        /// It is content, not routing.
+        timestamp_us: i64,
         /// Per-sensor samples; each routes to one trace actor.
         items: Vec<BatchedDataItem>,
     },
@@ -725,8 +718,8 @@ impl FrameDtype {
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
 ///
-/// Carries only the fields that differ between items — `data_type`,
-/// `timestamp_ns` and `timestamp_s` are hoisted onto the parent envelope
+/// Carries only the fields that differ between items: `data_type` and
+/// `timestamp_us` are hoisted onto the parent envelope
 /// because every sensor in a batch shares them (one `log_*` call, one sensor
 /// group, one capture instant). Each item self-tags its `sensor_name` because
 /// there is no pre-registered trace to look up.
@@ -998,8 +991,7 @@ mod tests {
             data_type: "JOINT_POSITIONS".into(),
             sensor_name: Some("waist".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_000_000,
-            timestamp_s: None,
+            timestamp_us: 1_000_000,
             payload: vec![1, 2, 3, 4, 5, 6],
         };
         let bytes = original.encode().expect("encode");
@@ -1009,32 +1001,28 @@ mod tests {
     }
 
     #[test]
-    fn data_timestamp_s_is_bit_exact_over_postcard_wire() {
-        // Postcard writes `f64` as 8 raw IEEE-754 bytes, so values that
-        // would shift under a decimal parser (e.g. `7/60`) round-trip
-        // bit-identically — required for the integration matrix's
-        // exact-match assertion on the video sidecar timestamps.
+    fn data_timestamp_us_round_trips_over_postcard_wire() {
+        let timestamp_us = 1_747_740_000_123_457_i64;
         let original = Envelope::Data {
             robot_id: "robot-1".into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 116_666_666,
-            timestamp_s: Some(7.0_f64 / 60.0_f64),
+            timestamp_us,
             payload: vec![0xAA, 0xBB],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
-        if let Envelope::Data { timestamp_s, .. } = decoded {
-            assert_eq!(
-                timestamp_s.map(f64::to_bits),
-                Some((7.0_f64 / 60.0_f64).to_bits()),
-            );
-        } else {
+        let Envelope::Data {
+            timestamp_us: decoded_timestamp_us,
+            ..
+        } = decoded
+        else {
             panic!("decoded envelope was not Data");
-        }
+        };
+        assert_eq!(decoded_timestamp_us, timestamp_us);
     }
 
     #[test]
@@ -1050,8 +1038,7 @@ mod tests {
             data_type: "RGB_IMAGES".into(),
             sensor_name: None,
             publish_timestamp_ns: 0,
-            timestamp_ns: 0,
-            timestamp_s: None,
+            timestamp_us: 0,
             payload: vec![0xAB; PAYLOAD_LEN],
         };
         let bytes = original.encode().expect("encode");
@@ -1074,16 +1061,15 @@ mod tests {
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_s: Some(1_700_000_000.5),
+            timestamp_us: 1_700_000_000_500_000,
             items: vec![
                 BatchedDataItem {
                     sensor_name: Some("joint-0".into()),
-                    payload: br#"{"timestamp":1.0,"value":0.5}"#.to_vec(),
+                    payload: br#"{"timestamp":1.0,"timestamp_us":1000000,"value":0.5}"#.to_vec(),
                 },
                 BatchedDataItem {
                     sensor_name: Some("joint-1".into()),
-                    payload: br#"{"timestamp":1.0,"value":-0.25}"#.to_vec(),
+                    payload: br#"{"timestamp":1.0,"timestamp_us":1000000,"value":-0.25}"#.to_vec(),
                 },
             ],
         };
@@ -1096,14 +1082,16 @@ mod tests {
     #[test]
     fn batched_data_worst_case_fits_commands_slice() {
         // The integration matrix's high-dimensionality case logs 1000 joints
-        // per call. Each joint payload is a small `{"timestamp":..,"value":..}`
-        // JSON object plus a data_type label and sensor name; the whole batch
-        // must fit inside a single `commands` sample so the producer can
-        // publish it in one go.
+        // per call. Each joint payload is a small
+        // `{"timestamp":..,"timestamp_us":..,"value":..}` JSON object plus a
+        // data_type label and sensor name; the whole batch must fit inside a
+        // single `commands` sample so the producer can publish it in one go.
         let items: Vec<BatchedDataItem> = (0..1000)
             .map(|index| BatchedDataItem {
                 sensor_name: Some(format!("vx300s_left_joint_{index:04}")),
-                payload: br#"{"timestamp":1747740000.1234567,"value":-1.234567890123}"#.to_vec(),
+                payload:
+                    br#"{"timestamp":1747740000.123457,"timestamp_us":1747740000123457,"value":-1.234567890123}"#
+                        .to_vec(),
             })
             .collect();
         let envelope = Envelope::BatchedData {
@@ -1111,8 +1099,7 @@ mod tests {
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_747_740_000_123_456_700,
-            timestamp_ns: 1_747_740_000_123_456_700,
-            timestamp_s: Some(1_747_740_000.123_456_7),
+            timestamp_us: 1_747_740_000_123_457,
             items,
         };
         let bytes = envelope.encode().expect("encode");
