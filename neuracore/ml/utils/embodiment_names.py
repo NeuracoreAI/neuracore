@@ -133,53 +133,50 @@ def _is_slot_masked(
     return float(mask[index]) == 0.0
 
 
-def assign_names_to_model_outputs(
-    batch_output: dict[DataType, list[BatchedNCData]],
-    output_embodiment_description: EmbodimentDescription,
+def assign_names_to_batches(
+    batch: dict[DataType, list[BatchedNCData]],
+    embodiment_description: EmbodimentDescription,
     masks: Mapping[DataType, torch.Tensor] | None = None,
 ) -> dict[DataType, dict[str, BatchedNCData]]:
-    """Map model output slots to the names used at deploy time.
+    """Map tensor slots to the names in an embodiment description.
 
     Sparse embodiment specs keep their absolute tensor indices. Slots with no
     name in the description are left unnamed so padded cross-embodiment
     tensors are not treated as joints. A mask of 0 drops that named slot too.
 
     Args:
-        batch_output: ``model.forward()`` output, one tensor list per data type.
-        output_embodiment_description: Per-robot output names, same object
-            ``PolicyInference`` uses for that robot.
+        batch: One tensor list per data type.
+        embodiment_description: Per-robot names for those tensors.
         masks: Optional per-type mask aligned with those tensor indices.
             Deploy omits this. Training uses ``outputs_mask`` / ``inputs_mask``.
 
     Returns:
-        Named outputs. Image and other non-joint types are included when they
-        are in the description; callers decide what to persist.
+        The named batch. Image and other non-joint types are included when
+        they are in the description; callers decide what to persist.
     """
-    outputs: dict[DataType, dict[str, BatchedNCData]] = defaultdict(dict)
+    named: dict[DataType, dict[str, BatchedNCData]] = defaultdict(dict)
 
-    for data_type, list_of_batched_ncdata in batch_output.items():
-        output_names = output_embodiment_description.get(data_type)
+    for data_type, list_of_batched_ncdata in batch.items():
+        names = embodiment_description.get(data_type)
 
-        if output_names is None:
-            raise ValueError(f"DataType {data_type} not in output configuration.")
-        indexed_output_names = list_indexed_names(output_names)
+        if names is None:
+            raise ValueError(f"DataType {data_type} not in embodiment description.")
+        indexed_names = list_indexed_names(names)
         required_tensor_count = (
-            max(index for index, _ in indexed_output_names) + 1
-            if indexed_output_names
-            else 0
+            max(index for index, _ in indexed_names) + 1 if indexed_names else 0
         )
         if len(list_of_batched_ncdata) < required_tensor_count:
             raise ValueError(
-                f"Not enough output names for DataType {data_type}. "
+                f"Not enough tensors for DataType {data_type}. "
                 "Expected at least "
                 f"{required_tensor_count}, "
                 f"but got {len(list_of_batched_ncdata)}."
             )
 
-        for tensor_idx, name_of_tensor in indexed_output_names:
+        for tensor_idx, name_of_tensor in indexed_names:
             if _is_slot_masked(masks, data_type, tensor_idx):
                 continue
             batched_nc_data = list_of_batched_ncdata[tensor_idx]
-            outputs[data_type][name_of_tensor] = batched_nc_data
+            named[data_type][name_of_tensor] = batched_nc_data
 
-    return outputs
+    return named
