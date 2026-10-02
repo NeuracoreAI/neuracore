@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use data_daemon_shared::seconds_to_microseconds;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -320,6 +321,7 @@ fn open_command(payload: StartPayload) -> RecordingCommand {
         robot_instance: payload.instance,
         dataset_id: payload.dataset_ids.into_iter().next(),
         start_timestamp_ns: seconds_to_nanos(payload.start_time),
+        start_timestamp_us: seconds_to_microseconds(payload.start_time),
     }
 }
 
@@ -380,8 +382,24 @@ mod tests {
                 robot_instance: 2,
                 dataset_id: Some("ds-1".into()),
                 start_timestamp_ns: 1_500_000_000,
+                start_timestamp_us: 1_500_000,
             }]
         );
+    }
+
+    #[test]
+    fn start_carries_its_start_rounded_to_the_microsecond() {
+        let commands = parse_notification(
+            r#"{"type":"START","payload":{"recording_id":"rec-1","robot_id":"robot-1",
+               "instance":0,"created_by":"someone","dataset_ids":[],
+               "start_time":1771669371.383135}}"#,
+        );
+        match commands.as_slice() {
+            [RecordingCommand::Open {
+                start_timestamp_us, ..
+            }] => assert_eq!(*start_timestamp_us, 1_771_669_371_383_135),
+            other => panic!("START produced {other:?}"),
+        }
     }
 
     #[test]
@@ -402,6 +420,7 @@ mod tests {
                     robot_instance: 0,
                     dataset_id: Some("ds-1".into()),
                     start_timestamp_ns: 1_500_000_000,
+                    start_timestamp_us: 1_500_000,
                 },
                 RecordingCommand::Open {
                     recording_id: "rec-2".into(),
@@ -409,6 +428,7 @@ mod tests {
                     robot_instance: 1,
                     dataset_id: None,
                     start_timestamp_ns: 2_000_000_000,
+                    start_timestamp_us: 2_000_000,
                 },
             ]
         );

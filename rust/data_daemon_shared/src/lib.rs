@@ -63,6 +63,12 @@ pub fn microseconds_to_seconds(timestamp_us: i64) -> f64 {
     timestamp_us as f64 / MICROSECONDS_PER_SECOND
 }
 
+/// Float seconds as whole microseconds, rounded to nearest with ties to even
+/// as the Python SDK rounds them.
+pub fn seconds_to_microseconds(seconds: f64) -> i64 {
+    (seconds * MICROSECONDS_PER_SECOND).round_ties_even() as i64
+}
+
 /// Recording-window membership for the frames *inside* one video chunk.
 ///
 /// A chunk is a NUT file appended to until something seals it, so frames logged
@@ -457,11 +463,11 @@ pub enum Envelope {
         /// envelope. The **only** key used for window membership, so routing
         /// never depends on the caller's capture clock.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
+        /// Caller-supplied capture time (microseconds) for the recording's
         /// start — the recording's *own* clock, or the publish time when the
-        /// caller supplied none. Stored in microseconds as the row's start and
-        /// POSTed to the backend as `start_time`; never used for routing.
-        timestamp_ns: i64,
+        /// caller supplied none. Stored as the row's start and POSTed to the
+        /// backend as `start_time`; never used for routing.
+        timestamp_us: i64,
     },
     /// Producer announces that the source's active recording has stopped.
     ///
@@ -474,11 +480,11 @@ pub enum Envelope {
         /// recording window closes — the exclusive upper bound of the
         /// membership range, on the same publish clock as the data envelopes.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
-        /// stop, or the publish time when the caller supplied none. Stored in
-        /// microseconds as the row's stop and POSTed to the backend as
-        /// `end_time`; never used for routing.
-        timestamp_ns: i64,
+        /// Caller-supplied capture time (microseconds) for the recording's
+        /// stop, or the publish time when the caller supplied none. Stored as
+        /// the row's stop and POSTed to the backend as `end_time`; never used
+        /// for routing.
+        timestamp_us: i64,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -487,13 +493,13 @@ pub enum Envelope {
     CancelRecording {
         robot_id: String,
         robot_instance: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the cancel — or
+        /// Caller-supplied capture time (microseconds) for the cancel, or
         /// the publish time when the caller supplied none. A cancel is a
-        /// recording stop that discards data, so the daemon stores this in
-        /// microseconds as the row's stop and POSTs it as the backend `end_time`,
-        /// exactly like `StopRecording`. No window-boundary `publish_timestamp_ns`
+        /// recording stop that discards data, so the daemon stores this as the
+        /// row's stop and POSTs it as the backend `end_time`, exactly like
+        /// `StopRecording`. No window-boundary `publish_timestamp_ns`
         /// is carried because cancelling drops the window outright.
-        timestamp_ns: i64,
+        timestamp_us: i64,
     },
     /// Producer delivers one sensor sample.
     ///
@@ -801,8 +807,8 @@ pub struct LiveRecording {
     /// The cloud handle, once `/recording/start` has been notified. `None`
     /// while the recording is still local-only.
     pub recording_id: Option<String>,
-    /// The recording's capture-clock start (Unix nanoseconds), when known.
-    pub start_timestamp_ns: Option<i64>,
+    /// The recording's capture-clock start (microseconds), when known.
+    pub start_timestamp_us: Option<i64>,
 }
 
 /// Reply to a [`RecordingStateQuery`].
@@ -924,6 +930,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn seconds_to_microseconds_rounds_where_truncation_falls_short() {
+        assert_eq!(
+            seconds_to_microseconds(1_771_669_371.383_135),
+            1_771_669_371_383_135
+        );
+    }
+
+    #[test]
     fn health_request_and_reply_round_trip() {
         let request = HealthRequest { nonce: 42 };
         assert_eq!(
@@ -968,7 +982,7 @@ mod tests {
             dataset_id: Some("ds-1".into()),
             dataset_name: Some("warehouse".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_us: 1_700_000_000_000_000,
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -1116,7 +1130,7 @@ mod tests {
             robot_id: "robot-1".into(),
             robot_instance: 2,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_us: 1_700_000_000_000_000,
         };
         let bytes = stop.encode().expect("encode");
         assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
@@ -1125,7 +1139,7 @@ mod tests {
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 2,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_us: 1_700_000_000_000_000,
         };
         let bytes = cancel.encode().expect("encode");
         assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));
