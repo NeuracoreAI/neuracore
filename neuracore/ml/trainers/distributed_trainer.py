@@ -389,6 +389,7 @@ class DistributedTrainer:
             epoch=epoch,
             num_points=self.validation_rollout_points,
             seed=self.validation_rollout_seed,
+            batch_size=self.val_loader.batch_size,
         )
         self.storage_handler.upload_validation_rollouts(epoch_dir)
 
