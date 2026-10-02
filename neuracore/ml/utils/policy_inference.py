@@ -23,7 +23,7 @@ from neuracore.core.utils.http_session import thread_local_session
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.device_utils import get_default_device
-from neuracore.ml.utils.embodiment_names import assign_names_to_model_outputs
+from neuracore.ml.utils.embodiment_names import assign_names_to_batches
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
 from neuracore.ml.utils.preprocessing import (
     apply_preprocessing_methods,
@@ -273,9 +273,7 @@ class PolicyInference:
         Returns:
             SynchronizedPoint with processed outputs.
         """
-        return assign_names_to_model_outputs(
-            batch_output, self.output_embodiment_description
-        )
+        return assign_names_to_batches(batch_output, self.output_embodiment_description)
 
     def _validate_input_sync_point(self, sync_point: SynchronizedPoint) -> None:
         """Validate the sync point with what the model had as input.
