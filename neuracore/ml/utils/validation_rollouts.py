@@ -283,8 +283,6 @@ def _write_input_images(image_root: Path, inputs: NamedTraces) -> None:
 def _write_rgb_jpeg(frame: torch.Tensor, path: Path) -> None:
     """Write one RGB frame. Training frames are float pixels in ``[0, 255]``."""
     image = _channel_last_image(frame).numpy()
-    if image.shape[-1] == 1:
-        image = image[..., 0]
     if image.dtype != np.uint8:
         image = np.clip(image, 0, 255).astype(np.uint8)
     Image.fromarray(image).save(path, format="JPEG")
@@ -300,7 +298,7 @@ def _write_depth_jpeg(frame: torch.Tensor, path: Path) -> None:
 
 def _channel_last_image(frame: torch.Tensor) -> torch.Tensor:
     """Move a channel-first frame to ``(H, W, C)``."""
-    if frame.ndim == 3 and frame.shape[0] in (1, 3):
+    if frame.ndim == 3 and frame.shape[0] == 3:
         return frame.permute(1, 2, 0)
     return frame
 
