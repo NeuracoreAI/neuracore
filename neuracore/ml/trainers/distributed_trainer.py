@@ -390,8 +390,7 @@ class DistributedTrainer:
             num_points=self.validation_rollout_points,
             seed=self.validation_rollout_seed,
         )
-        if epoch_dir is not None:
-            self.storage_handler.upload_validation_rollouts(epoch_dir)
+        self.storage_handler.upload_validation_rollouts(epoch_dir)
 
     def train(self, start_epoch: int = 0) -> None:
         """Run the training loop.

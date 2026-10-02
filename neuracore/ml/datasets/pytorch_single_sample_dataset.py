@@ -63,7 +63,7 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
             raise IndexError(
                 f"Sample index {idx} is outside the dataset of length {len(self)}. "
                 "Expected an index in "
-                f"[0, {len(self)})."
+                f"[0, {len(self) - 1}]."
             )
         robot_ids = list(self.input_cross_embodiment_description) or list(
             self.output_cross_embodiment_description
