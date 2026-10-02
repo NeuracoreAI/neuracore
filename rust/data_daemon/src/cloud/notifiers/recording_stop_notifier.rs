@@ -1,13 +1,13 @@
 //! Backend recording-stop notifier.
 //!
 //! Subscribes to [`DaemonEvent::RecordingStopped`] and POSTs
-//! `/org/{org}/recording/stop` (JSON body `{recording_id, end_time}`) to the
-//! backend. The Python SDK
-//! used to make this call inline from `nc.stop_recording`, but the staging
-//! POST has a fat upper tail (occasional 1-2 s spikes on otherwise
-//! sub-second calls). Doing it here means the SDK call returns as soon as
-//! the producer publishes the `StopRecording` envelope, and the staging
-//! notification rides the daemon's standard retry policy in the background.
+//! `/org/{org}/recording/stop` (JSON body `{recording_id, end_time,
+//! end_timestamp_us}`) to the backend. The Python SDK used to make this call
+//! inline from `nc.stop_recording`, but the staging POST has a fat upper tail
+//! (occasional 1-2 s spikes on otherwise sub-second calls). Doing it here means
+//! the SDK call returns as soon as the producer publishes the `StopRecording`
+//! envelope, and the staging notification rides the daemon's standard retry
+//! policy in the background.
 //!
 //! A single long-lived task processes lifecycle events sequentially, awaiting
 //! each POST inline (a pre-loop sweep and a broadcast-lag sweep recover any
@@ -164,7 +164,7 @@ mod tests {
         let index = seed_notified_recording(&store, "rec-stop-1").await;
         let stop = LifecycleStamp {
             publish_timestamp_ns: 1_700_000_005_000_000_000,
-            timestamp_us: Some(1_600_000_005_000_000),
+            timestamp_us: Some(1_600_000_005_123_457),
         };
         store
             .mark_recording_stopped(index, stop)
@@ -205,9 +205,10 @@ mod tests {
             body,
             serde_json::json!({
                 "recording_id": "rec-stop-1",
-                "end_time": 1_600_000_005.0,
+                "end_time": 1_600_000_005.123_457,
+                "end_timestamp_us": 1_600_000_005_123_457_i64,
             }),
-            "end_time is the caller's stop"
+            "the stop carries the caller's stop in microseconds and in seconds"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
