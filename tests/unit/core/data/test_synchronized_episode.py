@@ -16,6 +16,7 @@ from neuracore_types import (
     SynchronizedPoint,
     SynchronizeRecordingRequest,
 )
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND
 from PIL import Image
 
 from neuracore.core.const import API_URL
@@ -239,7 +240,7 @@ class TestSynchronizedRecording:
 
         assert isinstance(sync_point, SynchronizedPoint)
         assert DataType.JOINT_POSITIONS in sync_point.data
-        assert sync_point.timestamp == 0.0
+        assert sync_point.timestamp_us == 0
         joint_data = cast(
             JointData, list(sync_point.data[DataType.JOINT_POSITIONS].values())[0]
         )
@@ -250,7 +251,7 @@ class TestSynchronizedRecording:
         sync_point = synced_recording[-1]
 
         assert isinstance(sync_point, SynchronizedPoint)
-        assert sync_point.timestamp == 1.0
+        assert sync_point.timestamp_us == MICROSECONDS_PER_SECOND
 
     def test_getitem_out_of_range(self, synced_recording):
         """Test that out of range index raises IndexError."""
@@ -305,9 +306,9 @@ class TestSynchronizedRecording:
         frames = synced[0:5:2]
 
         assert len(frames) == 3
-        assert frames[0].timestamp == 0.0
-        assert frames[1].timestamp == 2.0
-        assert frames[2].timestamp == 4.0
+        assert frames[0].timestamp_us == 0
+        assert frames[1].timestamp_us == 2 * MICROSECONDS_PER_SECOND
+        assert frames[2].timestamp_us == 4 * MICROSECONDS_PER_SECOND
 
     def test_iteration(self, synced_recording: SynchronizedRecording):
         """Test iterating through synchronized recording."""
@@ -315,8 +316,8 @@ class TestSynchronizedRecording:
 
         assert len(frames) == 2
         assert all(isinstance(f, SynchronizedPoint) for f in frames)
-        assert frames[0].timestamp == 0.0
-        assert frames[1].timestamp == 1.0
+        assert frames[0].timestamp_us == 0
+        assert frames[1].timestamp_us == MICROSECONDS_PER_SECOND
 
     def test_iteration_multiple_times(self, synced_recording: SynchronizedRecording):
         """Test that the recording can be iterated multiple times."""
