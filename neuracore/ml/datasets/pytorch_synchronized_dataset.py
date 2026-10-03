@@ -28,7 +28,10 @@ from neuracore.core.utils.training_input_args_validation import (
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.batch_sample_cache import BatchSampleCache
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import (
+    PytorchNeuracoreDataset,
+    SampleIdentity,
+)
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.embodiment_names import (
     convert_to_embodiment_description,
@@ -190,6 +193,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             # server-ordered list and can point at a different recording once
             # the dataset changes, where an id cannot.
             self._episode_recording_ids,
+            self._episode_robot_ids,
         ) = self._get_sample_to_episode_mapping()
         self._logged_in = False
 
@@ -318,26 +322,29 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             description_kind="Output",
         )
 
-    def _get_sample_to_episode_mapping(self) -> tuple[list[int], list[int], list[str]]:
-        """Map each sample index to its episode index, start offset, and recording ID.
+    def _get_sample_to_episode_mapping(
+        self,
+    ) -> tuple[list[int], list[int], list[str], list[str]]:
+        """Map each sample index to its episode index, start offset, and ids.
 
         Omit the last frame of each episode because it is not used for training.
 
         Returns:
-            ``(episode_indices, episode_start_offsets, episode_recording_ids)``
-            where ``episode_indices[sample_idx]`` is the episode index,
-            ``episode_start_offsets[episode_idx]`` is the sample index that
-            episode starts at, and ``episode_recording_ids[episode_idx]``
-            is its id. The offsets let ``__getitem__`` recover a timestep by
-            subtraction rather than by scanning ``episode_indices`` for the
-            episode's first occurrence. The ids let the sample cache be keyed
-            without a recording lookup; they are gathered here because
+            ``(episode_indices, episode_start_offsets, episode_recording_ids,
+            episode_robot_ids)`` where ``episode_indices[sample_idx]`` is the
+            episode index, ``episode_start_offsets[episode_idx]`` is the sample
+            index that episode starts at, and the id lists are per episode.
+            The offsets let ``__getitem__`` recover a timestep by subtraction
+            rather than by scanning ``episode_indices`` for the episode's first
+            occurrence. The ids let the sample cache and rollout folders be
+            keyed without a recording lookup; they are gathered here because
             iterating the synchronized dataset is not guaranteed to be
             restartable, so it must be walked exactly once.
         """
         episode_indices: list[int] = []
         episode_start_offsets: list[int] = []
         episode_recording_ids: list[str] = []
+        episode_robot_ids: list[str] = []
         for recording_idx, recording in enumerate(self.synchronized_dataset):
             # Each recording must have at least 2 timesteps because we drop the
             # last frame from training. Otherwise alignment with per-recording
@@ -350,9 +357,15 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 )
             episode_start_offsets.append(len(episode_indices))
             episode_recording_ids.append(recording.id)
+            episode_robot_ids.append(recording.robot_id)
             episode_indices.extend([recording_idx] * (len(recording) - 1))
 
-        return episode_indices, episode_start_offsets, episode_recording_ids
+        return (
+            episode_indices,
+            episode_start_offsets,
+            episode_recording_ids,
+            episode_robot_ids,
+        )
 
     @staticmethod
     def _project_sync_point(
@@ -623,6 +636,32 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         episode_idx = self.episode_indices[idx]
         timestep = idx - self.episode_start_offsets[episode_idx]
         return self.load_sample(episode_idx, timestep)
+
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return the recording, timestep, and robot for a sample index.
+
+        Args:
+            idx: Flat sample index, the same index ``__getitem__`` accepts.
+
+        Returns:
+            Identity (recording id, timestep, robot id) of the sample at ``idx``.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        if idx < 0 or idx >= len(self):
+            raise IndexError(
+                f"Sample index {idx} is outside the dataset of length {len(self)}. "
+                "Expected an index in "
+                f"[0, {len(self) - 1}]."
+            )
+        episode_idx = self.episode_indices[idx]
+        timestep = idx - self.episode_start_offsets[episode_idx]
+        return SampleIdentity(
+            recording_id=self._episode_recording_ids[episode_idx],
+            timestep=timestep,
+            robot_id=self._episode_robot_ids[episode_idx],
+        )
 
     @property
     def dataset_statistics(self) -> dict[str, dict[DataType, list[NCDataStats]]]:

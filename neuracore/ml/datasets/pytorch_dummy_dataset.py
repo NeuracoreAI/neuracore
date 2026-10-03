@@ -21,7 +21,10 @@ from neuracore_types import (
 
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import (
+    PytorchNeuracoreDataset,
+    SampleIdentity,
+)
 from neuracore.ml.utils.embodiment_names import normalize_data_names
 
 logger = logging.getLogger(__name__)
@@ -268,6 +271,31 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             outputs=outputs,
             outputs_mask=outputs_mask,
             batch_size=1,
+        )
+
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return a synthetic identity for this sample index.
+
+        Args:
+            idx: Flat sample index.
+
+        Returns:
+            One recording per index at timestep 0, using the first robot in
+            the embodiment description.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        if idx < 0 or idx >= len(self):
+            raise IndexError(
+                f"Sample index {idx} is outside the dataset of length {len(self)}. "
+                "Expected an index in "
+                f"[0, {len(self) - 1}]."
+            )
+        return SampleIdentity(
+            recording_id=f"dummy-sample-{idx}",
+            timestep=0,
+            robot_id=self._robot_ids[0],
         )
 
     def load_sample(

@@ -1529,6 +1529,11 @@ class TestPerformanceAndOptimization:
         for episode_idx, offset in enumerate(dataset.episode_start_offsets):
             assert dataset.episode_indices.index(episode_idx) == offset
 
+        identity = dataset.get_sample_identity(10)
+        assert identity.recording_id == "mock_recording"
+        assert identity.timestep == 1
+        assert identity.robot_id == ROBOT_ID
+
     @patch("neuracore.login")
     def test_precomputed_padding_widths_match_a_per_sample_scan(
         self, mock_login, mock_synchronized_dataset

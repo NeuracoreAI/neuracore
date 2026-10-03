@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,12 @@ class TrainingStorageHandler(UploadStorageMixin):
         self._upload_executor: ThreadPoolExecutor | None = None
         self._pending_uploads_lock = threading.Lock()
         self._pending_uploads: dict[Path, Future] = {}
+
+        # Rollout JPEG/JSON writes run here, not on the checkpoint uploader,
+        # so encoding a rollout epoch cannot sit in front of a checkpoint PUT.
+        self._rollout_save_executor: ThreadPoolExecutor | None = None
+        self._pending_rollout_saves_lock = threading.Lock()
+        self._pending_rollout_saves: list[Future] = []
 
         # Progress updates are fire-and-forget from the training loop's point
         # of view. They get their own worker rather than sharing the upload
@@ -209,6 +216,48 @@ class TrainingStorageHandler(UploadStorageMixin):
         with self._pending_uploads_lock:
             self._pending_uploads[local_path] = future
 
+    def _get_rollout_save_executor(self) -> ThreadPoolExecutor:
+        """Lazily create the single-worker background rollout-save executor."""
+        if self._rollout_save_executor is None:
+            self._rollout_save_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="nc-rollout-save"
+            )
+        return self._rollout_save_executor
+
+    def submit_rollout_save(self, save: Callable[[], None]) -> None:
+        """Write one rollout epoch on the background worker.
+
+        The training thread returns as soon as the job is queued. A failed
+        write is logged and does not propagate to training.
+
+        Args:
+            save: Writes the epoch files, then enqueues their upload.
+        """
+
+        def _do_save() -> None:
+            try:
+                save()
+            except Exception:
+                logger.error(
+                    "Unexpected error writing validation rollouts", exc_info=True
+                )
+
+        future = self._get_rollout_save_executor().submit(_do_save)
+        with self._pending_rollout_saves_lock:
+            self._pending_rollout_saves.append(future)
+
+    def wait_for_rollout_saves(self) -> None:
+        """Block until every submitted rollout write has finished.
+
+        Call this before waiting for uploads. The write job is what enqueues
+        those uploads, so they are not in the upload queue until the write
+        returns.
+        """
+        with self._pending_rollout_saves_lock:
+            futures = list(self._pending_rollout_saves)
+        for future in futures:
+            future.result()
+
     def wait_for_pending_uploads(self) -> None:
         """Block until every submitted checkpoint/artifact upload has finished.
 
@@ -221,6 +270,41 @@ class TrainingStorageHandler(UploadStorageMixin):
             futures = list(self._pending_uploads.values())
         for future in futures:
             future.result()
+
+    def upload_validation_rollouts(self, epoch_dir: Path) -> None:
+        """Upload one epoch of rollout files without blocking training.
+
+        Local runs keep the files in ``epoch_dir``. Cloud runs enqueue each
+        file on the same background worker checkpoints use, under
+        ``validation-rollouts/...`` within the training job.
+
+        Args:
+            epoch_dir: Directory produced by ``save_validation_rollouts``.
+        """
+        if not self.log_to_cloud:
+            return
+
+        # epoch_dir is ``<output>/validation-rollouts/epoch_XXXX``. The remote
+        # key is that suffix, which the backend places under the training job.
+        remote_root = epoch_dir.parent.parent
+        for path in sorted(epoch_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix == ".jpeg":
+                content_type = "image/jpeg"
+            elif path.suffix == ".json":
+                content_type = "application/json"
+            else:
+                raise ValueError(
+                    f"Validation rollout file {path} has suffix {path.suffix!r}. "
+                    "Expected .jpeg or .json."
+                )
+            self._submit_upload(
+                path,
+                remote_filepath=path.relative_to(remote_root).as_posix(),
+                content_type=content_type,
+                delete_on_success=True,
+            )
 
     def save_checkpoint(self, checkpoint: dict, relative_checkpoint_path: Path) -> None:
         """Save checkpoint to storage.
