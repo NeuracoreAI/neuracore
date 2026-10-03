@@ -15,13 +15,7 @@ from typing import TypeAlias
 
 import numpy as np
 import torch
-from neuracore_types import (
-    BatchedDepthData,
-    BatchedNCData,
-    BatchedRGBData,
-    DataType,
-    EmbodimentDescription,
-)
+from neuracore_types import BatchedDepthData, BatchedNCData, BatchedRGBData, DataType
 from neuracore_types.utils.depth_utils import depth_to_rgb
 from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
@@ -33,7 +27,7 @@ from neuracore.ml.datasets.pytorch_neuracore_dataset import (
     SampleIdentity,
 )
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
-from neuracore.ml.utils.embodiment_names import assign_names_to_model_outputs
+from neuracore.ml.utils.embodiment_names import assign_names_to_batches
 from neuracore.ml.utils.json_serialization import JsonValue
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 
@@ -93,33 +87,6 @@ def select_validation_rollout_indices(
     return [validation_indices[int(position)] for position in positions]
 
 
-def rollout_epoch_dir(output_dir: Path, epoch: int) -> Path:
-    """Return the directory for one epoch of rollout snapshots.
-
-    Args:
-        output_dir: Training output directory.
-        epoch: Epoch number being snapshotted.
-
-    Returns:
-        ``output_dir/validation-rollouts/epoch_XXXX``.
-    """
-    return output_dir / "validation-rollouts" / f"epoch_{epoch:04d}"
-
-
-def rollout_point_dir(epoch_dir: Path, recording_id: str, timestep: int) -> Path:
-    """Return the directory for one saved timestep.
-
-    Args:
-        epoch_dir: Epoch directory from ``rollout_epoch_dir``.
-        recording_id: Recording that owns the timestep.
-        timestep: Point index inside that recording.
-
-    Returns:
-        ``epoch_dir/{recording_id}/point_XXXXXX``.
-    """
-    return epoch_dir / recording_id / f"point_{timestep:06d}"
-
-
 def convert_trace_value(data: BatchedNCData, *, horizon: bool) -> JsonValue:
     """Convert one named trace into a JSON value.
 
@@ -146,39 +113,6 @@ def convert_trace_value(data: BatchedNCData, *, horizon: bool) -> JsonValue:
             return float(number)
         return int(number)
     return tensor.tolist()
-
-
-def write_rollout_point(
-    point_dir: Path,
-    inputs: NamedTraces,
-    predictions: NamedTraces,
-    ground_truth: NamedTraces,
-) -> None:
-    """Write one point's images and JSON files.
-
-    Args:
-        point_dir: Destination directory for this recording timestep.
-        inputs: Named model inputs. Images are written as JPEG files and the
-            other traces go to ``state_input.json``.
-        predictions: Named inference outputs, written as horizon lists.
-        ground_truth: Named dataset outputs, written as horizon lists.
-    """
-    _write_input_images(point_dir / "inputs" / "images", inputs)
-    _write_trace_json(
-        point_dir / "inputs" / "state_input.json",
-        inputs,
-        horizon=False,
-    )
-    _write_trace_json(
-        point_dir / "outputs" / "prediction_horizon.json",
-        predictions,
-        horizon=True,
-    )
-    _write_trace_json(
-        point_dir / "outputs" / "ground_truth.json",
-        ground_truth,
-        horizon=True,
-    )
 
 
 def save_validation_rollouts(
@@ -216,7 +150,7 @@ def save_validation_rollouts(
         The epoch directory that holds the saved points.
     """
     selected = select_validation_rollout_indices(validation_indices, num_points, seed)
-    epoch_dir = rollout_epoch_dir(output_dir, epoch)
+    epoch_dir = output_dir / "validation-rollouts" / f"epoch_{epoch:04d}"
     logger.info(
         "Saving %s validation rollout point(s) for epoch %s",
         len(selected),
@@ -229,16 +163,48 @@ def save_validation_rollouts(
         with torch.no_grad():
             for index in selected:
                 identity = dataset.get_sample_identity(index)
-                _save_one_rollout_point(
-                    model=model,
-                    dataset=dataset,
-                    index=index,
-                    identity=identity,
-                    device=device,
-                    inference_device_preprocessing=inference_device_preprocessing,
-                    point_dir=rollout_point_dir(
-                        epoch_dir, identity.recording_id, identity.timestep
-                    ),
+                batch = dataset[index].to(device)
+                apply_device_preprocessing(batch, *inference_device_preprocessing)
+                predictions = model.forward(
+                    BatchedInferenceInputs(
+                        inputs=batch.inputs,
+                        inputs_mask=batch.inputs_mask,
+                        batch_size=batch.batch_size,
+                    )
+                )
+                input_description = dataset.input_cross_embodiment_description[
+                    identity.robot_id
+                ]
+                output_description = dataset.output_cross_embodiment_description[
+                    identity.robot_id
+                ]
+                point_dir = (
+                    epoch_dir / identity.recording_id / f"point_{identity.timestep:06d}"
+                )
+                inputs = assign_names_to_batches(
+                    batch.inputs, input_description, masks=batch.inputs_mask
+                )
+                named_predictions = assign_names_to_batches(
+                    predictions, output_description, masks=batch.outputs_mask
+                )
+                ground_truth = assign_names_to_batches(
+                    batch.outputs, output_description, masks=batch.outputs_mask
+                )
+                _write_input_images(point_dir / "inputs" / "images", inputs)
+                _write_trace_json(
+                    point_dir / "inputs" / "state_input.json",
+                    inputs,
+                    horizon=False,
+                )
+                _write_trace_json(
+                    point_dir / "outputs" / "prediction_horizon.json",
+                    named_predictions,
+                    horizon=True,
+                )
+                _write_trace_json(
+                    point_dir / "outputs" / "ground_truth.json",
+                    ground_truth,
+                    horizon=True,
                 )
                 identities.append(identity)
     finally:
@@ -246,69 +212,6 @@ def save_validation_rollouts(
 
     write_rollout_manifest(epoch_dir, epoch, identities)
     return epoch_dir
-
-
-def _save_one_rollout_point(
-    model: NeuracoreModel,
-    dataset: PytorchNeuracoreDataset,
-    index: int,
-    identity: SampleIdentity,
-    device: torch.device,
-    inference_device_preprocessing: tuple[
-        PreprocessingConfiguration, PreprocessingConfiguration
-    ],
-    point_dir: Path,
-) -> None:
-    """Load one validation sample, predict its horizon, and write the point."""
-    batch = dataset[index].to(device)
-    apply_device_preprocessing(batch, *inference_device_preprocessing)
-    predictions = model.forward(
-        BatchedInferenceInputs(
-            inputs=batch.inputs,
-            inputs_mask=batch.inputs_mask,
-            batch_size=batch.batch_size,
-        )
-    )
-    input_description = _embodiment_description(
-        dataset.input_cross_embodiment_description, identity.robot_id
-    )
-    output_description = _embodiment_description(
-        dataset.output_cross_embodiment_description, identity.robot_id
-    )
-    write_rollout_point(
-        point_dir,
-        inputs=assign_names_to_model_outputs(
-            batch.inputs, input_description, masks=batch.inputs_mask
-        ),
-        predictions=assign_names_to_model_outputs(
-            predictions, output_description, masks=batch.outputs_mask
-        ),
-        ground_truth=assign_names_to_model_outputs(
-            batch.outputs, output_description, masks=batch.outputs_mask
-        ),
-    )
-
-
-def _embodiment_description(
-    descriptions: Mapping[str, EmbodimentDescription],
-    robot_id: str,
-) -> EmbodimentDescription:
-    """Return the embodiment description for one robot.
-
-    Args:
-        descriptions: Per-robot input or output descriptions.
-        robot_id: Robot that recorded the sample.
-
-    Returns:
-        The description ``assign_names_to_model_outputs`` names traces with.
-
-    Raises:
-        KeyError: If this robot has no description.
-    """
-    try:
-        return descriptions[robot_id]
-    except KeyError as error:
-        raise KeyError(f"No embodiment description for robot {robot_id}.") from error
 
 
 def write_rollout_manifest(
