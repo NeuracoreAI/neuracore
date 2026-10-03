@@ -1,0 +1,140 @@
+name: Integration PF - Extras Install (Staging)
+
+# Builds the wheels from the chosen ref, then installs them with no extra and
+# with each optional extra on every supported platform and Python minor. Each
+# install gets its own virtual environment, is checked for a consistent
+# environment, and must import the packages of its extra. One job covers one
+# platform, and its summary lists the result of each Python and extra.
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, tag, or branch to test. Leave empty to use the current branch."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-wheels.yaml
+    with:
+      ref: ${{ inputs.ref || '' }}
+
+  install:
+    name: ${{ matrix.target }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Set up Pythons
+        uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Download wheel artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: neuracore-wheels-${{ matrix.target }}
+          path: dist
+
+      - name: Install and check every extra on every Python
+        shell: bash
+        run: |
+          set -uo pipefail
+          pythons="3.10 3.11 3.12 3.13 3.14"
+          extras="base export examples mjcf ml dev import"
+
+          modules_for() {
+            case "$1" in
+              base) echo "" ;;
+              export) echo "mcap pyarrow pandas" ;;
+              examples) echo "matplotlib mujoco pyquaternion" ;;
+              mjcf) echo "mujoco" ;;
+              ml) echo "torch torchvision transformers diffusers" ;;
+              dev) echo "pytest" ;;
+              import) echo "lerobot tensorflow" ;;
+            esac
+          }
+
+          spec_for() {
+            local python="$1" extra="$2" cptag whl
+            cptag="cp${python//./}"
+            whl="$(ls "$PWD"/dist/*-"$cptag"-"$cptag"-*.whl)" || return 1
+            if [ "$extra" = "base" ]; then echo "$whl"; else echo "neuracore[$extra] @ file://$whl"; fi
+          }
+
+          check_extra() {
+            local python="$1" extra="$2" spec venv py
+            spec="$(spec_for "$python" "$extra")" || return 1
+            venv="$RUNNER_TEMP/venv-$python-$extra"
+            py="$venv/bin/python"
+            uv venv --clear --python "$python" "$venv" || return 1
+            uv pip install --python "$py" "$spec" || return 1
+            uv pip check --python "$py" || return 1
+            "$py" - $(modules_for "$extra") <<'PY'
+          import importlib
+          import sys
+
+          import neuracore
+
+          print("neuracore", neuracore.__version__)
+          for name in sys.argv[1:]:
+              module = importlib.import_module(name)
+              print(name, getattr(module, "__version__", "ok"))
+          PY
+          }
+
+          failed=0
+          for python in $pythons; do
+            for extra in $extras; do
+              echo "::group::py$python $extra"
+              if check_extra "$python" "$extra"; then result="pass"; else result="FAIL"; failed=1; fi
+              echo "::endgroup::"
+              echo "py$python $extra: $result"
+              printf -v "res_${python//./}_$extra" '%s' "$result"
+              rm -rf "$RUNNER_TEMP/venv-$python-$extra"
+            done
+          done
+
+          {
+            echo "### ${TARGET} (wheels)"
+            echo
+            header="| extra |"; divider="| --- |"
+            for python in $pythons; do header="$header $python |"; divider="$divider --- |"; done
+            echo "$header"
+            echo "$divider"
+            for extra in $extras; do
+              row="| $extra |"
+              for python in $pythons; do
+                name="res_${python//./}_$extra"
+                row="$row ${!name} |"
+              done
+              echo "$row"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
+        env:
+          TARGET: ${{ matrix.target }}
