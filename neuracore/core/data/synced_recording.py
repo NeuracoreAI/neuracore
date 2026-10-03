@@ -110,7 +110,7 @@ class SynchronizedRecording:
         instance: int,
         synchronization_details: SynchronizationDetails,
         prefetch_videos: bool = False,
-        episode_synced: SynchronizedEpisodeModel | None = None,
+        synced_episode: SynchronizedEpisodeModel | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -125,7 +125,7 @@ class SynchronizedRecording:
                 must match the parameters the data was synchronized with or the
                 recording is synchronized again under a different key.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
-            episode_synced: Already-fetched synchronized metadata for this
+            synced_episode: Already-fetched synchronized metadata for this
                 recording. When omitted, it is requested here.
         """
         self.dataset = dataset
@@ -136,15 +136,15 @@ class SynchronizedRecording:
         self.robot_id = robot_id
         self.instance = instance
 
-        self._episode_synced = (
-            episode_synced if episode_synced is not None else self._get_synced_data()
+        self._synced_episode = (
+            synced_episode if synced_episode is not None else self._get_synced_data()
         )
-        self._episode_length = len(self._episode_synced.observations)
+        self._episode_length = len(self._synced_episode.observations)
 
         # Use start_time and end_time from the synchronized episode,
         # as they reflect trim_start_end settings from synchronization
-        self.start_time = self._episode_synced.start_time
-        self.end_time = self._episode_synced.end_time
+        self.start_time = self._synced_episode.start_time
+        self.end_time = self._synced_episode.end_time
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
@@ -155,7 +155,7 @@ class SynchronizedRecording:
             # Check if cache directory exists and contains any files
             wait_for_lock_release(cache / ".recording.lock", cache)
             # NOTE: this is to start video prefetching frames into cache
-            self._load_sync_point(self._episode_synced.observations[0])
+            self._load_sync_point(self._synced_episode.observations[0])
 
     @property
     def frequency(self) -> int:
@@ -687,7 +687,7 @@ class SynchronizedRecording:
             The sync point, holding only the sensors in embodiment_description.
         """
         return self._load_sync_point(
-            self._episode_synced.observations[timestep], embodiment_description
+            self._synced_episode.observations[timestep], embodiment_description
         )
 
     def get_sync_points(
@@ -763,7 +763,7 @@ class SynchronizedRecording:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
 
-        return self._load_sync_point(self._episode_synced.observations[idx])
+        return self._load_sync_point(self._synced_episode.observations[idx])
 
     def __next__(self) -> SynchronizedPoint:
         """Get the next synchronized data point in the episode.
@@ -774,10 +774,10 @@ class SynchronizedRecording:
         Raises:
             StopIteration: When all timesteps have been processed.
         """
-        if self._iter_idx >= len(self._episode_synced.observations):
+        if self._iter_idx >= len(self._synced_episode.observations):
             raise StopIteration
         sync_point = self._load_sync_point(
-            self._episode_synced.observations[self._iter_idx]
+            self._synced_episode.observations[self._iter_idx]
         )
         self._iter_idx += 1
         return sync_point
