@@ -222,15 +222,13 @@ class RecordingContext:
         if not values:
             return
         robot_id = self._require_source("log_joints")
-        timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_joints(
             robot_id,
             self._robot_instance,
             data_type,
             joined_names,
             values,
-            timestamp_ns,
-            timestamp,
+            seconds_to_us(timestamp),
         )
 
     def log_frame(
@@ -291,15 +289,13 @@ class RecordingContext:
         serialized, so the daemon stores it verbatim as a per-trace JSON sample.
         """
         robot_id = self._require_source("log_json")
-        timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_json(
             robot_id,
             self._robot_instance,
             data_type,
             name,
             payload,
-            timestamp_ns,
-            timestamp,
+            seconds_to_us(timestamp),
         )
 
     def cancel_recording(self, timestamp: float | None = None) -> None:

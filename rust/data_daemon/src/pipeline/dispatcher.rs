@@ -411,20 +411,18 @@ struct Held {
     payload: HeldPayload,
 }
 
-/// The data carried by a held envelope. `timestamp_ns` / `timestamp_s` here are
+/// The data carried by a held envelope. `timestamp_us` here is
 /// the data's *own* capture clock (content), never routing.
 enum HeldPayload {
     Data {
         data_type: String,
         sensor_name: Option<String>,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp_us: i64,
         payload: Vec<u8>,
     },
     Batch {
         data_type: String,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp_us: i64,
         items: Vec<BatchedDataItem>,
     },
     Video {
@@ -614,8 +612,7 @@ impl Dispatcher {
                 data_type,
                 sensor_name,
                 publish_timestamp_ns,
-                timestamp_ns,
-                timestamp_s,
+                timestamp_us,
                 payload,
             } => {
                 let source = (robot_id, robot_instance);
@@ -627,8 +624,7 @@ impl Dispatcher {
                     payload: HeldPayload::Data {
                         data_type,
                         sensor_name,
-                        timestamp_ns,
-                        timestamp_s,
+                        timestamp_us,
                         payload,
                     },
                 });
@@ -638,8 +634,7 @@ impl Dispatcher {
                 robot_instance,
                 data_type,
                 publish_timestamp_ns,
-                timestamp_ns,
-                timestamp_s,
+                timestamp_us,
                 items,
             } => {
                 let source = (robot_id, robot_instance);
@@ -650,8 +645,7 @@ impl Dispatcher {
                     publish_timestamp_ns,
                     payload: HeldPayload::Batch {
                         data_type,
-                        timestamp_ns,
-                        timestamp_s,
+                        timestamp_us,
                         items,
                     },
                 });
@@ -1431,8 +1425,7 @@ impl Dispatcher {
             HeldPayload::Data {
                 data_type,
                 sensor_name,
-                timestamp_ns,
-                timestamp_s,
+                timestamp_us,
                 payload,
             } => {
                 self.route_data(
@@ -1440,16 +1433,14 @@ impl Dispatcher {
                     publish_ts,
                     data_type,
                     sensor_name,
-                    timestamp_ns,
-                    timestamp_s,
+                    timestamp_us,
                     payload,
                 )
                 .await;
             }
             HeldPayload::Batch {
                 data_type,
-                timestamp_ns,
-                timestamp_s,
+                timestamp_us,
                 items,
             } => {
                 for item in items {
@@ -1458,8 +1449,7 @@ impl Dispatcher {
                         publish_ts,
                         data_type.clone(),
                         item.sensor_name,
-                        timestamp_ns,
-                        timestamp_s,
+                        timestamp_us,
                         item.payload,
                     )
                     .await;
@@ -1590,8 +1580,7 @@ impl Dispatcher {
         publish_ts: i64,
         data_type: String,
         sensor_name: Option<String>,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp_us: i64,
         payload: Vec<u8>,
     ) {
         let Some(entry) = self.windows.get_mut(source) else {
@@ -1613,8 +1602,7 @@ impl Dispatcher {
         .clone();
         if sender
             .send(TraceActorMessage::Data {
-                timestamp_ns,
-                timestamp_s,
+                timestamp_us,
                 payload,
             })
             .await
@@ -2074,24 +2062,28 @@ mod tests {
         }
     }
 
-    /// A datum published at `publish_ts` with `content_ts` as its own
+    /// A datum published at `publish_ts` with `capture_us` as its own
     /// (decoupled) capture timestamp.
-    fn datum_full(robot: &str, publish_ts: i64, content_ts: i64, value: i64) -> Envelope {
+    fn datum_full(robot: &str, publish_ts: i64, capture_us: i64, value: i64) -> Envelope {
         Envelope::Data {
             robot_id: robot.into(),
             robot_instance: 0,
             data_type: "joints".into(),
             sensor_name: Some("waist".into()),
             publish_timestamp_ns: publish_ts,
-            timestamp_ns: content_ts,
-            timestamp_s: None,
+            timestamp_us: capture_us,
             payload: serde_json::to_vec(&serde_json::json!({ "i": value })).unwrap(),
         }
     }
 
     /// A datum whose publish time and capture time coincide.
     fn datum(robot: &str, publish_ts: i64, value: i64) -> Envelope {
-        datum_full(robot, publish_ts, publish_ts, value)
+        datum_full(
+            robot,
+            publish_ts,
+            publish_ts / NANOSECONDS_PER_MICROSECOND,
+            value,
+        )
     }
 
     /// A short holdback keeps the tests fast.
