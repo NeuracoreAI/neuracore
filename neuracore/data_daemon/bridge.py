@@ -256,7 +256,6 @@ class RecordingContext:
             timestamp: the Unix timestamp of the sample.
         """
         robot_id = self._require_source("log_frame")
-        timestamp_ns = int(timestamp * 1_000_000_000)
         native = _load_native()
         try:
             native.log_frame(
@@ -268,8 +267,7 @@ class RecordingContext:
                 int(height),
                 dtype,
                 payload,
-                timestamp_ns,
-                timestamp,
+                seconds_to_us(timestamp),
             )
         except native.LoggingStalledError as error:
             raise LoggingStalledError(str(error)) from error
