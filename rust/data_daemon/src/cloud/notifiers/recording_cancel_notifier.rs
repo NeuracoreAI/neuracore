@@ -131,7 +131,7 @@ mod tests {
             .expect("mark start notified");
         let cancel = LifecycleStamp {
             publish_timestamp_ns: 5_000_000_000,
-            timestamp_us: Some(3_000_000),
+            timestamp_us: Some(3_123_457),
         };
         store.cancel_recording(index, cancel).await.expect("cancel");
         index
@@ -190,9 +190,9 @@ mod tests {
             body,
             serde_json::json!({
                 "recording_id": "rec-cancel-1",
-                "end_time": 3.0,
+                "end_time": 3.123_457,
             }),
-            "end_time is the caller's cancel"
+            "the cancel carries the caller's cancel in seconds and no microsecond field"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
