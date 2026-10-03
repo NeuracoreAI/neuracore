@@ -52,7 +52,7 @@ mod query;
 mod recording_state_cache;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameDtype};
+use data_daemon_shared::{Envelope, FrameDtype, NANOSECONDS_PER_MICROSECOND};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -71,12 +71,11 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 /// (`publish_timestamp_ns`, always wall-clock now) — that, never the caller's
 /// timestamp, is what the daemon uses for window membership, so a synthetic
 /// capture time can't shift the window or clip data. Separately, the recording's
-/// *capture* timestamp (`timestamp_ns` when supplied, else the publish time) is
-/// what the daemon stores in microseconds as the row's start and POSTs as the
-/// backend `start_time`. The capture timestamp is returned because it is what tells
+/// *capture* timestamp (`timestamp_us` when supplied, else the publish time) is
+/// what the daemon stores as the row's start and POSTs as the backend
+/// `start_time`. The capture timestamp is returned because it is what tells
 /// this recording apart from its predecessor before either has a cloud id.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None, timestamp_ns = None))]
 fn start_recording(
     py: Python<'_>,
     robot_id: &str,
@@ -84,7 +83,7 @@ fn start_recording(
     robot_name: Option<String>,
     dataset_id: Option<String>,
     dataset_name: Option<String>,
-    timestamp_ns: Option<i64>,
+    timestamp_us: Option<i64>,
 ) -> PyResult<i64> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
@@ -95,7 +94,8 @@ fn start_recording(
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
-        let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
+        let capture_timestamp_us =
+            timestamp_us.unwrap_or(publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND);
         publish(&Envelope::StartRecording {
             robot_id,
             robot_instance,
@@ -103,7 +103,7 @@ fn start_recording(
             dataset_id,
             dataset_name,
             publish_timestamp_ns,
-            timestamp_ns: capture_timestamp_ns,
+            timestamp_us: capture_timestamp_us,
         })?;
         // The daemon stores this exact value as the recording's start, so this
         // process now holds the same identity a refresh would fetch — a
@@ -111,11 +111,11 @@ fn start_recording(
         recording_state_cache::note_local_start(
             &robot_id_for_boundary,
             robot_instance,
-            capture_timestamp_ns,
+            capture_timestamp_us,
         );
         // The writer is deliberately not told where the window opened: a chunk
         // may span the boundary, and the daemon splits it per frame.
-        Ok(capture_timestamp_ns)
+        Ok(capture_timestamp_us)
     })
 }
 
@@ -344,17 +344,17 @@ fn log_json(
 /// The producer stamps the window's upper bound on the publish clock here
 /// (`publish_timestamp_ns`, always wall-clock now at the send), so the whole
 /// publish clock is owned by the producer (consistent with the data
-/// envelopes). The recording's *capture* stop time (`timestamp_ns` when
-/// supplied, else the publish time) is separate: it is stored in
-/// microseconds as the row's stop and POSTed as the backend `end_time`, never
-/// used for window membership.
+/// envelopes). The recording's *capture* stop time (`timestamp_us` when
+/// supplied, else the publish time) is separate: it is stored as the row's
+/// stop and POSTed as the backend `end_time`, never used for window
+/// membership.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
+#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None))]
 fn stop_recording(
     py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
-    timestamp_ns: Option<i64>,
+    timestamp_us: Option<i64>,
 ) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
@@ -376,7 +376,8 @@ fn stop_recording(
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
-        let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
+        let capture_timestamp_us =
+            timestamp_us.unwrap_or(publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND);
         // Publish `StopRecording` FIRST, from THIS (the calling) thread's
         // publisher — the same port as `StartRecording` — stamping the window's
         // upper bound at the actual send. Publishing before the (possibly slow)
@@ -387,7 +388,7 @@ fn stop_recording(
             robot_id: robot_id.clone(),
             robot_instance,
             publish_timestamp_ns,
-            timestamp_ns: capture_timestamp_ns,
+            timestamp_us: capture_timestamp_us,
         })?;
         recording_state_cache::note_local_end(&robot_id, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
@@ -432,23 +433,24 @@ fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult
 /// the recovery sweep reclaims any spooled NUTs).
 ///
 /// A cancel is a recording stop that discards data, so it carries the same
-/// capture `timestamp_ns` as `stop_recording` (the caller's value, else the
-/// publish clock); the daemon stores it in microseconds as the row's stop and
-/// POSTs it as the backend `end_time`.
+/// capture `timestamp_us` as `stop_recording` (the caller's value, else the
+/// publish clock); the daemon stores it as the row's stop and POSTs it as the
+/// backend `end_time`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
+#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None))]
 fn cancel_recording(
     py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
-    timestamp_ns: Option<i64>,
+    timestamp_us: Option<i64>,
 ) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
-        let capture_timestamp_ns = timestamp_ns.unwrap_or_else(now_ns);
+        let capture_timestamp_us =
+            timestamp_us.unwrap_or_else(|| now_ns() / NANOSECONDS_PER_MICROSECOND);
         // Barrier on the writer: it drains any frames still queued for this
         // source (FIFO) and drops the in-progress chunk state without announcing
         // it, then acks. Block until acked so the cancel is ordered after those
@@ -466,7 +468,7 @@ fn cancel_recording(
         publish(&Envelope::CancelRecording {
             robot_id: robot_id.clone(),
             robot_instance,
-            timestamp_ns: capture_timestamp_ns,
+            timestamp_us: capture_timestamp_us,
         })?;
         recording_state_cache::note_local_end(&robot_id, robot_instance);
         Ok(())
@@ -536,7 +538,7 @@ fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
 /// Returns `None` for "unknown" — nothing has ever answered for this source —
 /// which is never "not recording". An answer is a dict whose `"recording"` is
 /// `None` or the recording's `recording_index` / `cloud_recording_id` /
-/// `start_timestamp_ns`.
+/// `start_timestamp_us`.
 #[pyfunction]
 #[pyo3(signature = (robot_id, robot_instance, timeout_s))]
 fn recording_state<'py>(
@@ -558,7 +560,7 @@ fn recording_state<'py>(
             let live = PyDict::new(py);
             live.set_item("recording_index", recording.recording_index)?;
             live.set_item("cloud_recording_id", recording.recording_id)?;
-            live.set_item("start_timestamp_ns", recording.start_timestamp_ns)?;
+            live.set_item("start_timestamp_us", recording.start_timestamp_us)?;
             reply.set_item("recording", live)?;
         }
         None => reply.set_item("recording", py.None())?,
