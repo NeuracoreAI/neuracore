@@ -122,14 +122,21 @@ def _is_slot_masked(
     data_type: DataType,
     index: int,
 ) -> bool:
-    """Return whether this embodiment slot is padding for the current robot."""
+    """Return whether this embodiment slot is padding for the current robot.
+
+    Raises:
+        IndexError: If ``index`` is outside the mask for ``data_type``.
+    """
     if masks is None or data_type not in masks:
         return False
     mask = masks[data_type]
     if mask.ndim >= 2:
         mask = mask[0]
     if index < 0 or index >= mask.shape[0]:
-        return True
+        raise IndexError(
+            f"Slot index {index} is outside the {data_type.value} mask of length "
+            f"{mask.shape[0]}."
+        )
     return float(mask[index]) == 0.0
 
 
@@ -143,6 +150,7 @@ def assign_names_to_batches(
     Sparse embodiment specs keep their absolute tensor indices. Slots with no
     name in the description are left unnamed so padded cross-embodiment
     tensors are not treated as joints. A mask of 0 drops that named slot too.
+    A named index outside the mask is an error.
 
     Args:
         batch: One tensor list per data type.
@@ -153,6 +161,11 @@ def assign_names_to_batches(
     Returns:
         The named batch. Image and other non-joint types are included when
         they are in the description; callers decide what to persist.
+
+    Raises:
+        ValueError: If a data type is missing from the description, or the
+            tensor list is shorter than the highest named index.
+        IndexError: If a named index is outside that data type's mask.
     """
     named: dict[DataType, dict[str, BatchedNCData]] = defaultdict(dict)
 
