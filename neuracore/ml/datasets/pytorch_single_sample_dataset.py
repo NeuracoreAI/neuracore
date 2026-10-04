@@ -25,7 +25,16 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
         num_recordings: int,
         dataset_statistics: dict[str, dict[DataType, list[NCDataStats]]],
     ):
-        """Initialize the decoy dataset."""
+        """Initialize the SingleSampleDataset.
+
+        Args:
+            sample: The sample every index returns.
+            input_cross_embodiment_description: Per-robot input names.
+            output_cross_embodiment_description: Per-robot output names.
+            output_prediction_horizon: Number of future timesteps predicted.
+            num_recordings: How many samples the dataset reports.
+            dataset_statistics: Statistics of the mimicked dataset.
+        """
         super().__init__(
             num_recordings=num_recordings,
             input_cross_embodiment_description=input_cross_embodiment_description,
@@ -35,6 +44,12 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
 
         # Create a template sample from the first sample of the dataset
         self._sample = sample
+        self._robot_id = next(
+            iter(
+                input_cross_embodiment_description
+                or output_cross_embodiment_description
+            )
+        )
         self._num_recordings = num_recordings
         self._dataset_statistics = dataset_statistics
 
@@ -47,14 +62,14 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
         return self.load_sample(idx)
 
     def get_sample_identity(self, idx: int) -> SampleIdentity:
-        """Return a synthetic identity for this decoy dataset.
+        """Return a synthetic identity for this SingleSampleDataset.
 
         Args:
             idx: Flat sample index.
 
         Returns:
-            One recording per index at timestep 0, using a robot from the
-            embodiment description.
+            One recording per index at timestep 0, on the robot the stored
+            sample came from.
 
         Raises:
             IndexError: If ``idx`` is outside the dataset.
@@ -65,13 +80,10 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
                 "Expected an index in "
                 f"[0, {len(self) - 1}]."
             )
-        robot_ids = list(self.input_cross_embodiment_description) or list(
-            self.output_cross_embodiment_description
-        )
         return SampleIdentity(
             recording_id=f"single-sample-{idx}",
             timestep=0,
-            robot_id=robot_ids[idx % len(robot_ids)],
+            robot_id=self._robot_id,
         )
 
     def load_sample(
