@@ -10,12 +10,13 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
+from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.logging.system_metrics import (
     SYSTEM_METRIC_PREFIX,
     SystemMetricsCollector,
@@ -27,7 +28,10 @@ from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
-from neuracore.ml.utils.validation_rollouts import save_validation_rollouts
+from neuracore.ml.utils.validation_rollouts import (
+    ValidationRolloutConfig,
+    save_validation_rollouts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +97,7 @@ class DistributedTrainer:
         rank: int = 0,
         world_size: int = 1,
         device: torch.device | None = None,
-        validation_rollout_points: int = 0,
-        validation_rollout_frequency: int = 5,
-        validation_rollout_seed: int = 0,
+        validation_rollout_config: ValidationRolloutConfig | None = None,
     ):
         """Initialize the distributed trainer.
 
@@ -125,28 +127,14 @@ class DistributedTrainer:
             rank: Rank of this process
             world_size: Total number of processes/GPUs
             device: Optional device to use for training
-            validation_rollout_points: How many validation timesteps to save
-                as trajectory rollouts. 0 disables rollout saving. Metric
-                validation still covers every validation sample.
-            validation_rollout_frequency: Save rollouts when
-                ``epoch % validation_rollout_frequency == 0``.
-            validation_rollout_seed: Seed for which validation timesteps are
-                saved. The same seed keeps those timesteps fixed across epochs.
+            validation_rollout_config: Configuration for validation rollouts,
+                or None to disable.
+
         """
         if keep_last_n_checkpoints <= 0:
             raise ValueError(
                 "keep_last_n_checkpoints must be greater than 0, "
                 f"got {keep_last_n_checkpoints}."
-            )
-        if validation_rollout_frequency <= 0:
-            raise ValueError(
-                "validation_rollout_frequency must be greater than 0, "
-                f"got {validation_rollout_frequency}."
-            )
-        if validation_rollout_points < 0:
-            raise ValueError(
-                "validation_rollout_points must be 0 or greater, "
-                f"got {validation_rollout_points}."
             )
 
         self.device = device or get_default_device(gpu_index=rank)
@@ -187,9 +175,7 @@ class DistributedTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
-        self.validation_rollout_points = validation_rollout_points
-        self.validation_rollout_frequency = validation_rollout_frequency
-        self.validation_rollout_seed = validation_rollout_seed
+        self.validation_rollout_config = validation_rollout_config
         self.global_train_step = 0
         self.global_val_step = 0
         self._seconds_per_epoch_ema: float | None = None
@@ -365,32 +351,32 @@ class DistributedTrainer:
         """Save trajectory snapshots for this epoch when the cadence says so.
 
         Metric validation has already run on the full validation set. This
-        writes inference outputs for ``validation_rollout_points`` of those
-        samples, on rank 0 only.
+        writes inference outputs for ``validation_rollout_config.num_points``
+        of those samples, on rank 0 only.
 
         Args:
             epoch: Epoch that just finished validation.
         """
-        if self.rank != 0 or self.validation_rollout_points == 0:
+        config = self.validation_rollout_config
+        if self.rank != 0 or config is None:
             return
-        if epoch % self.validation_rollout_frequency != 0:
+        if epoch % config.frequency != 0:
             return
-
-        validation_subset = self.val_loader.dataset
-        validation_neuracore_pytorch_dataset = validation_subset.dataset
-
+        validation_subset = cast(Subset, self.val_loader.dataset)
+        validation_dataset = cast(PytorchNeuracoreDataset, validation_subset.dataset)
+        validation_indices = validation_subset.indices
         try:
             save_validation_rollouts(
                 model=cast(NeuracoreModel, self.get_model_without_ddp()),
-                dataset=validation_neuracore_pytorch_dataset,
-                validation_indices=list(validation_subset.indices),
+                dataset=validation_dataset,
+                validation_indices=validation_indices,
+                config=config,
+                # None only when the loader is built with a batch_sampler.
+                batch_size=self.val_loader.batch_size or 1,
                 device=self.device,
                 inference_device_preprocessing=self.inference_device_preprocessing,
                 output_dir=self.output_dir,
                 epoch=epoch,
-                num_points=self.validation_rollout_points,
-                seed=self.validation_rollout_seed,
-                batch_size=self.val_loader.batch_size,
                 storage_handler=self.storage_handler,
             )
         except Exception:
