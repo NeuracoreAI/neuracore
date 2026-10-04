@@ -82,8 +82,9 @@ class TrainingStorageHandler(UploadStorageMixin):
         self._pending_uploads_lock = threading.Lock()
         self._pending_uploads: dict[Path, Future] = {}
 
-        # Rollout JPEG/JSON writes run here, not on the checkpoint uploader,
-        # so encoding a rollout epoch cannot sit in front of a checkpoint PUT.
+        # Rollout writes and their uploads both run on this worker, never on
+        # the checkpoint uploader, so a rollout epoch's many small files cannot
+        # queue in front of a checkpoint PUT.
         self._rollout_save_executor: ThreadPoolExecutor | None = None
         self._pending_rollout_saves_lock = threading.Lock()
         self._pending_rollout_saves: list[Future] = []
@@ -247,12 +248,7 @@ class TrainingStorageHandler(UploadStorageMixin):
             self._pending_rollout_saves.append(future)
 
     def wait_for_rollout_saves(self) -> None:
-        """Block until every submitted rollout write has finished.
-
-        Call this before waiting for uploads. The write job is what enqueues
-        those uploads, so they are not in the upload queue until the write
-        returns.
-        """
+        """Block until every submitted rollout write and upload has finished."""
         with self._pending_rollout_saves_lock:
             futures = list(self._pending_rollout_saves)
         for future in futures:
@@ -272,11 +268,13 @@ class TrainingStorageHandler(UploadStorageMixin):
             future.result()
 
     def upload_validation_rollouts(self, epoch_dir: Path) -> None:
-        """Upload one epoch of rollout files without blocking training.
+        """Upload one epoch of rollout files, blocking until they are sent.
 
-        Local runs keep the files in ``epoch_dir``. Cloud runs enqueue each
-        file on the same background worker checkpoints use, under
-        ``validation-rollouts/...`` within the training job.
+        Runs on the rollout worker, after that epoch's files are written, so
+        it never blocks training or the checkpoint uploader. Local runs keep
+        the files in ``epoch_dir``. Cloud runs upload each file under
+        ``validation-rollouts/...`` within the training job and delete it
+        once uploaded. A failed file is logged and the rest still upload.
 
         Args:
             epoch_dir: Directory produced by ``save_validation_rollouts``.
@@ -299,12 +297,19 @@ class TrainingStorageHandler(UploadStorageMixin):
                     f"Validation rollout file {path} has suffix {path.suffix!r}. "
                     "Expected .jpeg or .json."
                 )
-            self._submit_upload(
-                path,
-                remote_filepath=path.relative_to(remote_root).as_posix(),
-                content_type=content_type,
-                delete_on_success=True,
-            )
+            remote_filepath = path.relative_to(remote_root).as_posix()
+            try:
+                uploaded = self.upload_file(path, remote_filepath, content_type)
+            except Exception:
+                logger.error(
+                    "Unexpected error uploading %s to cloud path %s",
+                    path,
+                    remote_filepath,
+                    exc_info=True,
+                )
+                continue
+            if uploaded:
+                path.unlink(missing_ok=True)
 
     def save_checkpoint(self, checkpoint: dict, relative_checkpoint_path: Path) -> None:
         """Save checkpoint to storage.

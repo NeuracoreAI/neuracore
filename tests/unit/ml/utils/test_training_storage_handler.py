@@ -700,41 +700,57 @@ class TestConvertOmegaconfToPython:
 
 
 class TestUploadValidationRollouts:
-    def test_enqueues_jpeg_and_json_under_the_job_prefix(self, handler):
-        epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
+    @staticmethod
+    def _write_epoch(local_dir):
+        epoch_dir = local_dir / "validation-rollouts" / "epoch_0005"
         point_dir = epoch_dir / "rec" / "point_000001"
         image_path = point_dir / "inputs" / "images" / "rgb" / "cam.jpeg"
         json_path = point_dir / "inputs" / "state_input.json"
         image_path.parent.mkdir(parents=True)
-        image_path.write_bytes(b"png")
+        image_path.write_bytes(b"jpeg")
         json_path.write_text("{}\n", encoding="utf-8")
+        return epoch_dir, image_path, json_path
 
-        with patch.object(handler, "_submit_upload") as submit:
+    def test_uploads_jpeg_and_json_under_the_job_prefix(self, handler):
+        epoch_dir, image_path, json_path = self._write_epoch(handler.local_dir)
+
+        with patch.object(handler, "upload_file", return_value=True) as upload:
             handler.upload_validation_rollouts(epoch_dir)
 
-        uploaded = {
-            call.kwargs["remote_filepath"]: (
-                call.kwargs["content_type"],
-                call.kwargs["delete_on_success"],
-            )
-            for call in submit.call_args_list
+        uploaded = {call.args[1]: call.args[2] for call in upload.call_args_list}
+        point_prefix = "validation-rollouts/epoch_0005/rec/point_000001/inputs"
+        assert uploaded == {
+            f"{point_prefix}/images/rgb/cam.jpeg": "image/jpeg",
+            f"{point_prefix}/state_input.json": "application/json",
         }
-        assert uploaded[
-            "validation-rollouts/epoch_0005/rec/point_000001/inputs/images/rgb/cam.jpeg"
-        ] == ("image/jpeg", True)
-        assert uploaded[
-            "validation-rollouts/epoch_0005/rec/point_000001/inputs/state_input.json"
-        ] == ("application/json", True)
+        assert not image_path.exists()
+        assert not json_path.exists()
+
+    def test_failed_file_is_kept_and_the_rest_still_upload(self, handler):
+        epoch_dir, image_path, json_path = self._write_epoch(handler.local_dir)
+
+        def _upload(path, remote_filepath, content_type):
+            if path == image_path:
+                raise RuntimeError("network down")
+            return True
+
+        with patch.object(handler, "upload_file", side_effect=_upload) as upload:
+            handler.upload_validation_rollouts(epoch_dir)
+
+        assert upload.call_count == 2
+        assert image_path.exists()
+        assert not json_path.exists()
 
     def test_local_training_does_not_upload(self, local_handler):
         epoch_dir = local_handler.local_dir / "validation-rollouts" / "epoch_0005"
         epoch_dir.mkdir(parents=True)
         (epoch_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
 
-        with patch.object(local_handler, "_submit_upload") as submit:
+        with patch.object(local_handler, "upload_file") as upload:
             local_handler.upload_validation_rollouts(epoch_dir)
 
-        submit.assert_not_called()
+        upload.assert_not_called()
+        assert (epoch_dir / "manifest.json").exists()
 
 
 def _serialize_checkpoint(data: dict) -> bytes:
