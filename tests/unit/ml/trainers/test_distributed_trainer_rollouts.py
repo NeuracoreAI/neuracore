@@ -9,6 +9,7 @@ from torch.utils.data import Subset
 
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.trainers.distributed_trainer import DistributedTrainer
+from neuracore.ml.utils.validation_rollouts import ValidationRolloutConfig
 
 
 def _dataset() -> PytorchDummyDataset:
@@ -25,27 +26,32 @@ def _dataset() -> PytorchDummyDataset:
     )
 
 
-def _trainer(
-    dataset: PytorchDummyDataset, points: int, frequency: int
-) -> DistributedTrainer:
+def _config(frequency: int) -> ValidationRolloutConfig:
+    return ValidationRolloutConfig(
+        num_points=2,
+        frequency=frequency,
+        seed=3,
+    )
+
+
+def _trainer(config: ValidationRolloutConfig | None) -> DistributedTrainer:
     trainer = DistributedTrainer.__new__(DistributedTrainer)
     trainer.rank = 0
-    trainer.validation_rollout_points = points
-    trainer.validation_rollout_frequency = frequency
-    trainer.validation_rollout_seed = 3
+    trainer.validation_rollout_config = config
+    trainer.val_loader = MagicMock()
+    trainer.val_loader.batch_size = 8
+    trainer.val_loader.dataset = Subset(_dataset(), [0, 1, 2, 3])
     trainer.device = torch.device("cpu")
     trainer.inference_device_preprocessing = (MagicMock(), MagicMock())
     trainer.output_dir = Path(".")
     trainer.storage_handler = MagicMock()
     trainer.get_model_without_ddp = MagicMock()
-    trainer.val_loader = MagicMock()
-    trainer.val_loader.batch_size = 8
-    trainer.val_loader.dataset = Subset(dataset, list(range(len(dataset))))
     return trainer
 
 
 def test_rollouts_run_only_on_frequency_epochs_when_points_are_configured():
-    trainer = _trainer(_dataset(), points=2, frequency=5)
+    config = _config(frequency=5)
+    trainer = _trainer(config)
 
     with patch(
         "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",
@@ -55,12 +61,15 @@ def test_rollouts_run_only_on_frequency_epochs_when_points_are_configured():
             trainer._save_validation_rollouts(epoch)
 
     assert [call.kwargs["epoch"] for call in save.call_args_list] == [5, 10]
-    assert all(call.kwargs["num_points"] == 2 for call in save.call_args_list)
-    assert all(call.kwargs["batch_size"] == 8 for call in save.call_args_list)
+    for call in save.call_args_list:
+        assert call.kwargs["config"] is config
+        assert call.kwargs["dataset"] is trainer.val_loader.dataset.dataset
+        assert call.kwargs["validation_indices"] == [0, 1, 2, 3]
+        assert call.kwargs["batch_size"] == 8
 
 
-def test_rollouts_are_skipped_when_no_points_are_configured():
-    trainer = _trainer(_dataset(), points=0, frequency=5)
+def test_rollouts_are_skipped_when_not_configured():
+    trainer = _trainer(None)
 
     with patch(
         "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts"
@@ -71,7 +80,7 @@ def test_rollouts_are_skipped_when_no_points_are_configured():
 
 
 def test_rollouts_are_skipped_on_non_zero_ranks():
-    trainer = _trainer(_dataset(), points=2, frequency=5)
+    trainer = _trainer(_config(frequency=5))
     trainer.rank = 1
 
     with patch(
@@ -83,7 +92,7 @@ def test_rollouts_are_skipped_on_non_zero_ranks():
 
 
 def test_rollout_failure_is_logged_and_does_not_stop_training(caplog):
-    trainer = _trainer(_dataset(), points=2, frequency=1)
+    trainer = _trainer(_config(frequency=1))
 
     with patch(
         "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",

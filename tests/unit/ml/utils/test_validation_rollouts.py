@@ -14,6 +14,7 @@ from neuracore.ml.datasets.pytorch_neuracore_dataset import SampleIdentity
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
+    ValidationRolloutConfig,
     save_validation_rollouts,
     select_validation_rollout_indices,
 )
@@ -62,6 +63,14 @@ def test_select_validation_rollout_indices_rejects_unusable_requests():
         select_validation_rollout_indices([1, 2], num_points=0, seed=0)
     with pytest.raises(ValueError):
         select_validation_rollout_indices([], num_points=4, seed=0)
+
+
+@pytest.mark.parametrize("field", ["num_points", "frequency"])
+def test_validation_rollout_config_rejects_non_positive_settings(field):
+    settings = {"num_points": 2, "frequency": 5, field: 0}
+
+    with pytest.raises(ValueError, match=field):
+        ValidationRolloutConfig(seed=0, **settings)
 
 
 class _ScriptedModel:
@@ -133,6 +142,12 @@ def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path, monkeyp
         model=model,
         dataset=dataset,
         validation_indices=[0],
+        config=ValidationRolloutConfig(
+            num_points=1,
+            frequency=1,
+            seed=0,
+        ),
+        batch_size=1,
         device=torch.device("cpu"),
         inference_device_preprocessing=(
             PreprocessingConfiguration(),
@@ -140,9 +155,6 @@ def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path, monkeyp
         ),
         output_dir=tmp_path,
         epoch=5,
-        num_points=1,
-        seed=0,
-        batch_size=1,
         storage_handler=storage,
     )
     storage.wait_for_rollout_saves()
@@ -256,6 +268,12 @@ def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(
         model=model,
         dataset=dataset,
         validation_indices=list(range(6)),
+        config=ValidationRolloutConfig(
+            num_points=6,
+            frequency=1,
+            seed=0,
+        ),
+        batch_size=4,
         device=torch.device("cpu"),
         inference_device_preprocessing=(
             PreprocessingConfiguration(),
@@ -263,9 +281,6 @@ def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(
         ),
         output_dir=tmp_path,
         epoch=2,
-        num_points=6,
-        seed=0,
-        batch_size=4,
         storage_handler=storage,
     )
     storage.wait_for_rollout_saves()

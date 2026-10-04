@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -48,6 +49,35 @@ _PAYLOAD_FIELDS = (
     "input_ids",
     "points",
 )
+
+
+@dataclass(frozen=True)
+class ValidationRolloutConfig:
+    """How many validation samples to save as rollouts, and how often.
+
+    Attributes:
+        num_points: How many validation timesteps to save each time.
+        frequency: Save rollouts when ``epoch % frequency == 0``.
+        seed: Seed for which timesteps are saved. The same seed keeps those
+            timesteps fixed across epochs.
+    """
+
+    num_points: int
+    frequency: int
+    seed: int
+
+    def __post_init__(self) -> None:
+        """Reject settings that could never save a rollout."""
+        if self.num_points <= 0:
+            raise ValueError(
+                "Validation rollout num_points must be greater than 0, "
+                f"got {self.num_points}."
+            )
+        if self.frequency <= 0:
+            raise ValueError(
+                "Validation rollout frequency must be greater than 0, "
+                f"got {self.frequency}."
+            )
 
 
 def select_validation_rollout_indices(
@@ -97,42 +127,42 @@ def save_validation_rollouts(
     model: NeuracoreModel,
     dataset: PytorchNeuracoreDataset,
     validation_indices: Sequence[int],
+    config: ValidationRolloutConfig,
+    batch_size: int,
     device: torch.device,
     inference_device_preprocessing: tuple[
         PreprocessingConfiguration, PreprocessingConfiguration
     ],
     output_dir: Path,
     epoch: int,
-    num_points: int,
-    seed: int,
-    batch_size: int,
     storage_handler: TrainingStorageHandler,
 ) -> Path:
     """Run inference on the chosen validation points and write their files.
 
     Points are collated in chunks of ``batch_size``, and each chunk is one
-    ``forward``. Each sample is then named with its own robot and written
-    as images and JSON values.
+    ``forward``. The last chunk may be smaller. Each sample is then named
+    with its own robot and written as images and JSON values.
 
     Args:
         model: Unwrapped model. Called in eval mode for this function only.
-        dataset: Validation dataset.
+        dataset: Validation dataset, with inference preprocessing.
         validation_indices: All sample indices in the validation split.
+        config: How many points to save, and their seed.
+        batch_size: How many points share one ``forward``.
         device: Device the model is on.
         inference_device_preprocessing: Device-side input and output
             preprocessing, the same pair validation uses.
         output_dir: Training output directory.
         epoch: Epoch number used in the directory name.
-        num_points: How many points to save.
-        seed: Seed for which points are chosen.
-        batch_size: Validation loader batch size. The last chunk may be smaller.
         storage_handler: Queues the file write. The caller returns before the
             files exist. ``wait_for_rollout_saves`` joins that write.
 
     Returns:
         The epoch directory the background write will fill.
     """
-    selected = select_validation_rollout_indices(validation_indices, num_points, seed)
+    selected = select_validation_rollout_indices(
+        validation_indices, config.num_points, config.seed
+    )
     epoch_dir = output_dir / "validation-rollouts" / f"epoch_{epoch:04d}"
     logger.info(
         "Running %s validation rollout point(s) for epoch %s in batches of %s",
