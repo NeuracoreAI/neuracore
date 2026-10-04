@@ -379,19 +379,27 @@ class DistributedTrainer:
         validation_subset = self.val_loader.dataset
         validation_neuracore_pytorch_dataset = validation_subset.dataset
 
-        save_validation_rollouts(
-            model=cast(NeuracoreModel, self.get_model_without_ddp()),
-            dataset=validation_neuracore_pytorch_dataset,
-            validation_indices=list(validation_subset.indices),
-            device=self.device,
-            inference_device_preprocessing=self.inference_device_preprocessing,
-            output_dir=self.output_dir,
-            epoch=epoch,
-            num_points=self.validation_rollout_points,
-            seed=self.validation_rollout_seed,
-            batch_size=self.val_loader.batch_size,
-            storage_handler=self.storage_handler,
-        )
+        try:
+            save_validation_rollouts(
+                model=cast(NeuracoreModel, self.get_model_without_ddp()),
+                dataset=validation_neuracore_pytorch_dataset,
+                validation_indices=list(validation_subset.indices),
+                device=self.device,
+                inference_device_preprocessing=self.inference_device_preprocessing,
+                output_dir=self.output_dir,
+                epoch=epoch,
+                num_points=self.validation_rollout_points,
+                seed=self.validation_rollout_seed,
+                batch_size=self.val_loader.batch_size,
+                storage_handler=self.storage_handler,
+            )
+        except Exception:
+            logger.error(
+                "Failed to save validation rollouts for epoch %s. "
+                "Training will continue.",
+                epoch,
+                exc_info=True,
+            )
 
     def train(self, start_epoch: int = 0) -> None:
         """Run the training loop.

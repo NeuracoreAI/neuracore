@@ -45,6 +45,25 @@ def test_select_validation_rollout_indices_is_a_deterministic_sample():
     assert set(first) <= set(validation_indices)
 
 
+def test_select_validation_rollout_indices_uses_every_sample_when_split_is_smaller():
+    validation_indices = [4, 9, 12]
+
+    first = select_validation_rollout_indices(validation_indices, num_points=10, seed=3)
+    second = select_validation_rollout_indices(
+        validation_indices, num_points=10, seed=3
+    )
+
+    assert first == second
+    assert sorted(first) == validation_indices
+
+
+def test_select_validation_rollout_indices_rejects_unusable_requests():
+    with pytest.raises(ValueError):
+        select_validation_rollout_indices([1, 2], num_points=0, seed=0)
+    with pytest.raises(ValueError):
+        select_validation_rollout_indices([], num_points=4, seed=0)
+
+
 class _ScriptedModel:
     """Model stand-in that returns one fixed inference output."""
 
