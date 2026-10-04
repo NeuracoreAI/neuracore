@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 _IMAGE_DATA_TYPES = frozenset({DataType.RGB_IMAGES, DataType.DEPTH_IMAGES})
 _IMAGE_DIR_NAMES = {
     DataType.RGB_IMAGES: "rgb",
-    DataType.DEPTH_IMAGES: "depths",
+    DataType.DEPTH_IMAGES: "depth",
 }
 _PAYLOAD_FIELDS = (
     "value",
