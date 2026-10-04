@@ -116,11 +116,27 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         Returns:
             Identity (recording id, timestep, robot id) of the sample at ``idx``.
 
-
         Raises:
             IndexError: If ``idx`` is outside the dataset.
         """
         pass
+
+    def _require_valid_sample_index(self, idx: int) -> None:
+        """Raise when a flat sample index is outside this dataset.
+
+        Args:
+            idx: Flat sample index, the same index ``__getitem__`` accepts.
+
+        Raises:
+            IndexError: If ``idx`` is outside ``[0, len(self))``.
+        """
+        length = len(self)
+        if idx < 0 or idx >= length:
+            raise IndexError(
+                f"Sample index {idx} is outside the dataset of length {length}. "
+                "Expected an index in "
+                f"[0, {length - 1}]."
+            )
 
     @abstractmethod
     def __len__(self) -> int:

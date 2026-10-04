@@ -161,7 +161,7 @@ def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path, monkeyp
 
     point_dir = epoch_dir / "dummy-sample-0" / "point_000000"
     rgb_path = point_dir / "inputs" / "images" / "rgb" / "wrist\\cam.jpeg"
-    depth_path = point_dir / "inputs" / "images" / "depths" / "depth.jpeg"
+    depth_path = point_dir / "inputs" / "images" / "depth" / "depth.jpeg"
     assert rgb_path.is_file()
     assert depth_path.is_file()
     Image.open(rgb_path).verify()

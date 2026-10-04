@@ -286,12 +286,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         Raises:
             IndexError: If ``idx`` is outside the dataset.
         """
-        if idx < 0 or idx >= len(self):
-            raise IndexError(
-                f"Sample index {idx} is outside the dataset of length {len(self)}. "
-                "Expected an index in "
-                f"[0, {len(self) - 1}]."
-            )
+        self._require_valid_sample_index(idx)
         return SampleIdentity(
             recording_id=f"dummy-sample-{idx}",
             timestep=0,
