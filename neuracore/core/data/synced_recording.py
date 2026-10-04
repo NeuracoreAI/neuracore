@@ -42,6 +42,9 @@ from neuracore.core.data.frame_cache import (
     video_filename_preference,
     wait_for_lock_release,
 )
+from neuracore.core.data.serialized_synchronized_episode import (
+    SerializedSynchronizedEpisode,
+)
 from neuracore.core.exceptions import SynchronizationError
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 from neuracore.core.utils.download import download_bytes, stream_to_file
@@ -110,7 +113,7 @@ class SynchronizedRecording:
         instance: int,
         synchronization_details: SynchronizationDetails,
         prefetch_videos: bool = False,
-        synced_episode: SynchronizedEpisodeModel | None = None,
+        synced_episode: SerializedSynchronizedEpisode | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -136,15 +139,14 @@ class SynchronizedRecording:
         self.robot_id = robot_id
         self.instance = instance
 
-        self._synced_episode = (
-            synced_episode if synced_episode is not None else self._get_synced_data()
-        )
-        self._episode_length = len(self._synced_episode.observations)
+        if synced_episode is None:
+            synced_episode = SerializedSynchronizedEpisode(self._get_synced_data())
+        self._sync_points = synced_episode.observations
 
         # Use start_time and end_time from the synchronized episode,
         # as they reflect trim_start_end settings from synchronization
-        self.start_time = self._synced_episode.start_time
-        self.end_time = self._synced_episode.end_time
+        self.start_time = synced_episode.start_time
+        self.end_time = synced_episode.end_time
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
@@ -155,7 +157,7 @@ class SynchronizedRecording:
             # Check if cache directory exists and contains any files
             wait_for_lock_release(cache / ".recording.lock", cache)
             # NOTE: this is to start video prefetching frames into cache
-            self._load_sync_point(self._synced_episode.observations[0])
+            self._load_sync_point(self._sync_points[0])
 
     @property
     def frequency(self) -> int:
@@ -599,10 +601,7 @@ class SynchronizedRecording:
                 data_type: (
                     self._load_frames(data_type, nc_data_by_name)
                     if data_type in FRAME_DATA_TYPES
-                    else {
-                        name: nc_data.model_copy()
-                        for name, nc_data in nc_data_by_name.items()
-                    }
+                    else nc_data_by_name
                 )
                 for data_type, nc_data_by_name in synced_data.items()
             },
@@ -687,7 +686,7 @@ class SynchronizedRecording:
             The sync point, holding only the sensors in embodiment_description.
         """
         return self._load_sync_point(
-            self._synced_episode.observations[timestep], embodiment_description
+            self._sync_points[timestep], embodiment_description
         )
 
     def get_sync_points(
@@ -735,7 +734,7 @@ class SynchronizedRecording:
         Returns:
             int: Number of timesteps in the episode.
         """
-        return self._episode_length
+        return len(self._sync_points)
 
     def __getitem__(
         self, idx: int | slice
@@ -763,7 +762,7 @@ class SynchronizedRecording:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
 
-        return self._load_sync_point(self._synced_episode.observations[idx])
+        return self._load_sync_point(self._sync_points[idx])
 
     def __next__(self) -> SynchronizedPoint:
         """Get the next synchronized data point in the episode.
@@ -774,10 +773,8 @@ class SynchronizedRecording:
         Raises:
             StopIteration: When all timesteps have been processed.
         """
-        if self._iter_idx >= len(self._synced_episode.observations):
+        if self._iter_idx >= len(self._sync_points):
             raise StopIteration
-        sync_point = self._load_sync_point(
-            self._synced_episode.observations[self._iter_idx]
-        )
+        sync_point = self._load_sync_point(self._sync_points[self._iter_idx])
         self._iter_idx += 1
         return sync_point
