@@ -213,11 +213,7 @@ def save_validation_rollouts(
                         dataset.output_cross_embodiment_description[identity.robot_id],
                         masks=_mask_at_index(batch.outputs_mask, batch_index),
                     )
-                    point_dir = (
-                        epoch_dir
-                        / identity.recording_id
-                        / f"point_{identity.timestep:06d}"
-                    )
+                    point_dir = _point_dir(epoch_dir, identity)
                     images = _read_image_frames(named_inputs, batch_index)
                     state = _convert_traces_to_json(
                         named_inputs, batch_index, horizon=False
@@ -243,7 +239,7 @@ def save_validation_rollouts(
 
     storage_handler.submit_rollout_save(
         partial(
-            _write_manifest_and_upload,
+            _upload_points_then_manifest,
             epoch_dir,
             epoch,
             identities,
@@ -253,15 +249,33 @@ def save_validation_rollouts(
     return epoch_dir
 
 
-def _write_manifest_and_upload(
+def _point_dir(epoch_dir: Path, point: SampleIdentity) -> Path:
+    """Return the folder that holds one point's files."""
+    return epoch_dir / point.recording_id / f"point_{point.timestep:06d}"
+
+
+def _upload_points_then_manifest(
     epoch_dir: Path,
     epoch: int,
     identities: list[SampleIdentity],
     storage_handler: TrainingStorageHandler,
 ) -> None:
-    """Write the epoch manifest, then enqueue the upload of that epoch."""
-    write_rollout_manifest(epoch_dir, epoch, identities)
-    storage_handler.upload_validation_rollouts(epoch_dir)
+    """Upload the point files, then write and upload a manifest of the good ones.
+
+    A point is left out of the manifest when its folder was never written or
+    any of its files failed to upload. Local runs upload nothing, so they
+    keep every point that was written.
+    """
+    failed_uploads = storage_handler.upload_validation_rollouts(epoch_dir)
+    points = []
+    for point in identities:
+        point_dir = _point_dir(epoch_dir, point)
+        if point_dir.is_dir() and not any(
+            path.is_relative_to(point_dir) for path in failed_uploads
+        ):
+            points.append(point)
+    write_rollout_manifest(epoch_dir, epoch, points)
+    storage_handler.upload_rollout_manifest(epoch_dir)
 
 
 def _write_rollout_point(
