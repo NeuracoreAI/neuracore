@@ -280,8 +280,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             idx: Flat sample index.
 
         Returns:
-            One recording per index at timestep 0, using the first robot in
-            the embodiment description.
+            One recording per index at timestep 0, using the same robot
+            ``__getitem__`` generates that sample for.
 
         Raises:
             IndexError: If ``idx`` is outside the dataset.
@@ -295,8 +295,12 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         return SampleIdentity(
             recording_id=f"dummy-sample-{idx}",
             timestep=0,
-            robot_id=self._robot_ids[0],
+            robot_id=self._robot_id_for_episode(idx),
         )
+
+    def _robot_id_for_episode(self, episode_idx: int) -> str:
+        """Return the robot a synthetic episode is generated for."""
+        return self._robot_ids[episode_idx % len(self._robot_ids)]
 
     def load_sample(
         self, episode_idx: int, timestep: int | None = None
@@ -314,7 +318,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             A TrainingSample containing randomly generated input and output data
             matching the specified data types and dimensions.
         """
-        robot_id = self._robot_ids[episode_idx % len(self._robot_ids)]
+        robot_id = self._robot_id_for_episode(episode_idx)
         return self._samples_by_robot[robot_id]
 
     def __len__(self) -> int:
