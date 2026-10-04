@@ -17,10 +17,10 @@ from typing import cast
 import numpy as np
 import torch
 from neuracore_types import BatchedDepthData, BatchedNCData, BatchedRGBData, DataType
-from neuracore_types.utils.depth_utils import depth_to_rgb
 from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 
+from neuracore.core.utils.depth_utils import depth_to_rgb_visualization
 from neuracore.ml.core.ml_types import BatchedInferenceInputs
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.datasets.pytorch_neuracore_dataset import (
@@ -55,7 +55,10 @@ def select_validation_rollout_indices(
     num_points: int,
     seed: int,
 ) -> list[int]:
-    """Randomly select ``num_points`` validation samples from the validation indices.
+    """Randomly select validation samples from the validation indices.
+
+    When the validation split has fewer samples than ``num_points``, every
+    available sample is used and a warning is logged.
 
     Args:
         validation_indices: Sample indices that belong to the validation split.
@@ -67,15 +70,24 @@ def select_validation_rollout_indices(
         replacement.
 
     Raises:
-        ValueError: If ``num_points`` is not positive, or if it is greater
-            than the number of validation indices.
+        ValueError: If ``num_points`` is not positive, or if the validation
+            split is empty.
     """
     available = len(validation_indices)
-    if num_points <= 0 or num_points > available:
+    if num_points <= 0:
+        raise ValueError(f"num_points must be positive, got {num_points}.")
+    if available == 0:
         raise ValueError(
-            "num_points must be positive and no greater than the number of "
-            f"validation samples ({available}), got {num_points}."
+            "Cannot select validation rollout points from an empty validation split."
         )
+    if num_points > available:
+        logger.warning(
+            "Requested %s validation rollout point(s), but the validation split "
+            "only has %s sample(s). Using all of them.",
+            num_points,
+            available,
+        )
+        num_points = available
     generator = np.random.default_rng(seed)
     positions = generator.choice(available, size=num_points, replace=False)
     return [validation_indices[int(position)] for position in positions]
@@ -363,11 +375,15 @@ def _write_rgb_jpeg(frame: torch.Tensor, path: Path) -> None:
 
 
 def _write_depth_jpeg(frame: torch.Tensor, path: Path) -> None:
-    """Write one depth frame using the platform's RGB depth encoding."""
+    """Write one depth frame as a viewable JPEG.
+
+    Rollout images are for inspection only. The inferno colormap keeps
+    neighboring depths similar, so JPEG compression leaves a readable picture.
+    """
     depth = np.squeeze(frame.numpy()).astype(np.float32)
     if depth.ndim != 2:
         raise ValueError(f"Depth frame must be 2D after squeezing, got {depth.shape}.")
-    Image.fromarray(depth_to_rgb(depth)).save(path, format="JPEG")
+    Image.fromarray(depth_to_rgb_visualization(depth)).save(path, format="JPEG")
 
 
 def _channel_last_image(frame: torch.Tensor) -> torch.Tensor:

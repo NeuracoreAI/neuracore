@@ -80,3 +80,16 @@ def test_rollouts_are_skipped_on_non_zero_ranks():
         trainer._save_validation_rollouts(5)
 
     save.assert_not_called()
+
+
+def test_rollout_failure_is_logged_and_does_not_stop_training(caplog):
+    trainer = _trainer(_dataset(), points=2, frequency=1)
+
+    with patch(
+        "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",
+        side_effect=RuntimeError("forward failed"),
+    ):
+        trainer._save_validation_rollouts(1)
+
+    assert "Failed to save validation rollouts for epoch 1" in caplog.text
+    assert "forward failed" in caplog.text
