@@ -78,8 +78,6 @@ For MuJoCo MJCF model support:
 pip install neuracore[mjcf]
 ```
 
-**Note:** `[examples]` and `[mjcf]` cannot be installed together: the examples pin `mujoco==2.3.7`, while MJCF support requires `mujoco>3`. Use separate environments if you need both.
-
 # 🍰 A Short Taste
 
 Here is a short taste on what neuracore can do.\

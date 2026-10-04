@@ -524,6 +524,7 @@ torchdynamo
 torchserve
 torchvision
 torq
+torquescale
 tqdm
 traj
 triu
