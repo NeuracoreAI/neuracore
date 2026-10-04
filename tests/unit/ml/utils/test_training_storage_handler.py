@@ -747,10 +747,54 @@ class TestUploadValidationRollouts:
         (epoch_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
 
         with patch.object(local_handler, "upload_file") as upload:
-            local_handler.upload_validation_rollouts(epoch_dir)
+            failed = local_handler.upload_validation_rollouts(epoch_dir)
 
+        assert failed == set()
         upload.assert_not_called()
         assert (epoch_dir / "manifest.json").exists()
+
+    def test_leaves_the_manifest_and_a_failed_point_file(self, handler):
+        epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
+        good = epoch_dir / "rec-a" / "point_000001" / "inputs" / "state_input.json"
+        bad = epoch_dir / "rec-b" / "point_000002" / "inputs" / "state_input.json"
+        good.parent.mkdir(parents=True)
+        bad.parent.mkdir(parents=True)
+        good.write_text("{}\n", encoding="utf-8")
+        bad.write_text("{}\n", encoding="utf-8")
+        manifest = epoch_dir / "manifest.json"
+        manifest.write_text("{}\n", encoding="utf-8")
+
+        def _upload(path, remote_filepath, content_type):
+            return path != bad
+
+        with patch.object(handler, "upload_file", side_effect=_upload) as upload:
+            failed = handler.upload_validation_rollouts(epoch_dir)
+
+        assert failed == {bad}
+        assert not good.exists()
+        assert bad.exists()
+        assert manifest.exists()
+        assert all(
+            not call.args[1].endswith("manifest.json") for call in upload.call_args_list
+        )
+
+    def test_a_file_cannot_be_deleted_still_counts_as_uploaded(self, handler):
+        epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
+        first = epoch_dir / "rec-a" / "point_000001" / "inputs" / "state_input.json"
+        second = epoch_dir / "rec-a" / "point_000001" / "outputs" / "ground_truth.json"
+        first.parent.mkdir(parents=True)
+        second.parent.mkdir(parents=True)
+        first.write_text("{}\n", encoding="utf-8")
+        second.write_text("{}\n", encoding="utf-8")
+
+        with (
+            patch.object(handler, "upload_file", return_value=True) as upload,
+            patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+        ):
+            failed = handler.upload_validation_rollouts(epoch_dir)
+
+        assert failed == set()
+        assert upload.call_count == 2
 
 
 def _serialize_checkpoint(data: dict) -> bytes:

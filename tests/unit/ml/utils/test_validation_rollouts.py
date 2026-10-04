@@ -15,6 +15,7 @@ from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
     ValidationRolloutConfig,
+    _upload_points_then_manifest,
     save_validation_rollouts,
     select_validation_rollout_indices,
 )
@@ -305,3 +306,60 @@ def test_save_validation_rollouts_forwards_chunks_and_keeps_each_row(
         assert prediction["JOINT_TARGET_POSITIONS"][trace_name] == pytest.approx(
             [float(index + 1), float(index + 1)]
         )
+
+
+def _write_point(epoch_dir, recording_id, timestep):
+    point_dir = epoch_dir / recording_id / f"point_{timestep:06d}"
+    for name in ("inputs/state_input.json", "outputs/ground_truth.json"):
+        (point_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (point_dir / name).write_text("{}\n", encoding="utf-8")
+
+
+_IDENTITIES = [
+    SampleIdentity(recording_id="rec-a", timestep=1, robot_id="robot_0"),
+    SampleIdentity(recording_id="rec-b", timestep=2, robot_id="robot_0"),
+    SampleIdentity(recording_id="rec-c", timestep=3, robot_id="robot_0"),
+]
+
+
+def test_cloud_manifest_lists_only_points_whose_files_all_uploaded(
+    tmp_path, monkeypatch
+):
+    storage = _storage(tmp_path, monkeypatch)
+    storage.log_to_cloud = True
+    epoch_dir = tmp_path / "validation-rollouts" / "epoch_0001"
+    _write_point(epoch_dir, "rec-a", 1)
+    _write_point(epoch_dir, "rec-b", 2)
+    uploaded: list[str] = []
+    manifests: list[dict] = []
+
+    def _upload(path, remote_filepath, content_type):
+        if path.name == "manifest.json":
+            manifests.append(json.loads(path.read_text()))
+        uploaded.append(remote_filepath)
+        return not (path.parent.parent.name == "point_000002" and "ground" in path.name)
+
+    monkeypatch.setattr(storage, "upload_file", _upload)
+
+    _upload_points_then_manifest(epoch_dir, 1, _IDENTITIES, storage)
+
+    assert [point["recording_id"] for point in manifests[0]["points"]] == ["rec-a"]
+    assert uploaded[-1] == "validation-rollouts/epoch_0001/manifest.json"
+
+
+def test_local_manifest_lists_every_written_point(tmp_path, monkeypatch):
+    storage = _storage(tmp_path, monkeypatch)
+    epoch_dir = tmp_path / "validation-rollouts" / "epoch_0001"
+    _write_point(epoch_dir, "rec-a", 1)
+    _write_point(epoch_dir, "rec-b", 2)
+
+    _upload_points_then_manifest(epoch_dir, 1, _IDENTITIES, storage)
+
+    manifest = json.loads((epoch_dir / "manifest.json").read_text())
+    assert [point["recording_id"] for point in manifest["points"]] == [
+        "rec-a",
+        "rec-b",
+    ]
+    assert (
+        epoch_dir / "rec-a" / "point_000001" / "inputs" / "state_input.json"
+    ).exists()

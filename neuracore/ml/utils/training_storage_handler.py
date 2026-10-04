@@ -267,49 +267,82 @@ class TrainingStorageHandler(UploadStorageMixin):
         for future in futures:
             future.result()
 
-    def upload_validation_rollouts(self, epoch_dir: Path) -> None:
-        """Upload one epoch of rollout files, blocking until they are sent.
+    def upload_validation_rollouts(self, epoch_dir: Path) -> set[Path]:
+        """Upload one epoch's point files, leaving the manifest for later.
 
         Runs on the rollout worker, after that epoch's files are written, so
         it never blocks training or the checkpoint uploader. Local runs keep
-        the files in ``epoch_dir``. Cloud runs upload each file under
+        the files in ``epoch_dir``. Cloud runs upload each point file under
         ``validation-rollouts/...`` within the training job and delete it
-        once uploaded. A failed file is logged and the rest still upload.
+        once uploaded. A failed file is logged and left in place. The rest
+        still upload. ``manifest.json`` is not uploaded here.
 
         Args:
             epoch_dir: Directory produced by ``save_validation_rollouts``.
+
+        Returns:
+            Local paths of the files that failed to upload. Always empty for
+            a local run.
+        """
+        if not self.log_to_cloud:
+            return set()
+
+        failed: set[Path] = set()
+        for path in sorted(epoch_dir.rglob("*")):
+            if not path.is_file() or path.name == "manifest.json":
+                continue
+            if not self._upload_rollout_file(epoch_dir, path):
+                failed.add(path)
+        return failed
+
+    def upload_rollout_manifest(self, epoch_dir: Path) -> None:
+        """Upload ``manifest.json`` once the point files for this epoch are done.
+
+        Args:
+            epoch_dir: Epoch directory whose manifest should be uploaded.
         """
         if not self.log_to_cloud:
             return
+        self._upload_rollout_file(epoch_dir, epoch_dir / "manifest.json")
 
-        # epoch_dir is ``<output>/validation-rollouts/epoch_XXXX``. The remote
-        # key is that suffix, which the backend places under the training job.
-        remote_root = epoch_dir.parent.parent
-        for path in sorted(epoch_dir.rglob("*")):
-            if not path.is_file():
-                continue
-            if path.suffix == ".jpeg":
-                content_type = "image/jpeg"
-            elif path.suffix == ".json":
-                content_type = "application/json"
-            else:
-                raise ValueError(
-                    f"Validation rollout file {path} has suffix {path.suffix!r}. "
-                    "Expected .jpeg or .json."
-                )
-            remote_filepath = path.relative_to(remote_root).as_posix()
+    def _upload_rollout_file(self, epoch_dir: Path, path: Path) -> bool:
+        """Upload one rollout file and delete it when the upload lands.
+
+        Args:
+            epoch_dir: Epoch directory used to build the remote path.
+            path: Local file to upload.
+
+        Returns:
+            True when the file was uploaded.
+        """
+        if path.suffix == ".jpeg":
+            content_type = "image/jpeg"
+        elif path.suffix == ".json":
+            content_type = "application/json"
+        else:
+            raise ValueError(
+                f"Validation rollout file {path} has suffix {path.suffix!r}. "
+                "Expected .jpeg or .json."
+            )
+        remote_filepath = path.relative_to(epoch_dir.parent.parent).as_posix()
+        try:
+            uploaded = self.upload_file(path, remote_filepath, content_type)
+        except Exception:
+            logger.error(
+                "Unexpected error uploading %s to cloud path %s",
+                path,
+                remote_filepath,
+                exc_info=True,
+            )
+            return False
+        if uploaded:
             try:
-                uploaded = self.upload_file(path, remote_filepath, content_type)
-            except Exception:
-                logger.error(
-                    "Unexpected error uploading %s to cloud path %s",
-                    path,
-                    remote_filepath,
-                    exc_info=True,
-                )
-                continue
-            if uploaded:
                 path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning(
+                    "Could not delete local file %s after upload: %s", path, e
+                )
+        return uploaded
 
     def save_checkpoint(self, checkpoint: dict, relative_checkpoint_path: Path) -> None:
         """Save checkpoint to storage.
