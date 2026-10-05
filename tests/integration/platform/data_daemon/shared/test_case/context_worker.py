@@ -33,7 +33,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_TYPE_RGB_IMAGES,
     DATASET_POLL_INTERVAL_S,
+    MAX_DATA_GAP_S,
     MAX_TIME_TO_START_S,
+    PACING_SATURATE,
     PRODUCER_MULTI_PROCESS,
     PRODUCER_PER_THREAD,
     camera_names,
@@ -172,6 +174,28 @@ def _assert_no_deadline_breaches(
     )
 
 
+def _assert_data_covers_window(
+    trace_key: str,
+    disk_key: str,
+    owed: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> None:
+    """Assert a trace never went silent inside a recording, edges included."""
+    edges = [
+        bounds.start_returned_at,
+        *(frame.emitted_at for frame in owed),
+        bounds.stop_called_at,
+    ]
+    gap_s, gap_end = max(
+        (later - earlier, later) for earlier, later in zip(edges, edges[1:])
+    )
+    assert gap_s <= MAX_DATA_GAP_S, (
+        f"{trace_key} logged nothing inside recording {disk_key} for "
+        f"{gap_s:.3f}s, ending {gap_end - bounds.start_returned_at:.3f}s into "
+        f"it, more than {MAX_DATA_GAP_S}s; the producer stalled"
+    )
+
+
 def _classify_recordings(
     spec: ContextSpec,
     session: ProducerSession,
@@ -199,6 +223,10 @@ def _classify_recordings(
             classification = session.classify(trace_key, frames, bounds)
             by_trace[trace_key] = classification
             _assert_no_deadline_breaches(trace_key, disk_key, classification.owed)
+            if spec.case.producer_pacing != PACING_SATURATE:
+                _assert_data_covers_window(
+                    trace_key, disk_key, classification.owed, bounds
+                )
 
             camera = rgb_trace_cameras.get(trace_key)
             if camera is None:
@@ -287,7 +315,6 @@ def context_worker(
 
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
-        expected_video_stop_timestamp_by_recording: dict[str, float] = {}
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         ordinal_by_disk_key: dict[str, int] = {}
 
@@ -326,9 +353,6 @@ def context_worker(
                 # Brackets the window's upper bound, the mirror of the start.
                 closed = controller.close(recording_capture_stop_s)
                 wall_stopped_at = time.time()
-                expected_video_stop_timestamp_by_recording[disk_recording_key] = (
-                    spec.timestamp_start_s + (recording_ordinal + 1) * case.duration_sec
-                )
 
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
                     start_called_at=start_called_at,
@@ -384,9 +408,6 @@ def context_worker(
             ),
             depth_mode=case.depth_mode,
             has_depth=bool(depth_camera_name_list),
-            expected_video_stop_timestamp_by_recording=(
-                expected_video_stop_timestamp_by_recording
-            ),
         )
     except Exception:
         if robot is not None:

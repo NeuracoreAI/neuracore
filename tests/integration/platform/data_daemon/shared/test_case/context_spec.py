@@ -187,10 +187,6 @@ class ContextResult:
     depth_frame_count: int = 0
     depth_mode: DepthMode = "float32"
     has_depth: bool = False
-    expected_video_stop_timestamp_by_recording: dict[str, float] = field(
-        default_factory=dict
-    )
-    """Nominal capture-clock upper bound of each recording's video."""
 
 
 @dataclass(frozen=True, slots=True)
