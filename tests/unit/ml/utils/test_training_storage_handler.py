@@ -699,6 +699,104 @@ class TestConvertOmegaconfToPython:
         assert isinstance(result["optimizer"]["betas"], list)
 
 
+class TestUploadValidationRollouts:
+    @staticmethod
+    def _write_epoch(local_dir):
+        epoch_dir = local_dir / "validation-rollouts" / "epoch_0005"
+        point_dir = epoch_dir / "rec" / "point_000001"
+        image_path = point_dir / "inputs" / "images" / "rgb" / "cam.jpeg"
+        json_path = point_dir / "inputs" / "state_input.json"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(b"jpeg")
+        json_path.write_text("{}\n", encoding="utf-8")
+        return epoch_dir, image_path, json_path
+
+    def test_uploads_jpeg_and_json_under_the_job_prefix(self, handler):
+        epoch_dir, image_path, json_path = self._write_epoch(handler.local_dir)
+
+        with patch.object(handler, "upload_file", return_value=True) as upload:
+            handler.upload_validation_rollouts(epoch_dir)
+
+        uploaded = {call.args[1]: call.args[2] for call in upload.call_args_list}
+        point_prefix = "validation-rollouts/epoch_0005/rec/point_000001/inputs"
+        assert uploaded == {
+            f"{point_prefix}/images/rgb/cam.jpeg": "image/jpeg",
+            f"{point_prefix}/state_input.json": "application/json",
+        }
+        assert not image_path.exists()
+        assert not json_path.exists()
+
+    def test_failed_file_is_kept_and_the_rest_still_upload(self, handler):
+        epoch_dir, image_path, json_path = self._write_epoch(handler.local_dir)
+
+        def _upload(path, remote_filepath, content_type):
+            if path == image_path:
+                raise RuntimeError("network down")
+            return True
+
+        with patch.object(handler, "upload_file", side_effect=_upload) as upload:
+            handler.upload_validation_rollouts(epoch_dir)
+
+        assert upload.call_count == 2
+        assert image_path.exists()
+        assert not json_path.exists()
+
+    def test_local_training_does_not_upload(self, local_handler):
+        epoch_dir = local_handler.local_dir / "validation-rollouts" / "epoch_0005"
+        epoch_dir.mkdir(parents=True)
+        (epoch_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+        with patch.object(local_handler, "upload_file") as upload:
+            failed = local_handler.upload_validation_rollouts(epoch_dir)
+
+        assert failed == set()
+        upload.assert_not_called()
+        assert (epoch_dir / "manifest.json").exists()
+
+    def test_leaves_the_manifest_and_a_failed_point_file(self, handler):
+        epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
+        good = epoch_dir / "rec-a" / "point_000001" / "inputs" / "state_input.json"
+        bad = epoch_dir / "rec-b" / "point_000002" / "inputs" / "state_input.json"
+        good.parent.mkdir(parents=True)
+        bad.parent.mkdir(parents=True)
+        good.write_text("{}\n", encoding="utf-8")
+        bad.write_text("{}\n", encoding="utf-8")
+        manifest = epoch_dir / "manifest.json"
+        manifest.write_text("{}\n", encoding="utf-8")
+
+        def _upload(path, remote_filepath, content_type):
+            return path != bad
+
+        with patch.object(handler, "upload_file", side_effect=_upload) as upload:
+            failed = handler.upload_validation_rollouts(epoch_dir)
+
+        assert failed == {bad}
+        assert not good.exists()
+        assert bad.exists()
+        assert manifest.exists()
+        assert all(
+            not call.args[1].endswith("manifest.json") for call in upload.call_args_list
+        )
+
+    def test_a_file_cannot_be_deleted_still_counts_as_uploaded(self, handler):
+        epoch_dir = handler.local_dir / "validation-rollouts" / "epoch_0005"
+        first = epoch_dir / "rec-a" / "point_000001" / "inputs" / "state_input.json"
+        second = epoch_dir / "rec-a" / "point_000001" / "outputs" / "ground_truth.json"
+        first.parent.mkdir(parents=True)
+        second.parent.mkdir(parents=True)
+        first.write_text("{}\n", encoding="utf-8")
+        second.write_text("{}\n", encoding="utf-8")
+
+        with (
+            patch.object(handler, "upload_file", return_value=True) as upload,
+            patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+        ):
+            failed = handler.upload_validation_rollouts(epoch_dir)
+
+        assert failed == set()
+        assert upload.call_count == 2
+
+
 def _serialize_checkpoint(data: dict) -> bytes:
     """Serialize a checkpoint dict to bytes via torch.save."""
     buffer = io.BytesIO()

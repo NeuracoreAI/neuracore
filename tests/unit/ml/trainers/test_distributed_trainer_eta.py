@@ -32,6 +32,7 @@ def trainer(tmp_path: Path) -> DistributedTrainer:
     trainer.validate = MagicMock(return_value={})
     trainer.save_checkpoint = MagicMock()
     trainer.get_model_without_ddp = MagicMock(return_value=MagicMock())
+    trainer.validation_rollout_config = None
     return trainer
 
 

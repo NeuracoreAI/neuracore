@@ -58,6 +58,7 @@ from neuracore.ml.utils.training_config import (
     validate_complete_config,
 )
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
+from neuracore.ml.utils.validation_rollouts import ValidationRolloutConfig
 
 # Environment setup
 os.environ["PJRT_DEVICE"] = "GPU"
@@ -516,6 +517,15 @@ def run_training(
                 training_id=training_id,
             )
 
+        validation_rollout_points = int(cfg.get("validation_rollout_points", 0))
+        validation_rollout_config = None
+        if validation_rollout_points != 0:
+            validation_rollout_config = ValidationRolloutConfig(
+                num_points=validation_rollout_points,
+                frequency=int(cfg.get("validation_rollout_frequency", 5)),
+                seed=int(cfg.seed),
+            )
+
         trainer = DistributedTrainer(
             model=model,
             train_loader=train_loader,
@@ -539,6 +549,7 @@ def run_training(
             rank=rank,
             world_size=world_size,
             device=device,
+            validation_rollout_config=validation_rollout_config,
         )
 
         # Resume from checkpoint if specified

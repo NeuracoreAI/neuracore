@@ -21,7 +21,10 @@ from neuracore_types import (
 
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples
-from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import (
+    PytorchNeuracoreDataset,
+    SampleIdentity,
+)
 from neuracore.ml.utils.embodiment_names import normalize_data_names
 
 logger = logging.getLogger(__name__)
@@ -270,6 +273,30 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             batch_size=1,
         )
 
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return a synthetic identity for this sample index.
+
+        Args:
+            idx: Flat sample index.
+
+        Returns:
+            One recording per index at timestep 0, using the same robot
+            ``__getitem__`` generates that sample for.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        self._require_valid_sample_index(idx)
+        return SampleIdentity(
+            recording_id=f"dummy-sample-{idx}",
+            timestep=0,
+            robot_id=self._robot_id_for_episode(idx),
+        )
+
+    def _robot_id_for_episode(self, episode_idx: int) -> str:
+        """Return the robot a synthetic episode is generated for."""
+        return self._robot_ids[episode_idx % len(self._robot_ids)]
+
     def load_sample(
         self, episode_idx: int, timestep: int | None = None
     ) -> TrainingSample:
@@ -286,7 +313,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             A TrainingSample containing randomly generated input and output data
             matching the specified data types and dimensions.
         """
-        robot_id = self._robot_ids[episode_idx % len(self._robot_ids)]
+        robot_id = self._robot_id_for_episode(episode_idx)
         return self._samples_by_robot[robot_id]
 
     def __len__(self) -> int:

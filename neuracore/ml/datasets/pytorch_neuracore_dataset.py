@@ -7,6 +7,7 @@ poses, end-effectors, and language instructions.
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import torch
 from neuracore_types import (
@@ -25,6 +26,15 @@ from neuracore.ml import BatchedTrainingSamples
 logger = logging.getLogger(__name__)
 
 TrainingSample = BatchedTrainingSamples
+
+
+@dataclass(frozen=True)
+class SampleIdentity:
+    """Identity of a sample in a Dataset."""
+
+    recording_id: str
+    timestep: int
+    robot_id: str
 
 
 class PytorchNeuracoreDataset(Dataset, ABC):
@@ -95,6 +105,38 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             for model training.
         """
         pass
+
+    @abstractmethod
+    def get_sample_identity(self, idx: int) -> SampleIdentity:
+        """Return the recording, timestep, and robot for a sample index.
+
+        Args:
+            idx: Flat sample index, the same index ``__getitem__`` accepts.
+
+        Returns:
+            Identity (recording id, timestep, robot id) of the sample at ``idx``.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset.
+        """
+        pass
+
+    def _require_valid_sample_index(self, idx: int) -> None:
+        """Raise when a flat sample index is outside this dataset.
+
+        Args:
+            idx: Flat sample index, the same index ``__getitem__`` accepts.
+
+        Raises:
+            IndexError: If ``idx`` is outside ``[0, len(self))``.
+        """
+        length = len(self)
+        if idx < 0 or idx >= length:
+            raise IndexError(
+                f"Sample index {idx} is outside the dataset of length {length}. "
+                "Expected an index in "
+                f"[0, {length - 1}]."
+            )
 
     @abstractmethod
     def __len__(self) -> int:
