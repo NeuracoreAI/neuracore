@@ -52,6 +52,7 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
     prewarm_frame_bank,
 )
 from tests.integration.platform.data_daemon.shared.test_case.producers import (
+    ProducerSession,
     make_producer_session,
 )
 from tests.integration.platform.data_daemon.shared.test_case.recording_control import (
@@ -140,6 +141,95 @@ def _bind_worker_dataset(spec: ContextSpec) -> None:
         ) from last_error
 
 
+def _painted_rgb_codes(
+    spec: ContextSpec,
+    *,
+    recording_index: int,
+    camera_index: int,
+    frames: list[EmittedFrame],
+) -> list[int]:
+    """Return the frame codes *frames* were painted with, in order."""
+    return [
+        rgb_frame_code(
+            context_index=spec.context_index,
+            recording_index=recording_index,
+            camera_index=camera_index,
+            frame_index=frame.frame_index,
+        )
+        for frame in frames
+    ]
+
+
+def _assert_no_deadline_breaches(
+    trace_key: str, disk_key: str, owed: list[EmittedFrame]
+) -> None:
+    """Assert no frame a recording owns breached the logging deadline."""
+    breaching = [frame for frame in owed if frame.deadline_breaches]
+    assert not breaching, (
+        f"{trace_key} logged {len(breaching)} frame(s) inside "
+        f"recording {disk_key} that breached the logging deadline: "
+        f"{breaching[0].deadline_breaches}"
+    )
+
+
+def _classify_recordings(
+    spec: ContextSpec,
+    session: ProducerSession,
+    *,
+    bounds_by_disk_key: dict[str, RecordingControlBounds],
+    ordinal_by_disk_key: dict[str, int],
+    camera_name_list: list[str],
+) -> dict[str, RecordingExpectedTimestamps]:
+    """Decide what each recording owes, keyed by its on-disk recording key."""
+    # Turns an RGB trace's classified frames back into painted codes.
+    rgb_trace_cameras = {
+        trace_key_for(DATA_TYPE_RGB_IMAGES, camera): (camera, camera_index)
+        for camera_index, camera in enumerate(camera_name_list)
+    }
+    report = session.report()
+    expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
+    for disk_key, bounds in bounds_by_disk_key.items():
+        code_recording_index = session.frame_code_recording_index(
+            ordinal_by_disk_key[disk_key]
+        )
+        by_trace: dict[str, TraceClassification] = {}
+        codes_inside: dict[str, list[int]] = {}
+        codes_unknowable: dict[str, set[int]] = {}
+        for trace_key, frames in report.items():
+            classification = session.classify(trace_key, frames, bounds)
+            by_trace[trace_key] = classification
+            _assert_no_deadline_breaches(trace_key, disk_key, classification.owed)
+
+            camera = rgb_trace_cameras.get(trace_key)
+            if camera is None:
+                continue
+            camera_name, camera_index = camera
+            codes_inside[camera_name] = _painted_rgb_codes(
+                spec,
+                recording_index=code_recording_index,
+                camera_index=camera_index,
+                frames=classification.owed,
+            )
+            codes_unknowable[camera_name] = set(
+                _painted_rgb_codes(
+                    spec,
+                    recording_index=code_recording_index,
+                    camera_index=camera_index,
+                    frames=classification.unknowable,
+                )
+            )
+
+        expected_by_recording[disk_key] = RecordingExpectedTimestamps(
+            by_trace=by_trace,
+            observed_frame_codes=ObservedFrameCodes(
+                recording_index=code_recording_index,
+                inside=codes_inside,
+                unknowable=codes_unknowable,
+            ),
+        )
+    return expected_by_recording
+
+
 @surface_worker_errors
 def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     """Subprocess wrapper for context_worker used by multiprocessing.Pool.
@@ -197,7 +287,6 @@ def context_worker(
 
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
-        expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
         expected_video_stop_timestamp_by_recording: dict[str, float] = {}
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         ordinal_by_disk_key: dict[str, int] = {}
@@ -255,63 +344,13 @@ def context_worker(
             finally:
                 controller.shutdown()
 
-        # Turns an RGB trace's classified frames back into painted codes.
-        rgb_trace_cameras = {
-            trace_key_for(DATA_TYPE_RGB_IMAGES, camera): (camera, camera_index)
-            for camera_index, camera in enumerate(camera_name_list)
-        }
-        report = session.report()
-        for disk_key, bounds in bounds_by_disk_key.items():
-            code_recording_index = session.frame_code_recording_index(
-                ordinal_by_disk_key[disk_key]
-            )
-            by_trace: dict[str, TraceClassification] = {}
-            codes_inside: dict[str, list[int]] = {}
-            codes_unknowable: dict[str, set[int]] = {}
-            for trace_key, frames in report.items():
-                classification = session.classify(trace_key, frames, bounds)
-                by_trace[trace_key] = classification
-
-                breaching = [
-                    frame for frame in classification.owed if frame.deadline_breaches
-                ]
-                assert not breaching, (
-                    f"{trace_key} logged {len(breaching)} frame(s) inside "
-                    f"recording {disk_key} that breached the logging deadline: "
-                    f"{breaching[0].deadline_breaches}"
-                )
-
-                camera = rgb_trace_cameras.get(trace_key)
-                if camera is None:
-                    continue
-                camera_name, camera_index = camera
-
-                def _codes(
-                    frames: list[EmittedFrame],
-                    index: int = camera_index,
-                    recording_index: int = code_recording_index,
-                ):
-                    return [
-                        rgb_frame_code(
-                            context_index=spec.context_index,
-                            recording_index=recording_index,
-                            camera_index=index,
-                            frame_index=frame.frame_index,
-                        )
-                        for frame in frames
-                    ]
-
-                codes_inside[camera_name] = _codes(classification.owed)
-                codes_unknowable[camera_name] = set(_codes(classification.unknowable))
-
-            expected_by_recording[disk_key] = RecordingExpectedTimestamps(
-                by_trace=by_trace,
-                observed_frame_codes=ObservedFrameCodes(
-                    recording_index=code_recording_index,
-                    inside=codes_inside,
-                    unknowable=codes_unknowable,
-                ),
-            )
+        expected_by_recording = _classify_recordings(
+            spec,
+            session,
+            bounds_by_disk_key=bounds_by_disk_key,
+            ordinal_by_disk_key=ordinal_by_disk_key,
+            camera_name_list=camera_name_list,
+        )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
