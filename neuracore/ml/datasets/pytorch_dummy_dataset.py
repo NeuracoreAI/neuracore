@@ -22,6 +22,7 @@ from neuracore_types import (
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.utils.embodiment_names import normalize_data_names
 
 logger = logging.getLogger(__name__)
 
@@ -118,13 +119,6 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             robot_id: self._generate_sample(robot_id) for robot_id in self._robot_ids
         }
 
-    @staticmethod
-    def _normalize_data_names(data_names: list[str] | dict[int, str]) -> dict[int, str]:
-        """Normalize list/dict specs to the indexed format used by real datasets."""
-        if isinstance(data_names, dict):
-            return dict(data_names)
-        return {index: name for index, name in enumerate(data_names)}
-
     def _get_num_slots_for_data_type(
         self,
         cross_embodiment_description: CrossEmbodimentDescription,
@@ -138,7 +132,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             if data_type not in embodiment_description:
                 continue
 
-            normalized_data_names = self._normalize_data_names(
+            normalized_data_names = normalize_data_names(
                 embodiment_description[data_type]
             )
             if normalized_data_names:
@@ -229,7 +223,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
 
         embodiment_description = cross_embodiment_description.get(robot_id, {})
         for data_type, data_names in embodiment_description.items():
-            normalized_data_names = self._normalize_data_names(data_names)
+            normalized_data_names = normalize_data_names(data_names)
             num_slots = self._get_num_slots_for_data_type(
                 cross_embodiment_description, data_type
             )
