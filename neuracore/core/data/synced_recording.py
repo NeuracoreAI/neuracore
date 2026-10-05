@@ -4,7 +4,7 @@ import json
 import logging
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -14,6 +14,9 @@ from neuracore_types import (
     CameraData,
     CrossEmbodimentUnion,
     DataType,
+    EmbodimentDescription,
+    NCData,
+    NCDataUnion,
     PointCloudData,
     SynchronizationDetails,
 )
@@ -51,6 +54,11 @@ logger = logging.getLogger(__name__)
 
 POINT_CLOUD_TRACE_BIN_FILE = "trace.bin"
 POINT_CLOUD_TRACE_INDEX_FILE = "trace.json"
+
+# Data types whose entries reference frames stored in the disk cache.
+FRAME_DATA_TYPES = frozenset(
+    {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES, DataType.POINT_CLOUDS}
+)
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
@@ -147,7 +155,7 @@ class SynchronizedRecording:
             # Check if cache directory exists and contains any files
             wait_for_lock_release(cache / ".recording.lock", cache)
             # NOTE: this is to start video prefetching frames into cache
-            self._get_sync_point(0)
+            self._load_sync_point(self._episode_synced.observations[0])
 
     @property
     def frequency(self) -> int:
@@ -559,54 +567,158 @@ class SynchronizedRecording:
         finally:
             delete_decoding_lock(lock_file)
 
-    def _load_sync_point_payloads(
-        self, sync_point: SynchronizedPoint
+    def _load_sync_point(
+        self,
+        sync_point: SynchronizedPoint,
+        embodiment_description: EmbodimentDescription | None = None,
     ) -> SynchronizedPoint:
         """Load lazy sensor payloads from disk cache for a sync point.
 
         Args:
             sync_point: Sync point with metadata-only camera and point cloud entries.
+            embodiment_description: Data types and sensor names to load. Every
+                sensor loads when None.
 
         Returns:
-            Sync point with camera frames and point cloud arrays populated.
-        """
-        # Build new data dict with loaded frames
-        new_data = {}
-        for data_type, data_dict in sync_point.data.items():
-            if data_type == DataType.RGB_IMAGES:
-                new_data[data_type] = self._get_frame_from_disk_cache(
-                    DataType.RGB_IMAGES, data_dict
-                )
-            elif data_type == DataType.DEPTH_IMAGES:
-                new_data[data_type] = self._get_frame_from_disk_cache(
-                    DataType.DEPTH_IMAGES, data_dict, rgb_to_depth_storage
-                )
-            elif data_type == DataType.POINT_CLOUDS:
-                new_data[data_type] = self._get_point_cloud_from_disk_cache(data_dict)
-            else:
-                # create NEW instances to avoid shared references
-                new_data[data_type] = {
-                    name: nc_data.model_copy() for name, nc_data in data_dict.items()
-                }
+            Sync point with camera frames and point cloud arrays populated,
+            holding only the sensors in embodiment_description.
 
-        return SynchronizedPoint(
+        Raises:
+            ValueError: If the sync point lacks a data type or sensor name in
+                embodiment_description.
+        """
+        synced_data = (
+            sync_point.data
+            if embodiment_description is None
+            else self._select_sensors(sync_point, embodiment_description)
+        )
+        return SynchronizedPoint.model_construct(
             timestamp=sync_point.timestamp,
             robot_id=sync_point.robot_id,
-            data=new_data,
+            data={
+                data_type: (
+                    self._load_frames(data_type, nc_data_by_name)
+                    if data_type in FRAME_DATA_TYPES
+                    else {
+                        name: nc_data.model_copy()
+                        for name, nc_data in nc_data_by_name.items()
+                    }
+                )
+                for data_type, nc_data_by_name in synced_data.items()
+            },
         )
 
-    def _get_sync_point(self, idx: int) -> SynchronizedPoint:
-        """Get synchronized data point at a specific index.
+    @staticmethod
+    def _select_sensors(
+        sync_point: SynchronizedPoint, embodiment_description: EmbodimentDescription
+    ) -> dict[DataType, dict[str, NCDataUnion]]:
+        """Return the sensor entries of a sync point named in the description.
 
         Args:
-            idx: Index of the sync point to retrieve.
+            sync_point: Sync point to select sensor entries from.
+            embodiment_description: Data types and sensor names to select.
 
         Returns:
-            SynchronizedPoint object containing synchronized data
-                for the specified index.
+            The selected sensor entries, keyed by data type and sensor name.
+
+        Raises:
+            ValueError: If the sync point lacks a data type or sensor name in
+                embodiment_description.
         """
-        sync_point = self._episode_synced.observations[idx]
-        return self._load_sync_point_payloads(sync_point)
+        synced_data: dict[DataType, dict[str, NCDataUnion]] = {}
+        for data_type, indexed_names in embodiment_description.items():
+            nc_data_by_name = sync_point.data.get(data_type)
+            if nc_data_by_name is None:
+                raise ValueError(
+                    f"SynchronizedPoint is missing required data type: {data_type}"
+                )
+            missing_names = set(indexed_names.values()) - nc_data_by_name.keys()
+            if missing_names:
+                raise ValueError(
+                    "SynchronizedPoint is missing required sensor names "
+                    f"{sorted(missing_names)} for data type {data_type}"
+                )
+            synced_data[data_type] = {
+                name: nc_data_by_name[name] for name in indexed_names.values()
+            }
+        return synced_data
+
+    def _load_frames(
+        self, data_type: DataType, frames: Mapping[str, NCData]
+    ) -> Mapping[str, NCData]:
+        """Load the frames of one frame data type from disk cache.
+
+        Args:
+            data_type: One of FRAME_DATA_TYPES.
+            frames: Camera or point cloud entries keyed by sensor name, each
+                holding a frame index.
+
+        Returns:
+            New entries with camera frames or point cloud arrays populated.
+
+        Raises:
+            ValueError: If data_type is not one of FRAME_DATA_TYPES.
+        """
+        if data_type not in FRAME_DATA_TYPES:
+            raise ValueError(f"Data type {data_type} has no frames to load")
+        if data_type == DataType.RGB_IMAGES:
+            return self._get_frame_from_disk_cache(
+                data_type, cast(dict[str, CameraData], frames)
+            )
+        if data_type == DataType.DEPTH_IMAGES:
+            return self._get_frame_from_disk_cache(
+                data_type, cast(dict[str, CameraData], frames), rgb_to_depth_storage
+            )
+        return self._get_point_cloud_from_disk_cache(
+            cast(dict[str, PointCloudData], frames)
+        )
+
+    def get_sync_point(
+        self, timestep: int, embodiment_description: EmbodimentDescription
+    ) -> SynchronizedPoint:
+        """Return the sync point at timestep with only the described sensors.
+
+        Args:
+            timestep: Timestep of the sync point, counting from 0 at the
+                start of the recording.
+            embodiment_description: Data types and sensor names to load.
+
+        Returns:
+            The sync point, holding only the sensors in embodiment_description.
+        """
+        return self._load_sync_point(
+            self._episode_synced.observations[timestep], embodiment_description
+        )
+
+    def get_sync_points(
+        self,
+        start_timestep: int,
+        end_timestep: int,
+        embodiment_description: EmbodimentDescription,
+    ) -> list[SynchronizedPoint]:
+        """Return the sync points from start_timestep up to end_timestep.
+
+        Load only the described sensors, and clamp the range to the recording
+        the same way a slice does.
+
+        Args:
+            start_timestep: Timestep of the first sync point, counting from 0 at
+                the start of the recording.
+            end_timestep: Timestep one past the last sync point.
+            embodiment_description: Data types and sensor names to load for
+                each sync point.
+
+        Returns:
+            The sync points in the range, each holding only the sensors in
+            embodiment_description.
+        """
+        start_timestep, end_timestep, _ = slice(start_timestep, end_timestep).indices(
+            len(self)
+        )
+        return [
+            self.get_sync_point(timestep, embodiment_description)
+            for timestep in range(start_timestep, end_timestep)
+        ]
 
     def __iter__(self) -> "SynchronizedRecording":
         """Initialize iteration over the episode.
@@ -651,7 +763,7 @@ class SynchronizedRecording:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
 
-        return self._get_sync_point(idx)
+        return self._load_sync_point(self._episode_synced.observations[idx])
 
     def __next__(self) -> SynchronizedPoint:
         """Get the next synchronized data point in the episode.
@@ -664,6 +776,8 @@ class SynchronizedRecording:
         """
         if self._iter_idx >= len(self._episode_synced.observations):
             raise StopIteration
-        sync_point = self._get_sync_point(self._iter_idx)
+        sync_point = self._load_sync_point(
+            self._episode_synced.observations[self._iter_idx]
+        )
         self._iter_idx += 1
         return sync_point

@@ -13,8 +13,6 @@ from neuracore_types import (
     BatchedNCData,
     CrossEmbodimentDescription,
     DataType,
-    EmbodimentDescription,
-    EmbodimentUnion,
     NCDataStats,
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
@@ -208,18 +206,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self._max_items_per_output_type = self._get_max_items_per_data_type(
             self.output_cross_embodiment_description
         )
-        # Index-ordered (index, name) pairs per robot, so projecting a sync
-        # point does not re-sort the same keys for every one of the
-        # output_prediction_horizon + 1 sync points a sample touches.
-        self._merged_ordered_items = {
-            robot_id: self._order_embodiment_items(
-                self._convert_to_embodiment_description(embodiment_union)
-            )
-            for robot_id, embodiment_union in (
-                self.merged_cross_embodiment_description.items()
-            )
-        }
-
         self._sample_cache = self._build_sample_cache() if sample_cache else None
 
     def rebuild_sample_cache(self) -> None:
@@ -270,18 +256,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     highest_index.get(data_type, 0), *indexed_names, 0
                 )
         return {data_type: highest + 1 for data_type, highest in highest_index.items()}
-
-    @staticmethod
-    def _order_embodiment_items(
-        description: EmbodimentDescription,
-    ) -> dict[DataType, list[tuple[int, str]]]:
-        """Flatten an embodiment description into index-ordered (index, name) pairs."""
-        return {
-            data_type: [
-                (index, indexed_names[index]) for index in sorted(indexed_names)
-            ]
-            for data_type, indexed_names in description.items()
-        }
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -364,116 +338,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         return episode_indices, episode_start_offsets, episode_recording_ids
 
-    def _convert_to_embodiment_description(
-        self, value: EmbodimentUnion
-    ) -> EmbodimentDescription:
-        """Normalize list-based sensor specs into indexed embodiment mappings.
-
-        Converts:
-            {
-                DataType.JOINT_POSITIONS: ["joint1", "joint2"]
-            }
-
-        Into:
-            {
-                DataType.JOINT_POSITIONS: {
-                    0: "joint1",
-                    1: "joint2"
-                }
-            }
-
-        Guarantees:
-        - Order is preserved → index defines semantic position
-        - Deterministic mapping
-        - No mutation of input
-        """
-        if value is None:
-            return {}
-
-        embodiment_description: EmbodimentDescription = {}
-
-        for data_type, items in value.items():
-            if not isinstance(items, list):
-                raise TypeError(
-                    f"Expected list for {data_type}, got {type(items).__name__}"
-                )
-
-            # Optional: strict validation (useful for your pipeline)
-            if any(not isinstance(x, str) for x in items):
-                raise ValueError(f"All entries for {data_type} must be strings")
-
-            embodiment_description[data_type] = {
-                idx: name for idx, name in enumerate(items)
-            }
-
-        return embodiment_description
-
-    @staticmethod
-    def _project_sync_point(
-        sync_point: SynchronizedPoint,
-        ordered_items: dict[DataType, list[tuple[int, str]]],
-    ) -> SynchronizedPoint:
-        """Project a sync point onto the requested spec in deterministic order.
-
-        Extra data types or sensor names in the source sync point are ignored.
-        Missing required data types or sensor names raise a ValueError.
-
-        Args:
-            sync_point: The sync point to project.
-            ordered_items: Index-ordered ``{data_type: [(index, name), ...]}``
-                built once at construction, so this does not re-sort the same
-                keys for every sync point of every sample.
-        """
-        projected_data: dict[DataType, dict[str, object]] = {}
-
-        for data_type, indexed_names in ordered_items.items():
-            source_data_for_type = sync_point.data.get(data_type)
-            if source_data_for_type is None:
-                raise ValueError(
-                    f"SynchronizedPoint is missing required data type: {data_type}"
-                )
-
-            projected_for_type: dict[str, object] = {}
-            for _, name in indexed_names:
-                if name not in source_data_for_type:
-                    raise ValueError(
-                        "SynchronizedPoint is missing required sensor name "
-                        f"'{name}' for data type {data_type}"
-                    )
-                projected_for_type[name] = source_data_for_type[name]
-            projected_data[data_type] = projected_for_type
-
-        return SynchronizedPoint.model_construct(
-            timestamp=sync_point.timestamp,
-            robot_id=sync_point.robot_id,
-            data=projected_data,
-        )
-
     @staticmethod
     def _get_timestep(episode_length: int) -> int:
         max_start = max(0, episode_length)
         return np.random.randint(0, max_start - 1)
-
-    def _load_projected_output_sync_points(
-        self,
-        synced_recording: SynchronizedRecording,
-        timestep: int,
-        ordered_items: dict[DataType, list[tuple[int, str]]],
-    ) -> list[SynchronizedPoint]:
-        """Load the superset window for all output data types.
-
-        Fetches ``[timestep, timestep + 1 + horizon]`` once so target types
-        (aligned to the input step) and non-target types (next step onward)
-        can share the same loaded sync points.
-        """
-        output_sync_points = cast(
-            list[SynchronizedPoint],
-            synced_recording[timestep : timestep + 1 + self.output_prediction_horizon],
-        )
-        return [
-            self._project_sync_point(sync_point, ordered_items)
-            for sync_point in output_sync_points
-        ]
 
     @staticmethod
     def _output_sync_points_for_data_type(
@@ -532,20 +400,14 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if timestep is None:
             timestep = self._get_timestep(episode_length)
 
-        input_sync_point = cast(SynchronizedPoint, synced_recording[timestep])
-
-        # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
-
-        merged_ordered_items = self._merged_ordered_items[robot_id]
-        input_sync_point = self._project_sync_point(
-            input_sync_point, merged_ordered_items
+        input_sync_point = synced_recording.get_sync_point(
+            timestep, self.input_cross_embodiment_description[robot_id]
         )
-
-        output_sync_points = self._load_projected_output_sync_points(
-            synced_recording=synced_recording,
-            timestep=timestep,
-            ordered_items=merged_ordered_items,
+        output_sync_points = synced_recording.get_sync_points(
+            timestep,
+            timestep + 1 + self.output_prediction_horizon,
+            self.output_cross_embodiment_description[robot_id],
         )
         recording_name = getattr(synced_recording, "name", "recording")
 

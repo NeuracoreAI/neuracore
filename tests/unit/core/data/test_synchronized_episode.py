@@ -270,6 +270,36 @@ class TestSynchronizedRecording:
         assert len(frames) == 2
         assert all(isinstance(f, SynchronizedPoint) for f in frames)
 
+    def test_get_sync_points_loads_only_described_sensors(
+        self, synced_recording: SynchronizedRecording
+    ):
+        """Load frames only for the cameras the embodiment description names."""
+        first_point = synced_recording._episode_synced.observations[0]
+        rgb_data = first_point.data[DataType.RGB_IMAGES]
+        rgb_data["unused_cam"] = rgb_data["cam1"].model_copy()
+
+        with patch.object(
+            synced_recording, "_get_frame_from_disk_cache", side_effect=lambda _, d: d
+        ) as mock_get_frame:
+            points = synced_recording.get_sync_points(
+                0, 2, {DataType.RGB_IMAGES: {0: "cam1"}}
+            )
+
+        assert [set(call.args[1]) for call in mock_get_frame.call_args_list] == [
+            {"cam1"},
+            {"cam1"},
+        ]
+        assert all(set(p.data) == {DataType.RGB_IMAGES} for p in points)
+
+    def test_get_sync_points_rejects_missing_sensor_name(
+        self, synced_recording: SynchronizedRecording
+    ):
+        """Raise when the embodiment description names an absent sensor."""
+        with pytest.raises(
+            ValueError, match=r"missing required sensor names \['cam9'\]"
+        ):
+            synced_recording.get_sync_points(0, 1, {DataType.RGB_IMAGES: {0: "cam9"}})
+
     def test_getitem_slice_with_step(
         self,
         dataset_mock,
