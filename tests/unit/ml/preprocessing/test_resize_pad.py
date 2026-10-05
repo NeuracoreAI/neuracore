@@ -64,3 +64,24 @@ def test_resize_pad_rejects_unsupported_batched_type():
 
     with pytest.raises(TypeError, match="Unsupported batched data type"):
         ResizePad(size=[32, 32])(DummyBatched())  # type: ignore[arg-type]
+
+
+def test_resize_pad_keeps_uint8_rgb_as_the_rounded_float_resize():
+    """A uint8 frame stays uint8 and equals the float32 resize rounded."""
+    frame = torch.randint(0, 256, (2, 1, 3, 48, 64), dtype=torch.uint8)
+    data = BatchedRGBData(
+        frame=frame,
+        extrinsics=torch.zeros(2, 1, 4, 4),
+        intrinsics=torch.zeros(2, 1, 3, 3),
+    )
+    as_float = BatchedRGBData(
+        frame=frame.to(torch.float32),
+        extrinsics=torch.zeros(2, 1, 4, 4),
+        intrinsics=torch.zeros(2, 1, 3, 3),
+    )
+
+    result = ResizePad((32, 32))(data)
+    expected = ResizePad((32, 32))(as_float).frame.round().clamp(0, 255)
+
+    assert result.frame.dtype == torch.uint8
+    assert torch.equal(result.frame, expected.to(torch.uint8))
