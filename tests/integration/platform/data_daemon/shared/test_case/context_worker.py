@@ -35,6 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_TYPE_RGB_IMAGES,
     DATASET_POLL_INTERVAL_S,
     MAX_TIME_TO_START_S,
+    PACING_SATURATE,
     PRODUCER_MULTI_PROCESS,
     PRODUCER_PER_THREAD,
     camera_names,
@@ -275,7 +276,6 @@ def context_worker(
 
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
-        expected_video_stop_timestamp_by_recording: dict[str, float] = {}
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         ordinal_by_disk_key: dict[str, int] = {}
 
@@ -314,9 +314,6 @@ def context_worker(
                 # Brackets the window's upper bound, the mirror of the start.
                 closed = controller.close(recording_capture_stop_s)
                 wall_stopped_at = time.time()
-                expected_video_stop_timestamp_by_recording[disk_recording_key] = (
-                    spec.timestamp_start_s + (recording_ordinal + 1) * case.duration_sec
-                )
 
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
                     start_called_at=start_called_at,
@@ -339,7 +336,11 @@ def context_worker(
             ordinal_by_disk_key=ordinal_by_disk_key,
             camera_name_list=camera_name_list,
         )
-        assert_owed_frames(expected_by_recording)
+        assert_owed_frames(
+            expected_by_recording,
+            bounds_by_disk_key,
+            paced=case.producer_pacing != PACING_SATURATE,
+        )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
@@ -373,9 +374,6 @@ def context_worker(
             ),
             depth_mode=case.depth_mode,
             has_depth=bool(depth_camera_name_list),
-            expected_video_stop_timestamp_by_recording=(
-                expected_video_stop_timestamp_by_recording
-            ),
         )
     except Exception:
         if robot is not None:

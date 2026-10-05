@@ -82,7 +82,9 @@ from tests.integration.platform.data_daemon.shared.test_case.streams import (
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
+        EmittedFrame,
         ObservedFrameCodes,
+        RecordingControlBounds,
     )
     from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
@@ -98,6 +100,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_BYTE_LENGTH,
     FRAME_GRID_SIZE,
     LATE_START_SYNC_POINT_TOLERANCE,
+    MAX_DATA_GAP_S,
     STREAM_JOINT_POSITIONS,
     STREAM_JOINT_TORQUES,
     STREAM_JOINT_VELOCITIES,
@@ -206,8 +209,33 @@ def assert_daemon_cleanup() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _assert_data_covers_window(
+    trace_key: str,
+    disk_key: str,
+    owed: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> None:
+    """Assert a trace never went silent inside a recording, edges included."""
+    edges = [
+        bounds.start_returned_at,
+        *(frame.emitted_at for frame in owed),
+        bounds.stop_called_at,
+    ]
+    gap_s, gap_end = max(
+        (later - earlier, later) for earlier, later in zip(edges, edges[1:])
+    )
+    assert gap_s <= MAX_DATA_GAP_S, (
+        f"{trace_key} logged nothing inside recording {disk_key} for "
+        f"{gap_s:.3f}s, ending {gap_end - bounds.start_returned_at:.3f}s into "
+        f"it, more than {MAX_DATA_GAP_S}s; the producer stalled"
+    )
+
+
 def assert_owed_frames(
     expected_by_recording: dict[str, RecordingExpectedTimestamps],
+    bounds_by_disk_key: dict[str, RecordingControlBounds],
+    *,
+    paced: bool,
 ) -> None:
     """Assert no frame a recording owes breached the logging deadline."""
     for disk_key, expected in expected_by_recording.items():
@@ -220,6 +248,13 @@ def assert_owed_frames(
                 f"recording {disk_key} that breached the logging deadline: "
                 f"{breaching[0].deadline_breaches}"
             )
+            if paced:
+                _assert_data_covers_window(
+                    trace_key,
+                    disk_key,
+                    classification.owed,
+                    bounds_by_disk_key[disk_key],
+                )
 
 
 # ---------------------------------------------------------------------------
