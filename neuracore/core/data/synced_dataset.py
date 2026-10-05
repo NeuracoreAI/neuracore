@@ -152,7 +152,7 @@ class SynchronizedDataset:
                 instance=recording.instance,
                 synchronization_details=self.synchronization_details,
                 prefetch_videos=self._prefetch_videos,
-                episode_synced=episodes.get(idx),
+                synced_episode=episodes.get(idx),
             )
 
     def __iter__(self) -> "SynchronizedDataset":
