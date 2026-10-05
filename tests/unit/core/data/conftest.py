@@ -139,6 +139,9 @@ def mock_prefetch_transport(monkeypatch):
     from neuracore.core.auth import get_auth
     from neuracore.core.data.frame_cache import video_filename_preference
     from neuracore.core.data.prefetch import VideoPrefetcher
+    from neuracore.core.data.serialized_synchronized_episode import (
+        SerializedSynchronizedEpisode,
+    )
     from neuracore.core.utils.download import stream_to_file
     from neuracore.core.utils.http_session import thread_local_session
 
@@ -164,7 +167,9 @@ def mock_prefetch_transport(monkeypatch):
         progress = SynchronizeRecordingProgress.model_validate(response.json())
         response = thread_local_session().get(progress.download_url)
         response.raise_for_status()
-        return SynchronizedEpisodeModel.model_validate_json(response.content)
+        return SerializedSynchronizedEpisode(
+            SynchronizedEpisodeModel.model_validate_json(response.content)
+        )
 
     async def fake_get_video_url(self, session, target):
         preference = video_filename_preference(target.data_type)

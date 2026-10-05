@@ -12,13 +12,15 @@ from neuracore_types import (
     DataType,
     JointData,
     SynchronizationDetails,
-    SynchronizedEpisode,
     SynchronizedPoint,
     SynchronizeRecordingRequest,
 )
 from PIL import Image
 
 from neuracore.core.const import API_URL
+from neuracore.core.data.serialized_synchronized_episode import (
+    SerializedSynchronizedPoints,
+)
 from neuracore.core.data.synced_recording import (
     SYNCED_EPISODE_DOWNLOAD_TIMEOUT_S,
     SynchronizedRecording,
@@ -150,19 +152,17 @@ class TestSynchronizedRecording:
         self, synced_recording: SynchronizedRecording, synced_data
     ):
         """Test that _get_synced_data correctly retrieves synchronized data."""
-        result = synced_recording._synced_episode
+        stored = synced_recording._sync_points
 
-        assert result.robot_id == synced_data.robot_id
-        assert len(result.observations) == len(synced_data.observations)
-        assert result.start_time == synced_data.start_time
-        assert result.end_time == synced_data.end_time
+        assert [point.model_dump(mode="json") for point in stored] == [
+            point.model_dump(mode="json") for point in synced_data.observations
+        ]
 
     def test_construction_initializes_episode_state(
         self, synced_recording: SynchronizedRecording, synced_data
     ):
         """Construction still populates the episode state from the download."""
-        assert synced_recording._synced_episode is not None
-        assert synced_recording._episode_length == len(synced_data.observations)
+        assert len(synced_recording) == len(synced_data.observations)
         assert synced_recording.start_time == synced_data.start_time
         assert synced_recording.end_time == synced_data.end_time
 
@@ -274,9 +274,10 @@ class TestSynchronizedRecording:
         self, synced_recording: SynchronizedRecording
     ):
         """Load frames only for the cameras the embodiment description names."""
-        first_point = synced_recording._synced_episode.observations[0]
-        rgb_data = first_point.data[DataType.RGB_IMAGES]
+        points = list(synced_recording._sync_points)
+        rgb_data = points[0].data[DataType.RGB_IMAGES]
         rgb_data["unused_cam"] = rgb_data["cam1"].model_copy()
+        synced_recording._sync_points = SerializedSynchronizedPoints(points)
 
         with patch.object(
             synced_recording, "_get_frame_from_disk_cache", side_effect=lambda _, d: d
@@ -361,7 +362,7 @@ class TestSynchronizedRecording:
         iter(synced_recording)
 
         # Exhaust the iterator
-        synced_recording._iter_idx = len(synced_recording._synced_episode.observations)
+        synced_recording._iter_idx = len(synced_recording)
 
         with pytest.raises(StopIteration):
             next(synced_recording)
@@ -651,8 +652,9 @@ class TestSyncedEpisodeRetrieval:
         assert progress.call_count == 1
         assert progress.last_request.qs == {"recording_id": ["rec1"]}
         assert download.call_count == 1
-        assert isinstance(recording._synced_episode, SynchronizedEpisode)
-        assert recording._synced_episode.robot_id == synced_data.robot_id
+        assert recording._sync_points[0].model_dump(mode="json") == (
+            synced_data.observations[0].model_dump(mode="json")
+        )
         assert len(recording) == len(synced_data.observations)
 
     def test_pending_polls_until_ready(

@@ -42,6 +42,9 @@ from neuracore.core.data.frame_cache import (
     publish_decoded_frames,
     video_filename_preference,
 )
+from neuracore.core.data.serialized_synchronized_episode import (
+    SerializedSynchronizedEpisode,
+)
 from neuracore.core.data.synced_recording import (
     SYNCED_RECORDING_POLL_INTERVAL_S,
     SYNCED_RECORDING_TIMEOUT_S,
@@ -112,14 +115,14 @@ class VideoPrefetcher:
         self.inflight_requests = max(1, inflight_requests)
         self.decode_workers = max(1, decode_workers)
         self.download_videos = download_videos
-        self.episodes: dict[int, SynchronizedEpisodeModel] = {}
+        self.episodes: dict[int, SerializedSynchronizedEpisode] = {}
         self._failures = 0
         self._lock = threading.Lock()
         # Created once the event loop is running.
         self._api_requests: asyncio.Semaphore | None = None
         self._transfers: asyncio.Semaphore | None = None
 
-    def run(self) -> dict[int, SynchronizedEpisodeModel]:
+    def run(self) -> dict[int, SerializedSynchronizedEpisode]:
         """Fetch metadata and, if enabled, download and decode every video.
 
         Failures for individual recordings or cameras are logged and skipped
@@ -197,7 +200,7 @@ class VideoPrefetcher:
 
     async def _get_synced_data(
         self, session: aiohttp.ClientSession, recording_id: str
-    ) -> SynchronizedEpisodeModel:
+    ) -> SerializedSynchronizedEpisode:
         """Synchronize one recording and download its episode metadata.
 
         Args:
@@ -205,7 +208,7 @@ class VideoPrefetcher:
             recording_id: Recording to synchronize.
 
         Returns:
-            The synchronized episode for the recording.
+            The synchronized episode for the recording, with its points serialized.
         """
         base_url = f"{API_URL}/org/{self.dataset.org_id}/synchronize"
         async with session.post(
@@ -256,7 +259,7 @@ class VideoPrefetcher:
         try:
             async with session.get(progress.download_url) as response:
                 response.raise_for_status()
-                payload = await response.json()
+                payload = await response.read()
         except aiohttp.ClientError as exc:
             # aiohttp includes the signed URL (and its credentials) in request
             # errors, so only expose the response status or exception class.
@@ -268,7 +271,9 @@ class VideoPrefetcher:
                 f"Failed to download synchronized episode for recording "
                 f"{recording_id} ({detail})"
             ) from None
-        return SynchronizedEpisodeModel.model_validate(payload)
+        return SerializedSynchronizedEpisode(
+            SynchronizedEpisodeModel.model_validate_json(payload)
+        )
 
     async def _fetch_and_download(self, session: aiohttp.ClientSession) -> None:
         """Fetch metadata and download videos as one overlapped pipeline.
@@ -410,7 +415,7 @@ class VideoPrefetcher:
         return targets
 
     def _collect_targets_for(
-        self, recording: "Recording", episode: SynchronizedEpisodeModel
+        self, recording: "Recording", episode: SerializedSynchronizedEpisode
     ) -> list["_DownloadTarget"]:
         """Find one recording's cameras whose frames are not already cached.
 
