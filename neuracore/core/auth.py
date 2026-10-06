@@ -180,7 +180,9 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         from neuracore import __version__ as neuracore_version
 
         try:
-            session = thread_local_session(retry_transient=True)
+            session = thread_local_session(
+                retry_transient=True, retry_read_timeout=True
+            )
             response = session.get(
                 f"{API_URL}/auth/verify-version",
                 params={

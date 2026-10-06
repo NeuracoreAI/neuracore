@@ -201,6 +201,21 @@ def test_login_version_check_connection_error_surfaces_cleanly(
     assert "Connection reset by peer during verify-version" in str(exc_info.value)
 
 
+def test_login_version_check_retries_read_timeouts(monkeypatch, reset_neuracore):
+    """A hung version check is an idempotent GET, so it is retried."""
+    requested_policies = []
+
+    def record(**kwargs):
+        requested_policies.append(kwargs)
+        return type("_Session", (), {"get": lambda *_a, **_k: Mock(status_code=200)})()
+
+    monkeypatch.setattr("neuracore.core.auth.thread_local_session", record)
+
+    get_auth().validate_version()
+
+    assert requested_policies == [{"retry_transient": True, "retry_read_timeout": True}]
+
+
 def test_connect_robot(
     temp_config_dir,
     mock_auth_requests,
