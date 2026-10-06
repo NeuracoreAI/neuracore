@@ -262,8 +262,10 @@ pub enum RecordingCommand {
     /// The named recording ended.
     Close {
         recording_id: String,
-        /// When the daemon learned of the stop (Unix nanoseconds). Used as the
-        /// recording's `end_time` only when nothing local already stopped it.
+        /// The recording's end on the backend's record (Unix nanoseconds).
+        end_timestamp_ns: Option<i64>,
+        /// When the daemon learned of the stop (Unix nanoseconds). The stop
+        /// when the backend sent no usable end.
         observed_at_ns: i64,
     },
 }
@@ -1020,6 +1022,7 @@ impl Dispatcher {
             }
             RecordingCommand::Close {
                 recording_id,
+                end_timestamp_ns,
                 observed_at_ns,
             } => {
                 let Some(source) = self.source_recording(&recording_id).await else {
@@ -1034,8 +1037,18 @@ impl Dispatcher {
                     robot_id = source.0,
                     "closing a recording the backend reported stopped"
                 );
-                self.handle_stop(source, observed_at_ns, observed_at_ns, recv_at)
-                    .await;
+                // Clock skew can put the backend's end where no window closes.
+                let live_start = self
+                    .windows
+                    .get(&source)
+                    .and_then(|entry| entry.live.as_ref())
+                    .map(|window| window.started_at_ns);
+                let stop_ns = end_timestamp_ns
+                    .filter(|end| {
+                        live_start.is_some_and(|start| (start..=observed_at_ns).contains(end))
+                    })
+                    .unwrap_or(observed_at_ns);
+                self.handle_stop(source, stop_ns, stop_ns, recv_at).await;
             }
         }
     }
@@ -3283,6 +3296,7 @@ mod tests {
             .handle_recording_command(
                 RecordingCommand::Close {
                     recording_id: "rec-a".into(),
+                    end_timestamp_ns: None,
                     observed_at_ns: 150,
                 },
                 now,
@@ -3295,6 +3309,80 @@ mod tests {
             "the stop left it running"
         );
         assert!(recording_state.live(&store, "robot-1", 0).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_remote_stop_ends_the_recording_at_the_backend_end_time() {
+        // Data published after the web stop stays out of the recording.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        let released = now + dispatcher.holdback + Duration::from_millis(1);
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher.release_due_holdback(released).await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 160, 2), released)
+            .await;
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Close {
+                    recording_id: "rec-a".into(),
+                    end_timestamp_ns: Some(150),
+                    observed_at_ns: 200,
+                },
+                released,
+            )
+            .await;
+        dispatcher
+            .release_due_holdback(released + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings[0].stop_timestamp_ns, Some(150));
+        assert_eq!(dispatcher.orphan_drops, 1);
+    }
+
+    #[tokio::test]
+    async fn a_remote_end_time_outside_the_window_stops_at_receipt() {
+        fast_holdback();
+        for end in [50, 300] {
+            let (store, dir) = open_store().await;
+            let context = test_context(dir.path().join("recordings"), store.clone());
+            let mut dispatcher =
+                Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+            let now = Instant::now();
+            dispatcher
+                .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+                .await;
+            dispatcher
+                .handle_inbound(datum("robot-1", 110, 1), now)
+                .await;
+            dispatcher
+                .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+                .await;
+            dispatcher
+                .handle_recording_command(
+                    RecordingCommand::Close {
+                        recording_id: "rec-a".into(),
+                        end_timestamp_ns: Some(end),
+                        observed_at_ns: 200,
+                    },
+                    now,
+                )
+                .await;
+
+            let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+            assert_eq!(recordings[0].stop_timestamp_ns, Some(200), "end {end}");
+        }
     }
 
     #[tokio::test]
@@ -3325,6 +3413,7 @@ mod tests {
             .handle_recording_command(
                 RecordingCommand::Close {
                     recording_id: "rec-a".into(),
+                    end_timestamp_ns: None,
                     observed_at_ns: 150,
                 },
                 now,

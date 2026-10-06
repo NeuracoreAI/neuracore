@@ -279,6 +279,9 @@ struct StartPayload {
 #[derive(Debug, Deserialize)]
 struct StopPayload {
     recording_id: String,
+    /// Only a STOP from a backend that sends it carries one.
+    #[serde(default)]
+    end_time: Option<f64>,
 }
 
 /// Turn one frame's JSON into commands, empty for anything this daemon does
@@ -304,6 +307,7 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
                 .map(|payload| {
                     vec![RecordingCommand::Close {
                         recording_id: payload.recording_id,
+                        end_timestamp_ns: payload.end_time.map(seconds_to_nanos),
                         observed_at_ns: wall_clock_ns(),
                     }]
                 })
@@ -427,11 +431,30 @@ mod tests {
                    "robot_id":"robot-1","instance":0}}}}"#
             ));
             match commands.as_slice() {
-                [RecordingCommand::Close { recording_id, .. }] => {
-                    assert_eq!(recording_id, "rec-1")
+                [RecordingCommand::Close {
+                    recording_id,
+                    end_timestamp_ns,
+                    ..
+                }] => {
+                    assert_eq!(recording_id, "rec-1");
+                    assert_eq!(*end_timestamp_ns, None);
                 }
                 other => panic!("{kind} produced {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_stop_carries_its_end_time() {
+        let commands = parse_notification(
+            r#"{"type":"STOP","payload":{"recording_id":"rec-1",
+               "robot_id":"robot-1","instance":0,"end_time":1.5}}"#,
+        );
+        match commands.as_slice() {
+            [RecordingCommand::Close {
+                end_timestamp_ns, ..
+            }] => assert_eq!(*end_timestamp_ns, Some(1_500_000_000)),
+            other => panic!("STOP produced {other:?}"),
         }
     }
 
