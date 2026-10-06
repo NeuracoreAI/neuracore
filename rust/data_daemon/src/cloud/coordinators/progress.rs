@@ -344,6 +344,7 @@ fn write_status_is_terminal(trace: &TraceRecord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LifecycleStamp;
     use std::time::Duration;
 
     use crate::api::auth::StaticAuthProvider;
@@ -438,7 +439,7 @@ mod tests {
                 .unwrap();
         }
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 
@@ -477,7 +478,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 
@@ -544,7 +545,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 
@@ -596,7 +597,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 
@@ -646,7 +647,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 
@@ -701,7 +702,7 @@ mod tests {
                 .unwrap();
         }
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 
@@ -758,7 +759,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(0))
             .await
             .unwrap();
 

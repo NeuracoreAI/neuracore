@@ -60,6 +60,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use data_daemon_shared::{
     video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording, Source,
+    NANOSECONDS_PER_MICROSECOND,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -70,7 +71,7 @@ use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::trace_actor::{
     self, TraceActorContext, TraceActorMessage, TraceIdentity, TraceKey,
 };
-use crate::state::{DaemonEvent, NewRecording, SqliteStateStore, StateStore};
+use crate::state::{DaemonEvent, LifecycleStamp, NewRecording, SqliteStateStore, StateStore};
 use crate::storage::paths;
 
 /// Default holdback: each data envelope waits this long after daemon receipt
@@ -234,7 +235,7 @@ struct AnnouncedRecording {
     dataset_id: Option<String>,
     /// The window's lower bound on the publish clock.
     open_at_ns: i64,
-    /// The recording's own capture-clock start → the row's `start_timestamp_ns`.
+    /// The recording's own capture-clock start, stored as the row's start.
     start_timestamp_ns: i64,
     /// The recording this announcement opened, once it has.
     recording_index: Option<i64>,
@@ -888,13 +889,14 @@ impl Dispatcher {
         // create_trace burst was folded into the write-behind (the actors no
         // longer create rows here), this is a single uncontended write.
         //
-        // The row's `start_timestamp_ns` is the caller's *capture* time (→
-        // backend `start_time`); the window opens on the *publish* clock below.
+        // The row's start is the caller's *capture* time, which the backend
+        // gets as `start_time`, stored beside the start's publish time; the
+        // window opens on the *publish* clock below.
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),
-            start_timestamp_ns: announced.start_timestamp_ns,
+            start: caller_stamp(announced.open_at_ns, announced.start_timestamp_ns),
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -963,7 +965,10 @@ impl Dispatcher {
             // notifiable state even if its own (late) stop never arrives.
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(retired_index, publish_timestamp_ns)
+                .mark_recording_stopped(
+                    retired_index,
+                    LifecycleStamp::observed_at(publish_timestamp_ns),
+                )
                 .await
             {
                 tracing::warn!(%error, recording_index = retired_index, "failed to mark superseded recording stopped");
@@ -1105,9 +1110,8 @@ impl Dispatcher {
                 .live
                 .take()
                 .expect("live window was checked immediately above");
-            // The window closes on the publish clock; the row's
-            // `stop_timestamp_ns` (→ backend `end_time`) is the caller's capture
-            // time.
+            // The window closes on the publish clock; the row's stop, which
+            // the backend gets as `end_time`, is the caller's capture time.
             window.stopped_at_ns = Some(publish_timestamp_ns);
             window.stop_recv_at = Some(recv_at);
             window.awaiting_flush = true;
@@ -1118,7 +1122,10 @@ impl Dispatcher {
             // timestamp must be on disk first.
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, timestamp_ns)
+                .mark_recording_stopped(
+                    recording_index,
+                    caller_stamp(publish_timestamp_ns, timestamp_ns),
+                )
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark recording stopped");
@@ -1154,15 +1161,18 @@ impl Dispatcher {
                 recording_index,
                 "stop arrived after a later recording started; refining the retired recording's stop"
             );
-            // Refine the row's `stop_timestamp_ns` (→ backend `end_time`) to
+            // Refine the row's stop, which the backend gets as `end_time`, to
             // this true capture stop. `open_window` already marked the row with
             // the successor start's time, and `mark_recording_stopped` is
-            // COALESCE-idempotent, so a plain re-mark would no-op — a forced
+            // COALESCE-idempotent, so a plain re-mark would no-op; a forced
             // overwrite is required, and correct because `stop < successor
             // start`.
             if let Err(error) = self
                 .store
-                .refine_recording_stop(recording_index, timestamp_ns)
+                .refine_recording_stop(
+                    recording_index,
+                    caller_stamp(publish_timestamp_ns, timestamp_ns),
+                )
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
@@ -1219,11 +1229,14 @@ impl Dispatcher {
             .trace_writer
             .drop_recording(recording_index)
             .await;
-        // The cancel's capture timestamp becomes the row's
-        // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
+        // The cancel's capture timestamp becomes the row's stop, which the
+        // backend gets as `end_time`, exactly as a stop. The cancel envelope
+        // has no publish time, so the daemon's clock when it handles the cancel
+        // stands in.
+        let received_at_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         match self
             .store
-            .cancel_recording(recording_index, timestamp_ns)
+            .cancel_recording(recording_index, caller_stamp(received_at_ns, timestamp_ns))
             .await
         {
             Ok((_, touched)) => {
@@ -1384,10 +1397,10 @@ impl Dispatcher {
             window.stop_recv_at = Some(now);
             let recording_index = window.recording_index;
             entry.closing.push(window);
-            let stop_capture_ns = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+            let reaped_at_ns = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, stop_capture_ns)
+                .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(reaped_at_ns))
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark idle recording stopped");
@@ -1816,6 +1829,15 @@ struct ChunkClaim {
     count: u32,
 }
 
+/// The stamp for a lifecycle boundary published at `publish_timestamp_ns`
+/// that the caller timed at `timestamp_ns` on its capture clock.
+fn caller_stamp(publish_timestamp_ns: i64, timestamp_ns: i64) -> LifecycleStamp {
+    LifecycleStamp {
+        publish_timestamp_ns,
+        timestamp_us: Some(timestamp_ns / NANOSECONDS_PER_MICROSECOND),
+    }
+}
+
 impl ChunkClaim {
     /// This claim's slice of the chunk's per-frame capture timestamps.
     fn timestamps(&self, frame_timestamps_s: &[f64]) -> Vec<f64> {
@@ -2002,6 +2024,12 @@ mod tests {
     // Tests exercise window membership, which is keyed on the publish clock, so
     // the helper sets the capture `timestamp_ns` to the same value.
     fn start(robot: &str, publish_timestamp_ns: i64) -> Envelope {
+        start_timed(robot, publish_timestamp_ns, publish_timestamp_ns)
+    }
+
+    /// A start the caller timed at `timestamp_ns`, published at
+    /// `publish_timestamp_ns`.
+    fn start_timed(robot: &str, publish_timestamp_ns: i64, timestamp_ns: i64) -> Envelope {
         Envelope::StartRecording {
             robot_id: robot.into(),
             robot_instance: 0,
@@ -2009,7 +2037,7 @@ mod tests {
             dataset_id: None,
             dataset_name: None,
             publish_timestamp_ns,
-            timestamp_ns: publish_timestamp_ns,
+            timestamp_ns,
         }
     }
 
@@ -2233,11 +2261,11 @@ mod tests {
     async fn inverted_stop_after_next_start_preserves_both_recordings() {
         // A slow stop can reach the daemon after the next recording's start
         // (start/stop inversion). Listener order here is:
-        //   start(A, t1=100) -> data(A) -> start(B, t3=200)
-        //   -> stop(t2=150) -> data(B) -> stop(t4=300)
+        //   start(A, t1=100 ms) -> data(A) -> start(B, t3=200 ms)
+        //   -> stop(t2=150 ms) -> data(B) -> stop(t4=300 ms)
         // with t1 < t2 < t3 < t4. The dispatcher must: close A (stopped_at set,
-        // refined to the true stop 150) with its data; keep B alive through
-        // t2's stolen stop, closing it only at t4 (300) with its data; drop
+        // refined to the true stop t2) with its data; keep B alive through
+        // t2's stolen stop, closing it only at t4 with its data; drop
         // nothing as an orphan (both traces exist); and fire RecordingStopped
         // for BOTH recordings (the retired one must still become notifiable).
         fast_holdback();
@@ -2259,13 +2287,22 @@ mod tests {
             shutdown_rx,
         );
 
-        tx.send(start("robot-1", 100)).await.unwrap();
-        tx.send(datum("robot-1", 110, 1)).await.unwrap();
-        tx.send(start("robot-1", 200)).await.unwrap();
-        // The stolen stop: its publish time (150) predates B's open (200).
-        tx.send(stop("robot-1", 150)).await.unwrap();
-        tx.send(datum("robot-1", 210, 2)).await.unwrap();
-        tx.send(stop("robot-1", 300)).await.unwrap();
+        const MILLISECOND_NS: i64 = 1_000_000;
+        let start_a_ns = 100 * MILLISECOND_NS;
+        let stop_a_ns = 150 * MILLISECOND_NS;
+        let start_b_ns = 200 * MILLISECOND_NS;
+        let stop_b_ns = 300 * MILLISECOND_NS;
+        tx.send(start("robot-1", start_a_ns)).await.unwrap();
+        tx.send(datum("robot-1", 110 * MILLISECOND_NS, 1))
+            .await
+            .unwrap();
+        tx.send(start("robot-1", start_b_ns)).await.unwrap();
+        // The stolen stop: its publish time (t2) predates B's open (t3).
+        tx.send(stop("robot-1", stop_a_ns)).await.unwrap();
+        tx.send(datum("robot-1", 210 * MILLISECOND_NS, 2))
+            .await
+            .unwrap();
+        tx.send(stop("robot-1", stop_b_ns)).await.unwrap();
 
         drop(tx);
         timeout(Duration::from_secs(5), handle.shutdown())
@@ -2282,18 +2319,28 @@ mod tests {
             "recording A must be closed when the next start supersedes it"
         );
         assert_eq!(
-            recording_a.stop_timestamp_ns,
-            Some(150),
+            recording_a.stop_publish_timestamp_ns,
+            Some(stop_a_ns),
             "recording A's stop must be refined to the true (earlier) stop"
+        );
+        assert_eq!(
+            recording_a.stop_timestamp_us,
+            Some(stop_a_ns / NANOSECONDS_PER_MICROSECOND),
+            "recording A's caller stop must be refined with its publish time"
         );
         assert!(
             recording_b.stopped_at.is_some(),
             "recording B must be closed by its own stop"
         );
         assert_eq!(
-            recording_b.stop_timestamp_ns,
-            Some(300),
-            "the stolen stop at 150 must not close B; only t4 does"
+            recording_b.stop_publish_timestamp_ns,
+            Some(stop_b_ns),
+            "the stolen stop at t2 must not close B; only t4 does"
+        );
+        assert_eq!(
+            recording_b.stop_timestamp_us,
+            Some(stop_b_ns / NANOSECONDS_PER_MICROSECOND),
+            "recording B's caller stop is its own stop at t4"
         );
 
         let a_traces = store
@@ -2956,6 +3003,93 @@ mod tests {
             }
         }
         assert!(saw_cancel, "RecordingCancelled must be published");
+    }
+
+    const CALLER_START_NS: i64 = 1_000_000_000;
+    const CALLER_STOP_NS: i64 = 1_500_000_000;
+    const PUBLISH_START_NS: i64 = 2_000_000_000;
+    const PUBLISH_STOP_NS: i64 = 3_000_000_000;
+
+    #[tokio::test]
+    async fn start_and_stop_store_caller_microseconds_beside_publish_times() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context, shutdown_rx);
+
+        tx.send(start_timed("robot-1", PUBLISH_START_NS, CALLER_START_NS))
+            .await
+            .unwrap();
+        tx.send(Envelope::StopRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            publish_timestamp_ns: PUBLISH_STOP_NS,
+            timestamp_ns: CALLER_STOP_NS,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let recording = &recordings[0];
+        assert_eq!(
+            recording.start_timestamp_us,
+            Some(CALLER_START_NS / NANOSECONDS_PER_MICROSECOND)
+        );
+        assert_eq!(recording.start_publish_timestamp_ns, Some(PUBLISH_START_NS));
+        assert_eq!(
+            recording.stop_timestamp_us,
+            Some(CALLER_STOP_NS / NANOSECONDS_PER_MICROSECOND)
+        );
+        assert_eq!(recording.stop_publish_timestamp_ns, Some(PUBLISH_STOP_NS));
+    }
+
+    #[tokio::test]
+    async fn cancel_stores_caller_microseconds_beside_daemon_receipt_time() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context, shutdown_rx);
+
+        let sent_at_ns = Utc::now().timestamp_nanos_opt().unwrap();
+        tx.send(start_timed("robot-1", PUBLISH_START_NS, CALLER_START_NS))
+            .await
+            .unwrap();
+        tx.send(Envelope::CancelRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            timestamp_ns: CALLER_STOP_NS,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+        let finished_at_ns = Utc::now().timestamp_nanos_opt().unwrap();
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let recording = &recordings[0];
+        assert_eq!(
+            recording.stop_timestamp_us,
+            Some(CALLER_STOP_NS / NANOSECONDS_PER_MICROSECOND)
+        );
+        let stop_publish_ns = recording
+            .stop_publish_timestamp_ns
+            .expect("cancel stores a publish time");
+        assert!(
+            (sent_at_ns..=finished_at_ns).contains(&stop_publish_ns),
+            "the cancel's publish time is the daemon's clock when it handles the cancel"
+        );
     }
 
     /// The backend announcing a recording, as the notification watcher relays it.

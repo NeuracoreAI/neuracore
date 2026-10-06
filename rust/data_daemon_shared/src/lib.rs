@@ -51,6 +51,18 @@ pub mod config;
 pub mod ffmpeg;
 pub mod paths;
 
+/// Nanoseconds in one microsecond, the unit of the caller timestamps the
+/// daemon stores.
+pub const NANOSECONDS_PER_MICROSECOND: i64 = 1_000;
+
+/// Microseconds in one second.
+pub const MICROSECONDS_PER_SECOND: f64 = 1_000_000.0;
+
+/// A timestamp in microseconds as float seconds.
+pub fn microseconds_to_seconds(timestamp_us: i64) -> f64 {
+    timestamp_us as f64 / MICROSECONDS_PER_SECOND
+}
+
 /// Recording-window membership for the frames *inside* one video chunk.
 ///
 /// A chunk is a NUT file appended to until something seals it, so frames logged
@@ -447,7 +459,7 @@ pub enum Envelope {
         publish_timestamp_ns: i64,
         /// Caller-supplied capture time (Unix nanoseconds) for the recording's
         /// start — the recording's *own* clock, or the publish time when the
-        /// caller supplied none. Stored as the row's `start_timestamp_ns` and
+        /// caller supplied none. Stored in microseconds as the row's start and
         /// POSTed to the backend as `start_time`; never used for routing.
         timestamp_ns: i64,
     },
@@ -463,8 +475,8 @@ pub enum Envelope {
         /// membership range, on the same publish clock as the data envelopes.
         publish_timestamp_ns: i64,
         /// Caller-supplied capture time (Unix nanoseconds) for the recording's
-        /// stop — or the publish time when the caller supplied none. Stored as
-        /// the row's `stop_timestamp_ns` and POSTed to the backend as
+        /// stop, or the publish time when the caller supplied none. Stored in
+        /// microseconds as the row's stop and POSTed to the backend as
         /// `end_time`; never used for routing.
         timestamp_ns: i64,
     },
@@ -477,8 +489,8 @@ pub enum Envelope {
         robot_instance: i64,
         /// Caller-supplied capture time (Unix nanoseconds) for the cancel — or
         /// the publish time when the caller supplied none. A cancel is a
-        /// recording stop that discards data, so the daemon stores this as the
-        /// row's `stop_timestamp_ns` and POSTs it as the backend `end_time`,
+        /// recording stop that discards data, so the daemon stores this in
+        /// microseconds as the row's stop and POSTs it as the backend `end_time`,
         /// exactly like `StopRecording`. No window-boundary `publish_timestamp_ns`
         /// is carried because cancelling drops the window outright.
         timestamp_ns: i64,
