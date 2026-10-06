@@ -564,8 +564,41 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value,
         "secondary_gripper",
     )
-    assert json.loads(args[4]) == sample.model_dump(mode="json")
-    assert args[5:] == (12_500_000_000, 12.5)
+    payload = json.loads(args[4])
+    assert payload == sample.model_dump(mode="json")
+    assert (payload["timestamp"], payload["timestamp_us"]) == (12.5, 12_500_000)
+    assert args[5:] == (12_500_000,)
+
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
+def test_log_joints_rounds_seconds_to_the_nearest_microsecond(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """1.000001 s is 1000000.999... us as a float, so truncation loses 1 us."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    robot = _get_robot(None, 0)
+    monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: None)
+
+    nc.log_joint_positions(positions={"vx300s_left/waist": 0.5}, timestamp=1.000001)
+
+    native.log_joints.assert_called_once()
+    assert native.log_joints.call_args.args[5:] == (1_000_001,)
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None
