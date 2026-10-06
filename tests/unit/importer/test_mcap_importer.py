@@ -14,6 +14,7 @@ from mcap.reader import make_reader
 from mcap.writer import Writer
 from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import seconds_to_us
 from PIL import Image
 
 from neuracore.importer.core.base import ImportItem
@@ -239,8 +240,8 @@ def test_mcap_importer_import_item_starts_and_stops_recording(
     calls: list[tuple[str, float]] = []
 
     monkeypatch.setattr(
-        "neuracore.importer.mcap.mcap_importer.time.time",
-        lambda: 100.0,
+        "neuracore.importer.mcap.mcap_importer.now_us",
+        lambda: 100_000_000,
     )
     monkeypatch.setattr(
         "neuracore.importer.mcap.mcap_importer.nc.start_recording",
@@ -254,8 +255,8 @@ def test_mcap_importer_import_item_starts_and_stops_recording(
     importer = _make_importer(monkeypatch, tmp_path)
 
     def _stream_episode_file(*_args, **kwargs):
-        assert kwargs["recording_start_timestamp"] == 100.0
-        return 3, 105.0
+        assert kwargs["recording_start_us"] == 100_000_000
+        return 3, 105_000_000
 
     monkeypatch.setattr(importer, "_stream_episode_file", _stream_episode_file)
 
@@ -279,7 +280,7 @@ def test_mcap_importer_dry_run_skips_recording(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         importer,
         "_stream_episode_file",
-        lambda *_args, **_kwargs: (0, 100.0),
+        lambda *_args, **_kwargs: (0, 100_000_000),
     )
 
     importer.import_item(importer.build_work_items()[0])
@@ -1165,7 +1166,7 @@ def test_stream_episode_file_decodes_each_file_with_its_own_schema_ids(
             episode_file_path=path,
             item=ImportItem(index=0, description=path.name, metadata={}),
             label=path.name,
-            recording_start_timestamp=100.0,
+            recording_start_us=100_000_000,
         )
 
     expected = {"/cam": "demo.CompressedImage", "/jnt": "demo.JointState"}
@@ -1239,3 +1240,56 @@ def test_validate_work_items_raises_on_topic_type_change(monkeypatch, tmp_path: 
     assert "demo.JointState" in message
     assert "ep1.mcap" in message
     assert "ep2.mcap" in message
+
+
+def test_stream_episode_file_logs_a_one_microsecond_source_on_consecutive_microseconds(
+    monkeypatch, tmp_path: Path
+):
+    path = tmp_path / "ep.mcap"
+    source_start_ns = 1_788_363_776_958_256_896
+    message_name, file_name, fields, payload = _MCAP_TEST_TYPES["/jnt"]
+    with path.open("wb") as handle:
+        writer = Writer(handle)
+        writer.start()
+        schema_id = writer.register_schema(
+            name=f"demo.{message_name}",
+            encoding="protobuf",
+            data=_protobuf_schema_bytes(file_name, message_name, fields),
+        )
+        channel_id = writer.register_channel(
+            topic="/jnt", message_encoding="protobuf", schema_id=schema_id
+        )
+        for delta_ns in (0, 1_000, 2_000):
+            writer.add_message(
+                channel_id,
+                log_time=source_start_ns + delta_ns,
+                data=payload,
+                publish_time=source_start_ns + delta_ns,
+            )
+        writer.finish()
+
+    importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.get_mcap_topics",
+        lambda topic_map: ["/jnt"],
+    )
+    logged: list[float] = []
+    monkeypatch.setattr(
+        importer, "_record_step", lambda step, timestamp: logged.append(timestamp)
+    )
+    recording_start_us = 1_788_363_776_958_257
+
+    message_count, recording_stop_us = importer._stream_episode_file(
+        episode_file_path=path,
+        item=ImportItem(index=0, description=path.name, metadata={}),
+        label=path.name,
+        recording_start_us=recording_start_us,
+    )
+
+    assert message_count == 3
+    assert [seconds_to_us(stamp) for stamp in logged] == [
+        recording_start_us,
+        recording_start_us + 1,
+        recording_start_us + 2,
+    ]
+    assert recording_stop_us == recording_start_us + 2

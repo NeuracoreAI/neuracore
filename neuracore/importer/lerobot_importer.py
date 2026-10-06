@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import time
 import traceback
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
@@ -30,6 +29,7 @@ from neuracore_types.importer.data_config import (
     RGBCameraDataMappingItem,
 )
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, now_us
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -152,8 +152,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
         if self.frequency is None:
             raise ImportError("Frequency is required for importing episodes.")
-        base_time = time.time()
-        recording_stop_timestamp = base_time
+        base_us = now_us()
+        recording_stop_us = base_us
         worker_label = (
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
@@ -168,7 +168,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
-                timestamp=base_time,
+                timestamp=base_us / MICROSECONDS_PER_SECOND,
             )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
         self._emit_progress(
@@ -176,10 +176,12 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         )
         for step_idx, step_data in enumerate(step_iter, start=1):
             self._reset_step_state()
-            timestamp = base_time + (step_idx / self.frequency)
-            recording_stop_timestamp = timestamp + (1.0 / self.frequency)
+            timestamp_us = self._step_timestamp_us(base_us, step_idx, self.frequency)
+            recording_stop_us = self._step_timestamp_us(
+                base_us, step_idx + 1, self.frequency
+            )
             try:
-                self._record_step(step_data, timestamp)
+                self._record_step(step_data, timestamp_us / MICROSECONDS_PER_SECOND)
             except Exception as exc:  # noqa: BLE001
                 if self.skip_on_error == "step":
                     if self._error_queue is not None:
@@ -207,7 +209,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
                 wait=True,
-                timestamp=recording_stop_timestamp,
+                timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
             )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
