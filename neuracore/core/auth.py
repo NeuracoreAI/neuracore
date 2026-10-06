@@ -96,14 +96,20 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         self.validate_version()
         # Verify API key with server and get access token
         try:
-            session = thread_local_session()
+            session = thread_local_session(retry_transient=True)
             response = session.post(
                 f"{API_URL}/auth/verify-api-key",
                 json={"api_key": api_key},
             )
+            if response.status_code >= 500:
+                raise AuthenticationError(
+                    f"Could not verify API key (HTTP {response.status_code}). "
+                    "Server error, please try again later."
+                )
             if response.status_code != 200:
                 raise AuthenticationError(
-                    "Could not verify API key. Please check your key and try again."
+                    f"Could not verify API key (HTTP {response.status_code}). "
+                    "Please check your key and try again."
                 )
             token_data = response.json()
             self._access_token = token_data["access_token"]

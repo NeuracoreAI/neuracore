@@ -216,6 +216,25 @@ def test_login_version_check_retries_read_timeouts(monkeypatch, reset_neuracore)
     assert requested_policies == [{"retry_transient": True, "retry_read_timeout": True}]
 
 
+def test_login_retries_transient_api_key_verification_errors(
+    monkeypatch, reset_neuracore
+):
+    """Concurrent logins can hit transient backend errors, so login retries them."""
+    requested_policies = []
+
+    def record(**kwargs):
+        requested_policies.append(kwargs)
+        return type("_Session", (), {"post": lambda *_a, **_k: Mock(status_code=500)})()
+
+    monkeypatch.setattr(Auth, "validate_version", lambda self: None)
+    monkeypatch.setattr("neuracore.core.auth.thread_local_session", record)
+
+    with pytest.raises(AuthenticationError, match=r"HTTP 500"):
+        nc.login("test_api_key")
+
+    assert requested_policies == [{"retry_transient": True}]
+
+
 def test_connect_robot(
     temp_config_dir,
     mock_auth_requests,
