@@ -280,8 +280,8 @@ STOP_RECORDING_WAIT_OBSERVATION_S = 5.0 + RECORDING_UPLOAD_POLL_INTERVAL_S
 # Pause after the last stop_recording, so post-stop frames are logged.
 PER_THREAD_LOGGING_TAIL_S = 2.0
 
-# RGB tail may lag stop by up to N frame intervals (prevents silent orphaning).
-TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+# Longest a paced trace may log nothing inside a recording, edges included.
+MAX_DATA_GAP_S = 1.0
 
 CHILD_PROCESS_JOIN_TIMEOUT_S = 30.0
 CHILD_PROCESS_REPORT_TIMEOUT_S = 30.0
