@@ -30,6 +30,7 @@ class FakePolicyInference:
         self.calls = 0
         self.guided_calls = 0
         self.delays_requested: list[int] = []
+        self.execution_horizons_requested: list[int] = []
 
     @property
     def supports_real_time_chunking(self) -> bool:
@@ -49,6 +50,10 @@ class FakePolicyInference:
             assert rtc_config is not None, "guided calls must carry a config"
             assert prev_chunk.shape == (HORIZON, ACTION_DIM)
             self.delays_requested.append(rtc_config.inference_delay)
+            self.execution_horizons_requested.append(rtc_config.execution_horizon)
+        elif rtc_config is not None:
+            self.delays_requested.append(rtc_config.inference_delay)
+            self.execution_horizons_requested.append(rtc_config.execution_horizon)
         time.sleep(self.latency)
         return np.full((HORIZON, ACTION_DIM), float(self.calls), dtype=np.float32)
 
@@ -96,6 +101,7 @@ def test_rejects_policy_without_rtc_support():
     "delay,execution_horizon",
     [
         (HORIZON - EXECUTION_HORIZON + 1, EXECUTION_HORIZON),  # d > H - s
+        (EXECUTION_HORIZON + 1, EXECUTION_HORIZON),  # d > s
         (0, 0),  # zero execution horizon
         (0, HORIZON + 1),  # execution horizon beyond the chunk
     ],
@@ -238,9 +244,54 @@ def test_inference_delay_adapts_upward_to_measured_latency():
         chunker.stop()
 
     assert stats.inference_delay > 1, "d did not grow to cover the latency"
+    assert stats.inference_delay <= stats.execution_horizon, "d must stay ≤ s"
     assert (
-        stats.inference_delay <= HORIZON - EXECUTION_HORIZON
-    ), "d must stay within the real-time constraint"
+        stats.inference_delay <= HORIZON - stats.execution_horizon
+    ), "d must stay within H - s"
+    assert stats.execution_horizon >= EXECUTION_HORIZON
+
+
+def test_execution_horizon_grows_with_delay_when_d_exceeds_s_min():
+    """Paper: s = max(d, s_min). A small s_min must rise once d catches up."""
+    s_min = 3
+    policy = FakePolicyInference(latency=TICK * 10)
+    chunker = _make_chunker(policy, delay=1, adapt=True, execution_horizon=s_min)
+    chunker.start()
+    try:
+        chunker.wait_for_first_chunk(timeout=10.0)
+        _drive(chunker, 250)
+        stats = chunker.stats()
+    finally:
+        chunker.stop()
+
+    assert stats.inference_delay >= s_min
+    assert stats.execution_horizon == max(s_min, stats.inference_delay)
+    assert stats.inference_delay <= HORIZON // 2
+
+
+def test_late_replan_passes_consumed_as_execution_horizon():
+    """When a chunk lands late, the next mask must use s = consumed, not s_min.
+
+    Otherwise soft-mask weight lands on the zero-padded alignment tail.
+    """
+    # Slow enough that the first replan misses its deadline and the cursor is
+    # already past s_min when the second replan starts.
+    policy = FakePolicyInference(latency=TICK * 20)
+    chunker = _make_chunker(policy, delay=2, adapt=False)
+    chunker.start()
+    try:
+        chunker.wait_for_first_chunk(timeout=10.0)
+        _drive(chunker, 120)
+    finally:
+        chunker.stop()
+
+    assert policy.guided_calls >= 2, "need at least two guided replans"
+    # Every guided call's s must be ≥ the configured minimum; after a miss the
+    # second-or-later call should exceed it.
+    assert all(s >= EXECUTION_HORIZON for s in policy.execution_horizons_requested)
+    assert (
+        max(policy.execution_horizons_requested) > EXECUTION_HORIZON
+    ), policy.execution_horizons_requested
 
 
 def test_pinned_delay_does_not_adapt():
@@ -255,6 +306,7 @@ def test_pinned_delay_does_not_adapt():
         chunker.stop()
 
     assert stats.inference_delay == 2
+    assert stats.execution_horizon == EXECUTION_HORIZON
 
 
 def test_inference_failure_surfaces_through_get_action():

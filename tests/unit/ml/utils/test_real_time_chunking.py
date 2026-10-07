@@ -383,6 +383,58 @@ def test_with_inference_delay_preserves_an_unset_guidance_weight():
     assert config.with_inference_delay(4).max_guidance_weight is None
 
 
+def test_with_horizons_updates_both_fields():
+    config = RTCConfig(
+        inference_delay=1,
+        execution_horizon=EXECUTION_HORIZON,
+        max_guidance_weight=3.0,
+        num_inference_steps=7,
+    )
+    updated = config.with_horizons(4, 9)
+    assert updated.inference_delay == 4
+    assert updated.execution_horizon == 9
+    assert updated.max_guidance_weight == 3.0
+    assert updated.num_inference_steps == 7
+    assert config.execution_horizon == EXECUTION_HORIZON
+
+
+@pytest.mark.parametrize(
+    "horizon,s_min,expected",
+    [
+        (40, 20, 20),
+        (16, 8, 8),
+        (16, 3, 8),
+        (40, 30, 10),
+    ],
+)
+def test_max_feasible_inference_delay(horizon, s_min, expected):
+    from neuracore.ml.utils.real_time_chunking import max_feasible_inference_delay
+
+    assert max_feasible_inference_delay(horizon, s_min) == expected
+    # Feasibility: s = max(s_min, d) and s + d <= H.
+    d = expected
+    s = max(s_min, d)
+    assert s + d <= horizon
+    if expected + 1 <= horizon:
+        s_next = max(s_min, expected + 1)
+        assert s_next + (expected + 1) > horizon
+
+
+def test_align_and_mask_agree_when_s_equals_consumed():
+    """P0 regression: padding must only sit where the mask is zero."""
+    from neuracore.ml.utils.real_time_chunking import (
+        align_previous_chunk,
+        rtc_soft_mask,
+    )
+
+    for consumed in (EXECUTION_HORIZON, EXECUTION_HORIZON + 3, H - DELAY - 1):
+        chunk = torch.rand(1, H, ACTION_DIM)
+        aligned = align_previous_chunk(chunk, consumed, H)
+        mask = rtc_soft_mask(H, min(DELAY, H - consumed), consumed)
+        padded = aligned[0].abs().sum(dim=-1) == 0.0
+        assert torch.all(mask[padded] == 0.0), consumed
+
+
 def test_large_beta_saturates_rather_than_destabilising():
     """zeta is hard-capped, so raising beta past saturation must be inert."""
     model = _GaussianDiffusionDenoiser(_scheduler())

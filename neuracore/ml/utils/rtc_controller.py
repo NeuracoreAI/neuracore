@@ -23,7 +23,11 @@ import torch
 from neuracore_types import DataType, SynchronizedPoint
 
 from neuracore.ml.utils.policy_inference import PolicyInference
-from neuracore.ml.utils.real_time_chunking import RTCConfig, align_previous_chunk
+from neuracore.ml.utils.real_time_chunking import (
+    RTCConfig,
+    align_previous_chunk,
+    max_feasible_inference_delay,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +77,15 @@ class RealTimeChunker:
     advances the cursor; the inference thread waits until ``execution_horizon``
     actions have been consumed, snapshots the observation and the unexecuted
     remainder of the chunk, and generates a replacement guided by that
-    remainder. The replacement is swapped in only once exactly ``d`` ticks have
-    elapsed since the snapshot, which is what makes its frozen prefix line up
-    with the actions that really executed.
+    remainder. The soft mask uses ``s`` equal to the actions actually consumed
+    (the paper's ``s = t``), so its free region lines up with the zero-padded
+    alignment tail. The replacement is swapped in only once exactly ``d`` ticks
+    have elapsed since the snapshot, which is what makes its frozen prefix line
+    up with the actions that really executed.
+
+    When ``adapt_inference_delay`` is on, ``d`` tracks measured latency and
+    ``s`` is raised to ``max(s_min, d)`` so the paper invariant
+    ``d <= s <= H - d`` holds as latency drifts.
     """
 
     def __init__(
@@ -95,18 +105,20 @@ class RealTimeChunker:
             observation_fn: Builds a sync point from the caller's latest sensor
                 snapshot. Called from the inference thread while the chunker's
                 lock is held, so it may read state the control loop writes.
-            config: Real-time chunking configuration. ``execution_horizon`` and
-                the initial ``inference_delay`` come from here.
+            config: Real-time chunking configuration. ``execution_horizon`` is
+                the minimum ``s``; the live value may grow with ``d``. The
+                initial ``inference_delay`` comes from here too.
             control_hz: Rate at which ``get_action`` will be called. Used to
                 report latency in ticks.
             delay_buffer_size: How many recent latencies feed the adaptive
                 inference delay.
-            adapt_inference_delay: Grow or shrink ``d`` to track measured
-                latency. Disable to pin ``d`` to the configured value.
+            adapt_inference_delay: Grow or shrink ``d`` (and ``s`` with it) to
+                track measured latency. Disable to pin both to the configured
+                values.
 
         Raises:
             ValueError: If the policy does not support real-time chunking, or
-                the horizons violate ``d <= H - s``.
+                the horizons violate ``d <= s <= H - d``.
         """
         if not policy_inference.supports_real_time_chunking:
             raise ValueError(
@@ -122,11 +134,23 @@ class RealTimeChunker:
         self._adapt = adapt_inference_delay
 
         self._horizon = policy_inference.prediction_horizon
+        # s_min from the caller; the live s may grow with d under adaptation.
+        self._min_execution_horizon = config.execution_horizon
         self._execution_horizon = config.execution_horizon
-        if self._execution_horizon < 1 or self._execution_horizon > self._horizon:
+        if (
+            self._min_execution_horizon < 1
+            or self._min_execution_horizon > self._horizon
+        ):
             raise ValueError(
                 f"execution_horizon must be in [1, {self._horizon}], "
-                f"got {self._execution_horizon}."
+                f"got {self._min_execution_horizon}."
+            )
+        # Paper invariant: d ≤ s ≤ H - d  (⇒ d ≤ s and d ≤ H - s).
+        if config.inference_delay > self._execution_horizon:
+            raise ValueError(
+                f"Real-time constraint violated: inference_delay "
+                f"d={config.inference_delay} exceeds execution_horizon "
+                f"s={self._execution_horizon}. Raise s, or lower d."
             )
         if config.inference_delay > self._horizon - self._execution_horizon:
             raise ValueError(
@@ -201,6 +225,7 @@ class RealTimeChunker:
             self._deadline_misses = 0
             self._stalled_ticks = 0
             self._inference_delay = self._config.inference_delay
+            self._execution_horizon = self._min_execution_horizon
         self._running = True
         self._thread = threading.Thread(
             target=self._inference_loop, name="rtc-inference", daemon=True
@@ -340,6 +365,7 @@ class RealTimeChunker:
         observation: SynchronizedPoint,
         prev_chunk: np.ndarray | None,
         delay: int,
+        execution_horizon: int,
     ) -> np.ndarray:
         """Run one chunk prediction, timing it.
 
@@ -347,6 +373,10 @@ class RealTimeChunker:
             observation: Sync point to condition on.
             prev_chunk: Aligned previous chunk, or ``None`` for the first chunk.
             delay: The ``d`` the chunk is being generated for.
+            execution_horizon: The ``s`` used for the soft mask. For guided
+                replans this must be the number of actions already consumed
+                from the previous chunk so the free region matches the
+                zero-padded alignment tail.
 
         Returns:
             np.ndarray: New chunk with shape ``(H, A)``.
@@ -358,7 +388,7 @@ class RealTimeChunker:
         chunk = self._policy.predict_action_chunk(
             observation,
             prev_chunk=prev_chunk,
-            rtc_config=self._config.with_inference_delay(delay),
+            rtc_config=self._config.with_horizons(delay, execution_horizon),
         )
         if self._cuda:
             torch.cuda.synchronize()
@@ -371,7 +401,9 @@ class RealTimeChunker:
         try:
             with self._cond:
                 observation = self._observation_fn()
-            first = self._predict(observation, None, self._inference_delay)
+                delay = self._inference_delay
+                execution_horizon = self._execution_horizon
+            first = self._predict(observation, None, delay, execution_horizon)
             with self._cond:
                 self._chunk = first
                 self._index = 0
@@ -396,11 +428,18 @@ class RealTimeChunker:
                     assert prev is not None
                     observation = self._observation_fn()
 
+                # Paper: s = t at replan time. Using the configured s when
+                # consumed > s would leave soft-mask weight on the zero-padded
+                # alignment tail and pull those actions toward 0.
+                s_eff = min(max(consumed, 1), self._horizon)
+                # Keep d ≤ H - s so the mask stays feasible if we are very late.
+                d_eff = min(delay, self._horizon - s_eff)
+
                 aligned = align_previous_chunk(
                     torch.from_numpy(prev).unsqueeze(0), consumed, self._horizon
                 )[0].numpy()
 
-                new_chunk = self._predict(observation, aligned, delay)
+                new_chunk = self._predict(observation, aligned, d_eff, s_eff)
 
                 with self._cond:
                     if not self._running:
@@ -408,10 +447,11 @@ class RealTimeChunker:
                     # Measured before waiting, so the adaptive delay tracks the
                     # true latency rather than the delay we chose to enforce.
                     self._record_delay(self._tick - start_tick)
-                    # Hold the new chunk back until exactly `delay` ticks have
-                    # passed, so its frozen prefix covers what really executed.
+                    # Hold the new chunk back until the freeze prefix is spent.
+                    # d_eff equals delay unless we had to shrink it because
+                    # consumed left too little room (H - s_eff < delay).
                     self._cond.wait_for(
-                        lambda: not self._running or self._tick - start_tick >= delay
+                        lambda: not self._running or self._tick - start_tick >= d_eff
                     )
                     if not self._running:
                         return
@@ -435,9 +475,10 @@ class RealTimeChunker:
                 self._cond.notify_all()
 
     def _record_delay(self, observed_ticks: int) -> None:
-        """Update the adaptive inference delay from a measured latency.
+        """Update the adaptive inference delay (and execution horizon) from latency.
 
-        Must be called with the lock held.
+        Raises ``s`` to ``max(s_min, d)`` with ``d`` so the paper invariant
+        ``d <= s <= H - d`` holds. Must be called with the lock held.
 
         Args:
             observed_ticks: Ticks that elapsed during the last inference.
@@ -445,16 +486,23 @@ class RealTimeChunker:
         self._delays.append(observed_ticks)
         if not self._adapt:
             return
-        ceiling = self._horizon - self._execution_horizon
-        target = min(max(self._delays) + DELAY_HEADROOM_TICKS, ceiling)
-        target = max(target, 1)
-        if target != self._inference_delay:
-            logger.info(
-                "Adapting real-time chunking inference delay d: %d -> %d ticks "
-                "(%.0f ms at %.0f Hz)",
-                self._inference_delay,
-                target,
-                target * self._tick_period * 1e3,
-                self._control_hz,
-            )
-            self._inference_delay = target
+        ceiling = max_feasible_inference_delay(
+            self._horizon, self._min_execution_horizon
+        )
+        target_d = min(max(self._delays) + DELAY_HEADROOM_TICKS, ceiling)
+        target_d = max(target_d, 1)
+        target_s = max(self._min_execution_horizon, target_d)
+        if target_d == self._inference_delay and target_s == self._execution_horizon:
+            return
+        logger.info(
+            "Adapting real-time chunking horizons: d %d -> %d, s %d -> %d "
+            "(%.0f ms delay at %.0f Hz)",
+            self._inference_delay,
+            target_d,
+            self._execution_horizon,
+            target_s,
+            target_d * self._tick_period * 1e3,
+            self._control_hz,
+        )
+        self._inference_delay = target_d
+        self._execution_horizon = target_s
