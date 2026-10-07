@@ -66,8 +66,7 @@ jobs:
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
-      # Coverage runs on the 3.10 leg: it installs [import] (no cp314 wheels
-      # for tensorflow-cpu), so importer tests count.
+      # Coverage runs on the 3.10 leg: it installs [import], so importer tests count.
       SHOULD_RUN_COVERAGE: ${{ matrix.python-version == '3.10' && matrix.package-manager == 'uv' }}
     steps:
       - name: Checkout code
@@ -103,13 +102,7 @@ jobs:
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: |
-          # [import] needs tensorflow-cpu (cp313 max, no cp314 wheels):
-          # Python < 3.14 legs only.
-          if [ "${{ matrix.python-version }}" = "3.14" ]; then
-            EXTRAS=".[dev]"
-          else
-            EXTRAS=".[dev,import]"
-          fi
+          EXTRAS=".[dev,import]"
           if [ "${{ matrix.package-manager }}" = "uv" ]; then
             uv pip install "${EXTRAS}" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
           else
@@ -139,12 +132,7 @@ jobs:
           else
             PYTEST="pytest"
           fi
-          # Importer tests need the [import] extra, skipped on 3.14
-          # (no tensorflow-cpu wheels).
           IGNORE="--ignore=tests/unit/ml"
-          if [ "${{ matrix.python-version }}" = "3.14" ]; then
-            IGNORE="${IGNORE} --ignore=tests/unit/importer"
-          fi
           PYTEST_ARGS="-v -n 4 --dist loadfile -o log_level=INFO"
           if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
             ${PYTEST} tests/unit \
