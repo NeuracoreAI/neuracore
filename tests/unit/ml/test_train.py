@@ -36,6 +36,8 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
+    DEFAULT_OPEN_FILE_LIMIT,
+    _raise_open_file_limit,
     _resolve_recording_cache_dir,
     _serialize_cross_embodiment_description,
     assert_valid_batch_size,
@@ -850,6 +852,57 @@ class TestTrainingConfigMerge:
                 "JOINT_TARGET_POSITIONS": {0: "target_1"},
             }
         }
+
+
+class TestRaiseOpenFileLimit:
+    @pytest.fixture
+    def resource_module(self):
+        return pytest.importorskip("resource")
+
+    @pytest.fixture
+    def mock_setrlimit(self, resource_module):
+        with patch.object(resource_module, "setrlimit") as mock:
+            yield mock
+
+    def test_raises_the_soft_limit_to_the_hard_limit(
+        self, resource_module, mock_setrlimit
+    ):
+        """Raise the soft open file limit to the hard limit."""
+        with patch.object(resource_module, "getrlimit", return_value=(1024, 65536)):
+            _raise_open_file_limit()
+
+        mock_setrlimit.assert_called_once_with(
+            resource_module.RLIMIT_NOFILE, (65536, 65536)
+        )
+
+    def test_raises_the_soft_limit_to_the_default_when_the_hard_limit_is_unlimited(
+        self, resource_module, mock_setrlimit
+    ):
+        """Raise the soft limit to the default when the hard limit is unlimited."""
+        with patch.object(
+            resource_module,
+            "getrlimit",
+            return_value=(256, resource_module.RLIM_INFINITY),
+        ):
+            _raise_open_file_limit()
+
+        mock_setrlimit.assert_called_once_with(
+            resource_module.RLIMIT_NOFILE,
+            (DEFAULT_OPEN_FILE_LIMIT, resource_module.RLIM_INFINITY),
+        )
+
+    def test_keeps_going_when_the_limit_cannot_be_raised(
+        self, resource_module, mock_setrlimit, caplog
+    ):
+        """Log a warning when the limit change is refused."""
+        mock_setrlimit.side_effect = ValueError
+        with (
+            patch.object(resource_module, "getrlimit", return_value=(1024, 65536)),
+            caplog.at_level(logging.WARNING, logger="neuracore.ml.train"),
+        ):
+            _raise_open_file_limit()
+
+        assert "Could not raise the open file limit from 1024 to 65536" in caplog.text
 
 
 class TestResolveRecordingCacheDir:

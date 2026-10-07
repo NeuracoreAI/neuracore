@@ -12,6 +12,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
+
 import hydra
 import torch
 import torch.multiprocessing as mp
@@ -66,6 +71,27 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
+DEFAULT_OPEN_FILE_LIMIT = 10240
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft open file limit to the hard limit.
+
+    Use DEFAULT_OPEN_FILE_LIMIT as the target when the hard limit is unlimited.
+    """
+    if resource is None:
+        return
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = DEFAULT_OPEN_FILE_LIMIT if hard == resource.RLIM_INFINITY else hard
+    if soft >= target:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
+        logger.warning(
+            "Could not raise the open file limit from %d to %d", soft, target
+        )
 
 
 def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
@@ -604,6 +630,8 @@ def _main(cfg: DictConfig) -> None:
     Args:
         cfg: Fully resolved Hydra configuration.
     """
+    _raise_open_file_limit()
+
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
 
