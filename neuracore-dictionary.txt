@@ -477,6 +477,7 @@ roundoff
 rowwise
 rposition
 rsplit
+rtol
 rtype
 rustls
 rustup

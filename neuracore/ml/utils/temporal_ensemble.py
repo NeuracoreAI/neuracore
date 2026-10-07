@@ -2,11 +2,12 @@
 
 Two forms live here:
 
-* :func:`temporal_ensemble_merge` — prefetch/merge used by the async
-  :class:`~neuracore.ml.utils.rtc_controller.ChunkingController` under
-  ``mode="temporal_ensemble"``.
 * :class:`ACTTemporalEnsembler` — classic ACT Algorithm 2 (predict every
-  control step). Standalone; not wired into the async controller.
+  control step). Used by the async
+  :class:`~neuracore.ml.utils.rtc_controller.TemporalEnsembleReplanner`
+  when ``execution_horizon=1``.
+* :func:`temporal_ensemble_merge` — pairwise two-chunk blend with the same
+  ACT (favor-older) weights; kept for tests and sync prefetch helpers.
 """
 
 from __future__ import annotations
@@ -20,17 +21,22 @@ import numpy as np
 class TemporalEnsembleConfig:
     """Configuration for async temporal-ensemble chunking.
 
+    The async :class:`~neuracore.ml.utils.rtc_controller.TemporalEnsembleReplanner`
+    mirrors classic ACT Algorithm 2 via :class:`ACTTemporalEnsembler`. Use
+    ``execution_horizon=1`` (the default) so a new prediction is fused every
+    control tick, matching ``policy_rollout_act`` / LeRobot.
+
     Attributes:
         execution_horizon: ``s``, actions consumed from each chunk before
-            the controller triggers a replan.
-        m: Exponential decay rate for overlap weights. Larger ``m`` favors
-            the newer prediction sooner.
+            the controller triggers a replan. ``1`` = predict every step.
+        m: Exponential decay rate. Positive ``m`` favors **older** predictions
+            (ACT / LeRobot), same as :class:`ACTTemporalEnsembler`.
         blend_steps: Optional continuity lerp of the first N actions of a
-            newly merged chunk toward the previous remaining head. ``0``
-            disables it.
+            newly produced chunk toward the previous remaining head. ``0``
+            disables it (recommended for ACT-matched behaviour).
     """
 
-    execution_horizon: int
+    execution_horizon: int = 1
     m: float = 0.01
     blend_steps: int = 0
 
@@ -44,14 +50,18 @@ def temporal_ensemble_merge(
 ) -> np.ndarray:
     """Blend remaining ``old`` actions with a freshly predicted ``new`` chunk.
 
-    Overlap steps use exponential weights that favor the newer prediction
-    (prefetch form, not original ACT): at overlap index ``i``,
+    Overlap steps use exponential weights that favor the **older** prediction
+    (ACT bias): at overlap index ``i``,
 
-    - ``w_new = exp(-m * i)``
-    - ``w_old = exp(-m * (old_offset + i))``
+    - ``w_old = exp(-m * i)``
+    - ``w_new = exp(-m * (old_offset + i))``
 
     then normalize. After the overlap, the non-overlapping tail of ``new`` is
     appended (leftover ``old`` beyond the overlap is dropped).
+
+    Prefer :class:`ACTTemporalEnsembler` for the full multi-chunk online
+    average; the async TE replanner uses that class. This pairwise helper is
+    kept for tests and callers that only have two chunks.
 
     Args:
         old: Remaining actions from the currently executing chunk with shape
@@ -85,12 +95,12 @@ def temporal_ensemble_merge(
 
     merged = np.empty_like(new_arr, dtype=np.float64)
     for i in range(overlap):
-        w_new = float(np.exp(-decay * i))
-        w_old = float(np.exp(-decay * (stale + i)))
+        w_old = float(np.exp(-decay * i))
+        w_new = float(np.exp(-decay * (stale + i)))
         norm = w_new + w_old
         if norm <= 0.0:
-            w_new, w_old, norm = 1.0, 0.0, 1.0
-        merged[i] = (w_new * new_arr[i] + w_old * old_arr[i]) / norm
+            w_old, w_new, norm = 1.0, 0.0, 1.0
+        merged[i] = (w_old * old_arr[i] + w_new * new_arr[i]) / norm
 
     if new_len > overlap:
         merged[overlap:] = new_arr[overlap:]
@@ -135,8 +145,10 @@ class ACTTemporalEnsembler:
     Call :meth:`update` once per control step with a fresh ``(T, D)`` chunk;
     it returns the ensembled action for the current step and shifts the buffer.
 
-    This is the predict-every-step path and is **not** used by the async
-    :class:`~neuracore.ml.utils.rtc_controller.ChunkingController`.
+    The async :class:`~neuracore.ml.utils.rtc_controller.TemporalEnsembleReplanner`
+    feeds each background prediction into this class. With
+    ``execution_horizon=1`` and inference that finishes within one control
+    tick, behaviour matches the synchronous predict-every-step loop.
     """
 
     def __init__(self, m: float, chunk_size: int) -> None:

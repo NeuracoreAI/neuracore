@@ -357,7 +357,7 @@ def test_as_ddim_scheduler_is_identity_for_ddim():
 
 
 def test_resolve_guidance_weight_defaults_per_process_type():
-    """Diffusion needs a far larger beta than flow matching; see the module docs."""
+    """Unset beta resolves to the paper default (5) for both process types."""
     config = RTCConfig(inference_delay=1, execution_horizon=EXECUTION_HORIZON)
 
     assert config.max_guidance_weight is None
@@ -367,7 +367,9 @@ def test_resolve_guidance_weight_defaults_per_process_type():
     assert config.resolve_guidance_weight("diffusion") == (
         DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT
     )
-    assert DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT > DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT
+    assert (
+        DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT == DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT == 5.0
+    )
 
 
 def test_resolve_guidance_weight_honours_an_explicit_value():
@@ -455,8 +457,9 @@ def test_large_beta_saturates_rather_than_destabilising():
             num_inference_steps=STEPS,
         )
 
-    saturated = run(DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT)
-    huge = run(DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT * 100)
+    # Diffusion's internal zeta cap saturates well above the paper default (5).
+    saturated = run(50.0)
+    huge = run(5000.0)
     assert torch.allclose(saturated, huge, atol=1e-5)
     assert torch.isfinite(huge).all()
 

@@ -27,15 +27,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 from common.base_env import BimanualViperXTask
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
-from neuracore_types import DataType, JointData, RGBCameraData, SynchronizedPoint
+from neuracore_types import (
+    DataType,
+    EmbodimentDescription,
+    JointData,
+    RGBCameraData,
+    SynchronizedPoint,
+)
 
 import neuracore as nc
 from neuracore.ml.utils.real_time_chunking import RTCConfig
 from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
 
 TRAINING_JOB_NAME = "MyTrainingJob"
-CAMERA_NAMES = ["angle"]
-NC_CAM_NAME = "angle"
+# MuJoCo camera name vs Neuracore stream name used in the Transfer Cube dataset.
+MJ_CAM_NAME = "angle"
+NC_CAM_NAME = "rgb_angle"
 CONTROL_HZ = 50.0
 EPISODE_LENGTH = 400
 NUM_ROLLOUTS = 5
@@ -47,6 +54,16 @@ JOINT_NAMES = (
     + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
 )
 
+INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.RGB_IMAGES: {0: NC_CAM_NAME},
+    DataType.JOINT_POSITIONS: {i: name for i, name in enumerate(JOINT_NAMES)},
+}
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        i: name for i, name in enumerate(BimanualViperXTask.ACTION_KEYS)
+    },
+}
+
 
 def _make_sync_point(obs) -> SynchronizedPoint:
     """Build a model observation from a MuJoCo env observation."""
@@ -56,7 +73,7 @@ def _make_sync_point(obs) -> SynchronizedPoint:
                 name: JointData(value=obs.qpos[name]) for name in JOINT_NAMES
             },
             DataType.RGB_IMAGES: {
-                NC_CAM_NAME: RGBCameraData(frame=obs.cameras[NC_CAM_NAME].rgb),
+                NC_CAM_NAME: RGBCameraData(frame=obs.cameras[MJ_CAM_NAME].rgb),
             },
         },
     )
@@ -90,8 +107,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--execution-horizon",
         type=int,
-        default=16,
-        help="Actions executed per chunk before replan (s)",
+        default=None,
+        help=(
+            "Actions executed per chunk before replan (s). "
+            "Default: 16 for rtc, 1 for temporal_ensemble (ACT every step)"
+        ),
     )
     parser.add_argument(
         "--inference-delay",
@@ -103,7 +123,7 @@ def _parse_args() -> argparse.Namespace:
         "--ensemble-m",
         type=float,
         default=0.01,
-        help="Temporal-ensemble decay rate m",
+        help="ACT temporal-ensemble decay m (positive favors older)",
     )
     parser.add_argument(
         "--num-rollouts",
@@ -131,14 +151,20 @@ def main() -> None:
 
     control_hz = float(args.control_hz)
     if args.mode == "rtc":
+        execution_horizon = (
+            16 if args.execution_horizon is None else int(args.execution_horizon)
+        )
         config: RTCConfig | TemporalEnsembleConfig = RTCConfig(
             inference_delay=int(args.inference_delay),
-            execution_horizon=int(args.execution_horizon),
+            execution_horizon=execution_horizon,
         )
         adapt = True
     else:
+        execution_horizon = (
+            1 if args.execution_horizon is None else int(args.execution_horizon)
+        )
         config = TemporalEnsembleConfig(
-            execution_horizon=int(args.execution_horizon),
+            execution_horizon=execution_horizon,
             m=float(args.ensemble_m),
         )
         adapt = False
@@ -148,6 +174,8 @@ def main() -> None:
         "config": config,
         "control_hz": control_hz,
         "adapt_inference_delay": adapt,
+        "input_embodiment_description": INPUT_EMBODIMENT_DESCRIPTION,
+        "output_embodiment_description": OUTPUT_EMBODIMENT_DESCRIPTION,
     }
     if args.model_file is not None:
         print(f"Loading model from {args.model_file} (mode={args.mode})")
@@ -163,7 +191,7 @@ def main() -> None:
 
     tick_period = 1.0 / control_hz
     onscreen_render = not args.no_render
-    render_cam_name = CAMERA_NAMES[0]
+    render_cam_name = MJ_CAM_NAME
 
     for episode_idx in range(args.num_rollouts):
         print(f"{episode_idx=}")

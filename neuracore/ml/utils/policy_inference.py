@@ -134,6 +134,24 @@ class PolicyInference:
 
         return supports_real_time_chunking(self.model)
 
+    def _action_output_data_types(self) -> list[DataType]:
+        """Data types that occupy columns in a raw action chunk.
+
+        Continuous action heads live in ``model.output_dims``. Classification
+        outputs such as a ``CUSTOM_1D`` done flag are listed in
+        ``ordered_output_data_types`` but are produced by a separate head and
+        must not appear in the chunk layout.
+        """
+        model = self.model
+        preferred = getattr(model, "action_output_data_types", None)
+        if preferred:
+            return list(preferred)
+        return [
+            data_type
+            for data_type in model.ordered_output_data_types
+            if data_type in model.output_dims
+        ]
+
     def output_action_names(self) -> list[tuple[DataType, str | None]]:
         """Describe the column layout of a raw action chunk.
 
@@ -145,7 +163,7 @@ class PolicyInference:
             list[tuple[DataType, str | None]]: One entry per action column.
         """
         names: list[tuple[DataType, str | None]] = []
-        for data_type in self.model.ordered_output_data_types:
+        for data_type in self._action_output_data_types():
             start_idx, end_idx = self.model.output_dims[data_type]
             indexed = self.output_embodiment_description.get(data_type, {})
             for index in range(end_idx - start_idx):
@@ -217,8 +235,50 @@ class PolicyInference:
         chunk = rtc_predict_actions(self.model, batch, prev_tensor, rtc_config)
         return chunk[0].detach().cpu().numpy()
 
+    def _pack_action_outputs(
+        self, outputs: dict[DataType, list[BatchedNCData]]
+    ) -> torch.Tensor:
+        """Assemble ``(B, H, A)`` from per-sensor model outputs.
+
+        Only types in :meth:`_action_output_data_types` are packed, matching the
+        column layout of :meth:`output_action_names`.
+
+        Args:
+            outputs: Model ``forward`` outputs keyed by data type.
+
+        Returns:
+            torch.Tensor: Unnormalized action chunk with shape ``(B, H, A)``.
+        """
+        pieces: list[torch.Tensor] = []
+        for data_type in self._action_output_data_types():
+            start_idx, end_idx = self.model.output_dims[data_type]
+            width = end_idx - start_idx
+            slots = outputs[data_type]
+            if len(slots) < width:
+                raise ValueError(
+                    f"Model returned {len(slots)} {data_type} slots but "
+                    f"output_dims expects {width}"
+                )
+            for index in range(width):
+                item = slots[index]
+                tensor = getattr(item, "value", None)
+                if tensor is None:
+                    tensor = getattr(item, "open_amount", None)
+                if tensor is None:
+                    tensor = getattr(item, "data", None)
+                if tensor is None:
+                    raise ValueError(
+                        f"Cannot pack {type(item).__name__} for {data_type}"
+                    )
+                pieces.append(tensor)
+        return torch.cat(pieces, dim=-1)
+
     def _unguided_action_chunk(self, batch: BatchedInferenceInputs) -> np.ndarray:
         """Run the model's ordinary sampler and return a flat action chunk.
+
+        Prefers the diffusion-style ``_predict_action(batch, horizon)`` tensor
+        path when available. Otherwise runs ``model(batch)`` and packs continuous
+        action outputs (ACT / ACT-with-done and similar).
 
         Args:
             batch: Preprocessed inference batch.
@@ -230,18 +290,29 @@ class PolicyInference:
             ValueError: If the model lacks the hooks needed to produce a chunk.
         """
         model = self.model
-        if not hasattr(model, "_predict_action") or not hasattr(
-            model, "action_normalizer"
-        ):
+        if not getattr(model, "output_dims", None):
             raise ValueError(
                 f"{type(model).__name__} cannot produce a raw action chunk: "
-                "it is missing _predict_action or action_normalizer."
+                "it has no output_dims."
             )
-        horizon = self.prediction_horizon
+
         with torch.no_grad():
-            normalized = model._predict_action(batch, horizon)
-            chunk = model.action_normalizer.unnormalize(normalized)
-        return chunk[0].detach().cpu().numpy()
+            predict = getattr(model, "_predict_action", None)
+            if predict is not None and hasattr(model, "action_normalizer"):
+                try:
+                    normalized = predict(batch, self.prediction_horizon)
+                except TypeError:
+                    normalized = None
+                else:
+                    if isinstance(normalized, tuple):
+                        normalized = None
+                    else:
+                        chunk = model.action_normalizer.unnormalize(normalized)
+                        return chunk[0].detach().cpu().numpy()
+
+            outputs = model(batch)
+            packed = self._pack_action_outputs(outputs)
+        return packed[0].detach().cpu().numpy()
 
     def _preprocess(self, sync_point: SynchronizedPoint) -> BatchedInferenceInputs:
         """Preprocess incoming sync point into model-compatible format.

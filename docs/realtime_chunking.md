@@ -12,7 +12,7 @@ exclusive strategies share the same controller:
 | Mode | What happens at replan | Typical models |
 |------|------------------------|----------------|
 | `rtc` | Guided denoising toward the previous chunk (arXiv:2506.07339) | Diffusion / flow-matching |
-| `temporal_ensemble` | Unguided predict + exponential merge with the remaining previous chunk | Any chunking policy with `_predict_action` |
+| `temporal_ensemble` | Unguided predict fused with ACT Algorithm 2 (`ACTTemporalEnsembler`; favors older) | Any chunking policy that can emit an action chunk |
 
 They are **not** stacked. Pick one mode at construction.
 
@@ -40,7 +40,7 @@ policy = nc.policy_realtime(
     mode="rtc",
     config=RTCConfig(inference_delay=4, execution_horizon=16),
     # mode="temporal_ensemble",
-    # config=TemporalEnsembleConfig(execution_horizon=16, m=0.01),
+    # config=TemporalEnsembleConfig(execution_horizon=1, m=0.01),  # ACT every step
     control_hz=CONTROL_HZ,
 )
 
@@ -94,15 +94,17 @@ before going on hardware.
 
 ### Temporal ensemble (`TemporalEnsembleConfig`)
 
-- `execution_horizon` (`s`): actions per chunk before async replan.
-- `m`: exponential decay for overlap weights (larger → prefer the newer chunk sooner).
-- `blend_steps`: optional continuity lerp of the merged chunk head (default `0`).
+Async TE now drives the same :class:`~neuracore.ml.utils.temporal_ensemble.ACTTemporalEnsembler`
+used by classic ACT (positive ``m`` favors **older** predictions):
 
-## Classic ACT (predict every step)
+- `execution_horizon` (`s`): actions per chunk before replan. Default **`1`**
+  (predict every control tick). Larger ``s`` only updates the ensembler every
+  ``s`` ticks.
+- `m`: ACT exponential decay (default ``0.01``).
+- `blend_steps`: optional continuity lerp of the chunk head (default ``0``;
+  leave at 0 for ACT-matched behaviour).
 
-Original ACT Algorithm 2 is a **different** control pattern (predict every tick,
-online buffer). It is available as a standalone utility and is **not** wired into
-the async controller:
+Standalone use without the async controller:
 
 ```python
 from neuracore.ml.utils.temporal_ensemble import ACTTemporalEnsembler

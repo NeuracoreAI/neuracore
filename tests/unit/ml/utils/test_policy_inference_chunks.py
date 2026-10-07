@@ -122,6 +122,8 @@ def test_output_action_names_match_the_action_width(policy_inference):
     ), "there must be exactly one name per action column"
     # Columns are grouped by data type, in the model's own output ordering.
     for data_type in model.ordered_output_data_types:
+        if data_type not in model.output_dims:
+            continue
         start_idx, end_idx = model.output_dims[data_type]
         assert all(
             entry[0] is data_type for entry in names[start_idx:end_idx]
@@ -133,6 +135,24 @@ def test_output_action_names_match_the_action_width(policy_inference):
         (DataType.JOINT_TARGET_POSITIONS, "joint_1"),
         (DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS, GRIPPER_NAME),
     ]
+
+
+def test_output_action_names_skips_done_head_not_in_output_dims(policy_inference):
+    """CUSTOM_1D done flags are separate heads and must not become chunk columns."""
+    model = policy_inference.model
+    model.ordered_output_data_types = list(model.ordered_output_data_types) + [
+        DataType.CUSTOM_1D
+    ]
+    policy_inference.output_embodiment_description = {
+        **policy_inference.output_embodiment_description,
+        DataType.CUSTOM_1D: {0: "done"},
+    }
+
+    names = policy_inference.output_action_names()
+
+    assert DataType.CUSTOM_1D not in model.output_dims
+    assert all(data_type is not DataType.CUSTOM_1D for data_type, _ in names)
+    assert len(names) == model.max_output_size
 
 
 def test_output_action_names_marks_cross_embodiment_padding(policy_inference):

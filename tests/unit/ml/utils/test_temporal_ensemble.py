@@ -16,13 +16,27 @@ def test_temporal_ensemble_merge_empty_old_returns_new():
     np.testing.assert_array_equal(merged, new)
 
 
-def test_temporal_ensemble_merge_favors_newer_at_overlap_start():
+def test_temporal_ensemble_merge_equal_weights_when_m_zero():
     old = np.ones((4, 2), dtype=np.float32)
     new = np.full((6, 2), 3.0, dtype=np.float32)
     merged = temporal_ensemble_merge(old, new, old_offset=2, m=0.0)
     # m=0 → equal weights on overlap → mean of 1 and 3
     np.testing.assert_allclose(merged[:4], 2.0)
     np.testing.assert_allclose(merged[4:], 3.0)
+
+
+def test_temporal_ensemble_merge_favors_older_at_overlap_start():
+    """ACT bias: at i=0 with stale>0, old weight is 1 and new is exp(-m*stale)."""
+    old = np.ones((2, 1), dtype=np.float32)
+    new = np.full((4, 1), 100.0, dtype=np.float32)
+    m = 0.5
+    stale = 2
+    merged = temporal_ensemble_merge(old, new, old_offset=stale, m=m)
+    w_old = 1.0
+    w_new = float(np.exp(-m * stale))
+    expected = (w_old * 1.0 + w_new * 100.0) / (w_old + w_new)
+    np.testing.assert_allclose(merged[0], expected)
+    assert merged[0, 0] < 50.0, "older prediction must dominate at the head"
 
 
 def test_temporal_ensemble_merge_rejects_dim_mismatch():

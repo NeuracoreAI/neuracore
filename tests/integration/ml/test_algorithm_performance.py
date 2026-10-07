@@ -3,22 +3,19 @@
 The suite is split into two phases so CI runners are not held idle during training:
 
   test_start_training  — submits a training job and records the job ID.
-  test_evaluate        — deploys an endpoint for the completed job, runs
-                         NUM_ROLLOUTS in MuJoCo, and checks the success rate
-                         against the threshold in algorithm_configs.yaml.
+  test_evaluate        — waits for the job, runs every evaluation variant listed
+                         under that algorithm in algorithm_configs.yaml, then
+                         deletes the training job only if all variants pass.
 
-                         Entries with ``evaluation.mode: realtime_chunking`` or
-                         ``temporal_ensemble`` skip the remote endpoint and load
-                         the model in-process with :func:`neuracore.policy_realtime`.
+Evaluation modes (per item in ``evaluations``):
 
-Algorithm names, hyperparameters, and thresholds all live in algorithm_configs.yaml.
-To add or remove an algorithm, edit only that file. Optional per-entry keys:
+  omit / endpoint      — remote endpoint + open-loop chunking (default)
+  realtime_chunking    — in-process RTC via :func:`neuracore.policy_realtime`
+  temporal_ensemble    — in-process temporal ensemble via ``policy_realtime``
 
-  train_algorithm_name — algorithm registered with the trainer (defaults to
-                         ``name``). Use this when the matrix label differs from
-                         the trained algorithm, e.g. DiffusionPolicyRTC.
-  evaluation           — evaluation-mode overrides; see DiffusionPolicyRTC /
-                         DiffusionPolicyTemporalEnsemble.
+When ``evaluations`` is omitted, a single endpoint eval uses top-level
+``min_success_rate``. Variants that share one training job stay under one
+config so cleanup is deferred until every variant meets its threshold.
 
 Running locally
 ---------------
@@ -32,6 +29,7 @@ Running locally
     # all algorithms, test_evaluate skips cleanly for each.
 """
 
+import json
 import logging
 import os
 import sys
@@ -108,16 +106,31 @@ OUTPUT_EMBODIMENT_DESCRIPTION = {
 }
 
 
-def _train_algorithm_name(algorithm_config_entry: dict[str, Any]) -> str:
-    """Return the algorithm name to register with the trainer."""
-    return algorithm_config_entry.get(
-        "train_algorithm_name", algorithm_config_entry["name"]
-    )
+def _evaluation_label(evaluation: dict[str, Any]) -> str:
+    """Human-readable name for an evaluation variant."""
+    mode = evaluation.get("mode") or "endpoint"
+    return str(evaluation.get("name") or mode)
 
 
-def _evaluation_config(algorithm_config_entry: dict[str, Any]) -> dict[str, Any]:
-    """Return per-entry evaluation overrides (may be empty)."""
-    return algorithm_config_entry.get("evaluation") or {}
+def _evaluations(algorithm_config_entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return evaluation variants for one training job.
+
+    Explicit ``evaluations`` lists win. Otherwise a single endpoint eval is
+    synthesised from top-level ``min_success_rate``.
+    """
+    evaluations = algorithm_config_entry.get("evaluations")
+    if evaluations:
+        return list(evaluations)
+    return [{"min_success_rate": algorithm_config_entry["min_success_rate"]}]
+
+
+def _min_success_rate(
+    evaluation: dict[str, Any], algorithm_config_entry: dict[str, Any]
+) -> float:
+    """Threshold for one variant (per-eval override, else top-level)."""
+    if "min_success_rate" in evaluation:
+        return float(evaluation["min_success_rate"])
+    return float(algorithm_config_entry["min_success_rate"])
 
 
 def _make_sync_point(obs: Any) -> SynchronizedPoint:
@@ -322,6 +335,7 @@ def _evaluate_realtime(
     train_run_name = job_data["name"]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mode = evaluation["mode"]
+    label = _evaluation_label(evaluation)
     if mode == "realtime_chunking":
         api_mode = "rtc"
         config: RTCConfig | TemporalEnsembleConfig = RTCConfig(
@@ -341,7 +355,7 @@ def _evaluate_realtime(
         raise ValueError(f"Unknown realtime evaluation mode {mode!r}")
 
     logger.info(
-        f"[{algorithm_name}] Loading realtime policy ({api_mode}) from "
+        f"[{algorithm_name}/{label}] Loading realtime policy ({api_mode}) from "
         f"{train_run_name!r} on {device}"
     )
     policy = nc.policy_realtime(
@@ -354,12 +368,35 @@ def _evaluate_realtime(
         control_hz=float(evaluation.get("control_hz", FREQUENCY)),
         adapt_inference_delay=adapt,
     )
-    env = make_sim_env(seed=42)
-    return eval_model_realtime(
-        policy=policy,
-        env=env,
-        num_rollouts=NUM_ROLLOUTS,
-        control_hz=float(evaluation.get("control_hz", FREQUENCY)),
+    try:
+        env = make_sim_env(seed=42)
+        return eval_model_realtime(
+            policy=policy,
+            env=env,
+            num_rollouts=NUM_ROLLOUTS,
+            control_hz=float(evaluation.get("control_hz", FREQUENCY)),
+        )
+    finally:
+        policy.disconnect()
+
+
+def _run_evaluation(
+    algorithm_name: str,
+    training_job_id: str,
+    algorithm_config_entry: dict[str, Any],
+    evaluation: dict[str, Any],
+) -> float:
+    """Dispatch one evaluation variant and return its success rate."""
+    mode = evaluation.get("mode") or "endpoint"
+    if mode in ("realtime_chunking", "temporal_ensemble"):
+        return _evaluate_realtime(algorithm_name, training_job_id, evaluation)
+    if mode in ("endpoint", "remote"):
+        return _evaluate_remote_endpoint(
+            algorithm_name, training_job_id, algorithm_config_entry
+        )
+    raise ValueError(
+        f"[{algorithm_name}] Unknown evaluation mode {mode!r}; "
+        "expected endpoint, realtime_chunking, or temporal_ensemble"
     )
 
 
@@ -371,7 +408,6 @@ class TestAlgorithmPerformance:
         can cache and forward it. Locally the ID is logged at INFO level.
         """
         algorithm_name = algorithm_config_entry["name"]
-        train_algorithm_name = _train_algorithm_name(algorithm_config_entry)
 
         nc.login()
 
@@ -382,16 +418,13 @@ class TestAlgorithmPerformance:
 
         timestamp = int(time.time())
         gpu_type = algorithm_config_entry.get("gpu_type", DEFAULT_GPU_TYPE)
-        logger.info(
-            f"[{algorithm_name}] Starting training job "
-            f"(algorithm={train_algorithm_name})..."
-        )
+        logger.info(f"[{algorithm_name}] Starting training job...")
         job_data = nc.start_training_run(
             name=f"{TRAINING_NAME} - {algorithm_name} - {timestamp}",
             gpu_type=gpu_type,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,
-            algorithm_name=train_algorithm_name,
+            algorithm_name=algorithm_name,
             dataset_name=DATASET_NAME,
             algorithm_config=algorithm_config_entry["algorithm_config"],
             input_cross_embodiment_description={robot_id: INPUT_EMBODIMENT_DESCRIPTION},
@@ -408,16 +441,12 @@ class TestAlgorithmPerformance:
                 f.write(f"training_job_id={training_job_id}\n")
 
     def test_evaluate(self, algorithm_config_entry: dict) -> None:
-        """Phase 2: evaluate a completed training job on Transfer Cube.
+        """Phase 2: run every evaluation variant for one training job.
 
-        Default path deploys a remote endpoint. Entries with
-        ``evaluation.mode: realtime_chunking`` or ``temporal_ensemble`` instead
-        load the model in-process via :func:`neuracore.policy_realtime`.
-
-        Expects TRAINING_JOB_ID to be set in the environment (written by
-        test_start_training in Phase 1 and passed through the CI cache).
-        Skips gracefully when TRAINING_JOB_ID is absent so that running the
-        full test file locally does not fail on this test.
+        Expects TRAINING_JOB_ID from Phase 1. All variants listed under
+        ``evaluations`` (or a synthesised endpoint eval) run in this test;
+        the training job is deleted only when every variant meets its
+        ``min_success_rate``.
         """
         training_job_id = os.environ.get("TRAINING_JOB_ID")
         if not training_job_id:
@@ -427,8 +456,7 @@ class TestAlgorithmPerformance:
             )
 
         algorithm_name = algorithm_config_entry["name"]
-        min_success_rate = algorithm_config_entry["min_success_rate"]
-        evaluation = _evaluation_config(algorithm_config_entry)
+        evaluations = _evaluations(algorithm_config_entry)
 
         nc.login()
 
@@ -445,29 +473,49 @@ class TestAlgorithmPerformance:
                 f"status: {training_job_status}\n\n{failure_context}"
             )
 
-        if evaluation.get("mode") in ("realtime_chunking", "temporal_ensemble"):
-            success_rate = _evaluate_realtime(
-                algorithm_name, training_job_id, evaluation
+        rates: dict[str, float] = {}
+        failures: list[str] = []
+        for evaluation in evaluations:
+            label = _evaluation_label(evaluation)
+            min_rate = _min_success_rate(evaluation, algorithm_config_entry)
+            logger.info(
+                f"[{algorithm_name}/{label}] Starting evaluation "
+                f"(threshold={min_rate:.2%})"
             )
-        else:
-            success_rate = _evaluate_remote_endpoint(
-                algorithm_name, training_job_id, algorithm_config_entry
+            success_rate = _run_evaluation(
+                algorithm_name,
+                training_job_id,
+                algorithm_config_entry,
+                evaluation,
             )
+            rates[label] = success_rate
+            logger.info(
+                f"[{algorithm_name}/{label}] success_rate={success_rate:.2%} "
+                f"(threshold={min_rate:.2%})"
+            )
+            if success_rate < min_rate:
+                failures.append(f"{label}: {success_rate:.2%} < {min_rate:.2%}")
 
-        logger.info(f"[{algorithm_name}] success_rate={success_rate:.2%}")
-
-        # Written before the threshold check below so a run that fails its
-        # threshold still reports the rate it achieved. The CI dashboard reads
-        # this back off the job's ci-manifest artifact.
+        # Report rates even when thresholds fail so the CI dashboard can show
+        # what each variant achieved.
         github_output = os.environ.get("GITHUB_OUTPUT")
         if github_output:
+            # Prefer the endpoint rate for the legacy single-value field; fall
+            # back to the first variant. Full map goes in success_rates.
+            primary = rates.get("endpoint", next(iter(rates.values())))
             with open(github_output, "a") as f:
-                f.write(f"success_rate={success_rate}\n")
+                f.write(f"success_rate={primary}\n")
+                f.write(f"success_rates={json.dumps(rates)}\n")
+
+        if failures:
+            raise ValueError(
+                f"[{algorithm_name}] evaluation threshold(s) not met; "
+                f"training job {training_job_id} left in place for inspection:\n"
+                + "\n".join(f"  - {msg}" for msg in failures)
+            )
 
         nc.delete_training_job(training_job_id)
-
-        if success_rate < min_success_rate:
-            raise ValueError(
-                f"[{algorithm_name}] success rate {success_rate:.2%} is below "
-                f"the minimum threshold of {min_success_rate:.2%}"
-            )
+        logger.info(
+            f"[{algorithm_name}] All {len(rates)} evaluation(s) passed; "
+            f"deleted training job {training_job_id}"
+        )

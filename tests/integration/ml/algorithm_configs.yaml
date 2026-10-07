@@ -1,64 +1,62 @@
+# Each top-level entry is one training job. Optional ``evaluations`` lists every
+# way that checkpoint is scored; Phase 2 runs them all in one pytest case and
+# only deletes the training job when every variant meets its threshold.
+#
+# Evaluation modes:
+#   omit / endpoint     — remote endpoint + open-loop chunking (default)
+#   realtime_chunking   — in-process RTC (diffusion / flow only)
+#   temporal_ensemble   — in-process async temporal-ensemble merge
 algorithms:
   - name: CNNMLP
-    min_success_rate: 0.2
     algorithm_config:
       batch_size: 64
       epochs: 50
       output_prediction_horizon: 100
       lr: 1.4e-4
       lr_backbone: 1.4e-5
+    evaluations:
+      - min_success_rate: 0.2
+      - mode: temporal_ensemble
+        min_success_rate: 0.2
+        control_hz: 50
+        execution_horizon: 1
+        m: 0.01
 
   - name: ACT
-    min_success_rate: 0.5
     algorithm_config:
       batch_size: 64
       epochs: 50
       output_prediction_horizon: 100
       lr: 1.4e-4
       lr_backbone: 1.4e-5
+    evaluations:
+      - min_success_rate: 0.5
+      - mode: temporal_ensemble
+        min_success_rate: 0.5
+        control_hz: 50
+        execution_horizon: 1
+        m: 0.01
 
   - name: DiffusionPolicy
-    min_success_rate: 0.4
     algorithm_config:
       batch_size: 64
       epochs: 40
       output_prediction_horizon: 64
       lr: 2.0e-4
       lr_backbone: 2.0e-4
-
-  # Same training recipe as DiffusionPolicy; evaluate in-process with real-time
-  # action chunking (arXiv:2506.07339) instead of a remote endpoint.
-  - name: DiffusionPolicyRTC
-    train_algorithm_name: DiffusionPolicy
-    min_success_rate: 0.4
-    evaluation:
-      mode: realtime_chunking
-      control_hz: 50
-      inference_delay: 8
-      execution_horizon: 16
-      adapt_inference_delay: true
-    algorithm_config:
-      batch_size: 64
-      epochs: 40
-      output_prediction_horizon: 64
-      lr: 2.0e-4
-      lr_backbone: 2.0e-4
-
-  # Same training recipe; evaluate with async temporal-ensemble prefetch/merge.
-  - name: DiffusionPolicyTemporalEnsemble
-    train_algorithm_name: DiffusionPolicy
-    min_success_rate: 0.4
-    evaluation:
-      mode: temporal_ensemble
-      control_hz: 50
-      execution_horizon: 16
-      m: 0.01
-    algorithm_config:
-      batch_size: 64
-      epochs: 40
-      output_prediction_horizon: 64
-      lr: 2.0e-4
-      lr_backbone: 2.0e-4
+    evaluations:
+      - min_success_rate: 0.4
+      - mode: realtime_chunking
+        min_success_rate: 0.4
+        control_hz: 50
+        inference_delay: 8
+        execution_horizon: 16
+        adapt_inference_delay: true
+      - mode: temporal_ensemble
+        min_success_rate: 0.4
+        control_hz: 50
+        execution_horizon: 1
+        m: 0.01
 
   - name: Pi0
     min_success_rate: 0.0

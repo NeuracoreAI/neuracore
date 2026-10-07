@@ -31,11 +31,7 @@ from neuracore.ml.utils.real_time_chunking import (
     align_previous_chunk,
     max_feasible_inference_delay,
 )
-from neuracore.ml.utils.temporal_ensemble import (
-    TemporalEnsembleConfig,
-    continuity_blend,
-    temporal_ensemble_merge,
-)
+from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +152,15 @@ class RTCReplanner:
 
 
 class TemporalEnsembleReplanner:
-    """Unguided predict + exponential merge with the previous remaining chunk."""
+    """Unguided predict fused with :class:`ACTTemporalEnsembler` (ACT Algo 2).
+
+    Each replan runs a full action-chunk prediction and feeds it to an online
+    ACT ensembler that favors older predictions. The returned array is the
+    current ensembled action plus the remaining buffer (length ``H``) so the
+    :class:`ChunkingController` can stream it. With ``execution_horizon=1``
+    this matches predict-every-step ACT; larger ``s`` only updates the
+    ensembler every ``s`` ticks (approximate).
+    """
 
     def __init__(self, policy: PolicyInference, config: TemporalEnsembleConfig) -> None:
         """Initialize the temporal-ensemble replanner.
@@ -165,8 +169,11 @@ class TemporalEnsembleReplanner:
             policy: Policy that can return a raw action chunk.
             config: Temporal-ensemble configuration.
         """
+        from neuracore.ml.utils.temporal_ensemble import ACTTemporalEnsembler
+
         self._policy = policy
         self._config = config
+        self._ensembler: ACTTemporalEnsembler | None = None
 
     def replan(
         self,
@@ -177,21 +184,31 @@ class TemporalEnsembleReplanner:
         inference_delay: int,
         execution_horizon: int,
     ) -> np.ndarray:
-        """Predict a new chunk and merge it with the remaining previous actions."""
-        del inference_delay, execution_horizon  # unused; TE swaps immediately
-        new_chunk = self._policy.predict_action_chunk(observation)
-        if prev_chunk is None:
-            return new_chunk
+        """Predict a chunk, update the ACT ensembler, return the H-row buffer."""
+        del inference_delay, execution_horizon  # TE swaps as soon as ready
+        from neuracore.ml.utils.temporal_ensemble import continuity_blend
 
-        remaining = prev_chunk[ticks_consumed:]
-        merged = temporal_ensemble_merge(
-            remaining,
-            new_chunk,
-            old_offset=ticks_consumed,
-            m=self._config.m,
-        )
-        if self._config.blend_steps > 0 and remaining.shape[0] > 0:
-            merged = continuity_blend(merged, remaining[0], self._config.blend_steps)
+        new_chunk = self._policy.predict_action_chunk(observation)
+        horizon = int(new_chunk.shape[0])
+        if self._ensembler is None or self._ensembler.chunk_size != horizon:
+            from neuracore.ml.utils.temporal_ensemble import ACTTemporalEnsembler
+
+            self._ensembler = ACTTemporalEnsembler(self._config.m, horizon)
+        if prev_chunk is None:
+            self._ensembler.reset()
+
+        action = self._ensembler.update(new_chunk)
+        assert self._ensembler.ensembled_actions is not None
+        # Controller expects an H-row chunk; index 0 is the action just popped.
+        merged = np.concatenate(
+            [action.reshape(1, -1), self._ensembler.ensembled_actions],
+            axis=0,
+        ).astype(np.float32, copy=False)
+        if self._config.blend_steps > 0 and prev_chunk is not None and len(prev_chunk):
+            head_idx = min(max(ticks_consumed, 0), len(prev_chunk) - 1)
+            merged = continuity_blend(
+                merged, prev_chunk[head_idx], self._config.blend_steps
+            )
         return merged
 
 

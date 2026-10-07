@@ -536,3 +536,73 @@ def test_temporal_ensemble_controller_streams_and_merges():
     assert stats.chunks > 1
     assert policy.guided_calls == 0, "TE must not use RTC-guided predict"
     assert policy.calls > 1
+
+
+def test_temporal_ensemble_s1_instant_matches_act_ensembler():
+    """With s=1 and zero latency, async TE must match ACTTemporalEnsembler."""
+    from neuracore.ml.utils.temporal_ensemble import ACTTemporalEnsembler
+
+    horizon = 4
+    m = 0.01
+    chunks = [
+        np.full((horizon, ACTION_DIM), float(i + 1), dtype=np.float32)
+        for i in range(12)
+    ]
+
+    class ScriptedPolicy:
+        prediction_horizon = horizon
+        model = object()
+        guided_calls = 0
+        calls = 0
+
+        def output_action_names(self):
+            return [
+                (DataType.JOINT_TARGET_POSITIONS, f"joint_{i}")
+                for i in range(ACTION_DIM)
+            ]
+
+        def predict_action_chunk(self, sync_point, prev_chunk=None, rtc_config=None):
+            del sync_point, prev_chunk, rtc_config
+            idx = min(self.calls, len(chunks) - 1)
+            self.calls += 1
+            return chunks[idx].copy()
+
+    policy = ScriptedPolicy()
+    config = TemporalEnsembleConfig(execution_horizon=1, m=m, blend_steps=0)
+    chunker = ChunkingController(
+        policy,
+        TemporalEnsembleReplanner(policy, config),
+        execution_horizon=1,
+        inference_delay=0,
+        control_hz=CONTROL_HZ,
+        adapt_inference_delay=False,
+        enforce_rtc_invariant=False,
+    )
+
+    ens = ACTTemporalEnsembler(m, horizon)
+    expected = [ens.update(chunk.copy()) for chunk in chunks]
+
+    try:
+        chunker.start()
+        _seed(chunker)
+        assert chunker.wait_for_first_chunk(timeout=5.0)
+        # First get_action only seeded; consume one action per scripted chunk.
+        got: list[np.ndarray] = []
+        for _ in range(len(chunks)):
+            action = None
+            for _retry in range(50):
+                action = chunker.get_action(_observation())
+                if action is not None:
+                    break
+                time.sleep(TICK)
+            assert action is not None
+            got.append(action)
+            time.sleep(TICK)
+    finally:
+        chunker.stop()
+
+    assert len(got) == len(expected)
+    for i, (actual, want) in enumerate(zip(got, expected)):
+        np.testing.assert_allclose(
+            actual, want, rtol=1e-5, atol=1e-5, err_msg=f"step {i}"
+        )

@@ -39,18 +39,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The paper's beta, calibrated for flow matching. There the guidance weight has
-# no other bound, so beta is what keeps few-step sampling stable.
+# Paper default beta (arXiv:2506.07339). Used for both flow matching and
+# diffusion when ``max_guidance_weight`` is unset. Diffusion still has an
+# additional hard cap inside ``guided_diffusion_sample`` (zeta), so raising
+# beta further is mostly inert rather than unstable.
 DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT = 5.0
-# The diffusion path needs a much larger beta. Its weight carries a second,
-# stricter cap (zeta <= 1 / k_t, i.e. "pull no further than onto Y"), so beta
-# only binds near the ends of the noise schedule -- and the clean end is exactly
-# where a few-step DDIM sampler produces the output. At beta = 5 the final step
-# applies about a tenth of the intended correction. Measured on a trained UR5e
-# policy, the boundary discontinuity falls monotonically until beta ~= 50 and is
-# then completely flat: the hard cap has taken over, so larger values are inert
-# rather than unstable.
-DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT = 50.0
+DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT = 5.0
 DEFAULT_RTC_INFERENCE_STEPS = 10
 
 PREFIX_ATTENTION_SCHEDULES = ("exp", "linear", "ones", "zeros")
@@ -75,11 +69,10 @@ class RTCConfig:
             without any guidance. Controllers treat this as a minimum and may
             raise it to ``max(d, s)`` when inference delay grows.
         max_guidance_weight: ``beta``, the clip applied to the guidance weight.
-            ``None`` picks the right default for the model's process type -
-            :data:`DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT` for flow matching and the
-            much larger :data:`DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT` for
-            diffusion, which needs it because its weight carries a second cap.
-            Set a number to override.
+            ``None`` uses the paper default (``5``) for both flow matching and
+            diffusion (:data:`DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT` /
+            :data:`DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT`). Set a number to
+            override.
         prefix_attention_schedule: Soft-mask family over the overlap region.
             ``"exp"`` is the paper's default; ``"ones"`` reproduces hard
             inpainting over the whole overlap and ``"zeros"`` reduces to
