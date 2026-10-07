@@ -502,7 +502,7 @@ jobs:
             ? `- Alpha version built from \`${alphaBranch}\`, no version bump pushed\n`
             : `- Version bumped and pushed to \`main\`\n`;
           summary += `- Git tag \`v${version}\` created\n`;
-          summary += `- Platform wheels (linux x86_64/aarch64 + macOS arm64/x86_64, cp310-cp314) published to PyPI\n`;
+          summary += `- Platform wheels (linux x86_64/aarch64 + macOS arm64, cp310-cp314) published to PyPI\n`;
           summary += `- GitHub Release created\n\n`;
           summary += `### Links\n\n`;
           summary += `- [PyPI Package](https://pypi.org/project/neuracore/${version}/)\n`;

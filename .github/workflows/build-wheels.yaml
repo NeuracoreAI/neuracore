@@ -55,10 +55,6 @@ jobs:
             target: aarch64-apple-darwin
             interpreters: "python3.10 python3.11 python3.12 python3.13 python3.14"
             macos-deployment-target: "11.0"
-          - os: macos-26-intel
-            target: x86_64-apple-darwin
-            interpreters: "python3.10 python3.11 python3.12 python3.13 python3.14"
-            macos-deployment-target: "11.0"
 
     steps:
       - name: Checkout code
@@ -123,12 +119,11 @@ jobs:
 
   # Install and launch the wheels on a DIFFERENT machine than the one that
   # built them — no checkout, no Rust toolchain, just the downloaded artefact.
-  # This is what proves the wheels work outside the build environment: both
-  # macOS legs run on a different, older OS image (macos-15) than their macos-26
+  # This is what proves the wheels work outside the build environment: the
+  # macOS leg runs on a different, older OS image (macos-15) than its macos-26
   # builder, so a signature that only validated on the build machine, a
   # deployment-target mismatch, or a glibc-floor problem fails here instead of
-  # at a user's install. Each leg must keep the builder's architecture —
-  # an arm64 runner cannot install an x86_64 wheel, and vice versa.
+  # at a user's install. Each leg must keep the builder's architecture.
   smoke-test:
     name: smoke (${{ matrix.target }})
     needs: build
@@ -143,8 +138,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
 
     steps:
       - name: Set up Pythons

@@ -17,12 +17,10 @@
 #   ./rust/scripts/build_wheel_artefacts.sh                 # native host target
 #   ./rust/scripts/build_wheel_artefacts.sh --target <triple>
 #     Linux: --target x86_64-unknown-linux-gnu inside the manylinux container.
-#     macOS: --target aarch64-apple-darwin (Apple Silicon) or
-#            --target x86_64-apple-darwin (Intel), each on a native runner of
-#            that architecture, before `maturin build`. This also pins
+#     macOS: --target aarch64-apple-darwin (Apple Silicon) on a native
+#            runner, before `maturin build`. This also pins
 #            MACOSX_DEPLOYMENT_TARGET so the binary matches the wheel's
-#            platform tag, and ad-hoc-signs the binary — rustc leaves x86_64
-#            unsigned, so this is what gives the Intel wheel a signature.
+#            platform tag, and ad-hoc-signs the binary.
 #
 # See docs/rust_data_daemon_development.md#packaging-the-wheel for the pipeline.
 
@@ -54,7 +52,7 @@ repo_root="$(cd "$workspace_root/.." && pwd)"
 package_dir="$repo_root/neuracore/data_daemon"
 bin_dst="$package_dir/bin/data-daemon"
 
-# Both macOS targets — arm64 and Intel — need two things the Linux path doesn't: a
+# The macOS target needs two things the Linux path doesn't: a
 # pinned deployment floor before the build, and an ad-hoc signature after it.
 case "$target" in
   *-apple-darwin) apple_target=1 ;;
@@ -90,9 +88,6 @@ mkdir -p "$(dirname "$bin_dst")"
 install -m 0755 "$bin_src" "$bin_dst"
 echo "    wrote $bin_dst"
 
-# The x86_64 binary arrives here unsigned: rustc only ad-hoc-signs arm64 Mach-O
-# at link time, because macOS refuses to exec unsigned arm64 code and has no such
-# requirement on Intel.
 if [[ "$apple_target" == 1 ]]; then
   if command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$bin_dst"
