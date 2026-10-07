@@ -39,11 +39,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Paper default beta (arXiv:2506.07339). Used for both flow matching and
-# diffusion when ``max_guidance_weight`` is unset. Diffusion still has an
-# additional hard cap inside ``guided_diffusion_sample`` (zeta), so raising
-# beta further is mostly inert rather than unstable.
+# The paper's beta (arXiv:2506.07339), calibrated for flow matching. There the
+# guidance weight has no other bound, so beta is what keeps few-step sampling
+# stable.
 DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT = 5.0
+# The paper's value again, but it does not mean the same thing here. The
+# diffusion weight carries a second, stricter cap (zeta <= 1 / k_t, i.e. "pull
+# no further than onto Y") which dominates across the middle of the schedule --
+# there beta is inert and 5 and 50 are numerically identical. Beta binds only
+# at the two ends, and at the clean end it binds hard: on a 10-step DDIM over
+# 100 train timesteps the final step applies zeta = 0.12 at beta = 5 versus
+# 0.98 at beta = 50, and that final step is the one that produces the output.
+# So this default stays on the published number at the cost of roughly an
+# eighth of the intended pull where the frozen prefix is actually enforced.
+# Raise it (50 is a reasonable ceiling; beyond that the hard cap has taken over
+# and larger values are inert) if chunk-boundary discontinuities show up.
 DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT = 5.0
 DEFAULT_RTC_INFERENCE_STEPS = 10
 
@@ -72,7 +82,9 @@ class RTCConfig:
             ``None`` uses the paper default (``5``) for both flow matching and
             diffusion (:data:`DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT` /
             :data:`DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT`). Set a number to
-            override.
+            override - on the diffusion path beta binds almost entirely at the
+            final denoising step, so raising it is the lever for chunk-boundary
+            discontinuities. See the constants for the measured trade-off.
         prefix_attention_schedule: Soft-mask family over the overlap region.
             ``"exp"`` is the paper's default; ``"ones"`` reproduces hard
             inpainting over the whole overlap and ``"zeros"`` reduces to

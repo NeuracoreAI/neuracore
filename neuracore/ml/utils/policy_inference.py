@@ -3,6 +3,8 @@
 import logging
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -175,6 +177,7 @@ class PolicyInference:
         sync_point: SynchronizedPoint,
         prev_chunk: np.ndarray | None = None,
         rtc_config: "RTCConfig | None" = None,
+        num_inference_steps: int | None = None,
     ) -> np.ndarray:
         """Predict one action chunk as a plain array.
 
@@ -195,6 +198,11 @@ class PolicyInference:
             rtc_config: Real-time chunking configuration. Required whenever
                 ``prev_chunk`` is given; when given alone, applies RTC sampler
                 overrides to an unguided bootstrap chunk.
+            num_inference_steps: Sampler steps for the unguided path, for models
+                that expose a step count. ``None`` uses the model's own setting,
+                which for ``DiffusionPolicy`` is the offline default of 100 and
+                far too slow for a control loop. Ignored when ``rtc_config`` is
+                given, since that carries its own override.
 
         Returns:
             np.ndarray: Unnormalized actions with shape
@@ -209,7 +217,9 @@ class PolicyInference:
         batch = self._preprocess(sync_point)
 
         if prev_chunk is None and rtc_config is None:
-            return self._unguided_action_chunk(batch)
+            return self._unguided_action_chunk(
+                batch, num_inference_steps=num_inference_steps
+            )
 
         from neuracore.ml.utils.real_time_chunking import (
             missing_rtc_attributes,
@@ -273,7 +283,38 @@ class PolicyInference:
                 pieces.append(tensor)
         return torch.cat(pieces, dim=-1)
 
-    def _unguided_action_chunk(self, batch: BatchedInferenceInputs) -> np.ndarray:
+    @contextmanager
+    def _sampler_steps(self, num_inference_steps: int | None) -> Iterator[None]:
+        """Temporarily override the model's sampler step count.
+
+        ``DiffusionPolicy._conditional_sample`` and ``_flow_matching_sample``
+        read ``self.num_inference_steps`` directly and take no parameter, so an
+        attribute swap is the only lever. Restored unconditionally; a no-op for
+        models with no step count (ACT, CNNMLP).
+
+        Args:
+            num_inference_steps: Steps to use, or ``None`` to leave the model
+                untouched.
+
+        Yields:
+            None: For the duration of the override.
+        """
+        model = self.model
+        if num_inference_steps is None or not hasattr(model, "num_inference_steps"):
+            yield
+            return
+        previous = model.num_inference_steps
+        model.num_inference_steps = num_inference_steps
+        try:
+            yield
+        finally:
+            model.num_inference_steps = previous
+
+    def _unguided_action_chunk(
+        self,
+        batch: BatchedInferenceInputs,
+        num_inference_steps: int | None = None,
+    ) -> np.ndarray:
         """Run the model's ordinary sampler and return a flat action chunk.
 
         Prefers the diffusion-style ``_predict_action(batch, horizon)`` tensor
@@ -282,6 +323,8 @@ class PolicyInference:
 
         Args:
             batch: Preprocessed inference batch.
+            num_inference_steps: Sampler step override; ``None`` keeps the
+                model's own setting.
 
         Returns:
             np.ndarray: Unnormalized actions with shape ``(H, A)``.
@@ -296,7 +339,7 @@ class PolicyInference:
                 "it has no output_dims."
             )
 
-        with torch.no_grad():
+        with torch.no_grad(), self._sampler_steps(num_inference_steps):
             predict = getattr(model, "_predict_action", None)
             if predict is not None and hasattr(model, "action_normalizer"):
                 try:

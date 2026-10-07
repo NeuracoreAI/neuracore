@@ -38,6 +38,7 @@ class FakePolicyInference:
         self.guided_calls = 0
         self.delays_requested: list[int] = []
         self.execution_horizons_requested: list[int] = []
+        self.inference_steps_requested: list[int | None] = []
 
     @property
     def supports_real_time_chunking(self) -> bool:
@@ -48,8 +49,11 @@ class FakePolicyInference:
             (DataType.JOINT_TARGET_POSITIONS, f"joint_{i}") for i in range(ACTION_DIM)
         ]
 
-    def predict_action_chunk(self, sync_point, prev_chunk=None, rtc_config=None):
+    def predict_action_chunk(
+        self, sync_point, prev_chunk=None, rtc_config=None, num_inference_steps=None
+    ):
         self.calls += 1
+        self.inference_steps_requested.append(num_inference_steps)
         if self.fail_after is not None and self.calls > self.fail_after:
             raise RuntimeError("simulated inference failure")
         if prev_chunk is not None:
@@ -536,6 +540,9 @@ def test_temporal_ensemble_controller_streams_and_merges():
     assert stats.chunks > 1
     assert policy.guided_calls == 0, "TE must not use RTC-guided predict"
     assert policy.calls > 1
+    # The model's own step count is the offline default (100 for DiffusionPolicy),
+    # which cannot finish inside a control tick; TE must override it.
+    assert set(policy.inference_steps_requested) == {config.num_inference_steps}
 
 
 def test_temporal_ensemble_s1_instant_matches_act_ensembler():
@@ -544,8 +551,13 @@ def test_temporal_ensemble_s1_instant_matches_act_ensembler():
 
     horizon = 4
     m = 0.01
+    # Rows must vary within a chunk: a constant chunk is invariant to row
+    # misalignment, so it cannot distinguish a correctly aligned fusion from a
+    # shifted one.
     chunks = [
-        np.full((horizon, ACTION_DIM), float(i + 1), dtype=np.float32)
+        (float(i + 1) + np.arange(horizon, dtype=np.float32)[:, None]).repeat(
+            ACTION_DIM, axis=1
+        )
         for i in range(12)
     ]
 
@@ -561,8 +573,10 @@ def test_temporal_ensemble_s1_instant_matches_act_ensembler():
                 for i in range(ACTION_DIM)
             ]
 
-        def predict_action_chunk(self, sync_point, prev_chunk=None, rtc_config=None):
-            del sync_point, prev_chunk, rtc_config
+        def predict_action_chunk(
+            self, sync_point, prev_chunk=None, rtc_config=None, num_inference_steps=None
+        ):
+            del sync_point, prev_chunk, rtc_config, num_inference_steps
             idx = min(self.calls, len(chunks) - 1)
             self.calls += 1
             return chunks[idx].copy()
@@ -606,3 +620,91 @@ def test_temporal_ensemble_s1_instant_matches_act_ensembler():
         np.testing.assert_allclose(
             actual, want, rtol=1e-5, atol=1e-5, err_msg=f"step {i}"
         )
+
+
+class _RampPolicy:
+    """Oracle whose chunk predicted at tick ``tau`` is ``[tau, tau+1, ...]``.
+
+    The observation carries its wall tick in ``timestamp``, so a correctly
+    aligned controller must command exactly the current tick back. Tracking
+    error is therefore readable directly in ticks.
+    """
+
+    prediction_horizon = HORIZON
+    model = object()
+
+    def __init__(self, latency_ticks: int) -> None:
+        self.latency = latency_ticks * TICK
+
+    def output_action_names(self):
+        return [(DataType.JOINT_TARGET_POSITIONS, "j0")]
+
+    def predict_action_chunk(self, sync_point, prev_chunk=None, rtc_config=None, **_):
+        tau = float(sync_point.timestamp)
+        time.sleep(self.latency)
+        return (tau + np.arange(HORIZON, dtype=np.float32)).reshape(HORIZON, 1)
+
+
+class _PassThroughReplanner:
+    """Streams the fresh chunk verbatim: the no-ensembling control."""
+
+    def __init__(self, policy) -> None:
+        self._policy = policy
+
+    def replan(self, observation, prev_chunk, **_):
+        return self._policy.predict_action_chunk(observation)
+
+
+def _ramp_tracking_error(replanner_factory, latency_ticks, steps=90):
+    """Drive a ramp oracle for ``steps`` ticks; return max |commanded - ideal|."""
+    policy = _RampPolicy(latency_ticks)
+    chunker = ChunkingController(
+        policy,
+        replanner_factory(policy),
+        execution_horizon=1,
+        inference_delay=0,
+        control_hz=CONTROL_HZ,
+        adapt_inference_delay=False,
+        enforce_rtc_invariant=False,
+    )
+    tick = 0
+    errors = []
+    try:
+        chunker.start()
+        chunker.get_action(SynchronizedPoint(timestamp=float(tick), data={}))
+        assert chunker.wait_for_first_chunk(timeout=10.0)
+        for _ in range(steps):
+            action = chunker.get_action(
+                SynchronizedPoint(timestamp=float(tick), data={})
+            )
+            if action is not None:
+                errors.append(abs(float(action[0]) - tick))
+            tick += 1
+            time.sleep(TICK)
+    finally:
+        chunker.stop()
+    return max(errors[20:])  # drop warm-up
+
+
+@pytest.mark.parametrize("latency_ticks", [0, 1, 3, 6])
+def test_temporal_ensemble_stays_time_aligned_under_latency(latency_ticks):
+    """TE must not degrade tracking relative to streaming chunks without ensembling.
+
+    The ACT ensembler shifts its buffer by one row per update, but the
+    controller advances by however many ticks the replan took. Without the
+    ``advance`` correction these two clocks diverge and the error compounds -
+    at 3 ticks of latency it reached ~14 ticks on this oracle, against a
+    baseline of 1.
+    """
+    config = TemporalEnsembleConfig(execution_horizon=1, m=0.01, blend_steps=0)
+    ensembled = _ramp_tracking_error(
+        lambda policy: TemporalEnsembleReplanner(policy, config), latency_ticks
+    )
+    baseline = _ramp_tracking_error(_PassThroughReplanner, latency_ticks)
+
+    # One tick of slack over the no-ensembling baseline covers scheduling jitter;
+    # the pre-fix drift was an order of magnitude larger than that.
+    assert ensembled <= baseline + 1.0, (
+        f"temporal ensembling lost time alignment at {latency_ticks} ticks of "
+        f"latency: max error {ensembled:.2f} vs baseline {baseline:.2f}"
+    )

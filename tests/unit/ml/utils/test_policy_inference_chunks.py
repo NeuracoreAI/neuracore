@@ -233,3 +233,66 @@ def test_predict_action_chunk_leaves_the_model_in_eval_and_grad_free(
     assert all(
         param.grad is None for param in policy_inference.model.parameters()
     ), "guidance must not accumulate gradients on model weights"
+
+
+def test_unguided_chunk_honours_the_inference_step_override(policy_inference):
+    """Async callers must be able to escape the model's 100-step offline default.
+
+    ``_conditional_sample`` reads ``self.num_inference_steps`` directly and
+    takes no parameter, so this is the only lever a control loop has.
+    """
+    model = policy_inference.model
+    model.num_inference_steps = 100
+    seen: list[int] = []
+    original = model.noise_scheduler.set_timesteps
+
+    def spy(num_inference_steps, *args, **kwargs):
+        seen.append(num_inference_steps)
+        return original(num_inference_steps, *args, **kwargs)
+
+    model.noise_scheduler.set_timesteps = spy
+    try:
+        policy_inference.predict_action_chunk(_sync_point(), num_inference_steps=4)
+    finally:
+        model.noise_scheduler.set_timesteps = original
+
+    assert seen == [4]
+    assert model.num_inference_steps == 100, "the override must be restored"
+
+
+def test_unguided_chunk_restores_steps_when_sampling_raises(policy_inference):
+    """A failed replan must not leave the model on the overridden step count."""
+    model = policy_inference.model
+    model.num_inference_steps = 100
+    original = model.noise_scheduler.set_timesteps
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sampling blew up")
+
+    model.noise_scheduler.set_timesteps = boom
+    try:
+        with pytest.raises(RuntimeError, match="blew up"):
+            policy_inference.predict_action_chunk(_sync_point(), num_inference_steps=4)
+    finally:
+        model.noise_scheduler.set_timesteps = original
+
+    assert model.num_inference_steps == 100
+
+
+def test_unguided_chunk_without_override_uses_the_model_setting(policy_inference):
+    model = policy_inference.model
+    model.num_inference_steps = 3
+    seen: list[int] = []
+    original = model.noise_scheduler.set_timesteps
+
+    def spy(num_inference_steps, *args, **kwargs):
+        seen.append(num_inference_steps)
+        return original(num_inference_steps, *args, **kwargs)
+
+    model.noise_scheduler.set_timesteps = spy
+    try:
+        policy_inference.predict_action_chunk(_sync_point())
+    finally:
+        model.noise_scheduler.set_timesteps = original
+
+    assert seen == [3]

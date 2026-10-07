@@ -5,7 +5,11 @@
 # Evaluation modes:
 #   omit / endpoint     — remote endpoint + open-loop chunking (default)
 #   realtime_chunking   — in-process RTC (diffusion / flow only)
-#   temporal_ensemble   — in-process async temporal-ensemble merge
+#   temporal_ensemble   — in-process async temporal-ensemble merge. Optional
+#                         ``num_inference_steps`` overrides the sampler step
+#                         count for models that have one; needed for diffusion,
+#                         whose offline default of 100 cannot finish inside a
+#                         control tick. Omit it for ACT / CNNMLP.
 algorithms:
   - name: CNNMLP
     algorithm_config:
@@ -48,15 +52,10 @@ algorithms:
       - min_success_rate: 0.4
       - mode: realtime_chunking
         min_success_rate: 0.4
-        control_hz: 50
+        control_hz: 20
         inference_delay: 8
         execution_horizon: 16
         adapt_inference_delay: true
-      - mode: temporal_ensemble
-        min_success_rate: 0.4
-        control_hz: 50
-        execution_horizon: 1
-        m: 0.01
 
   - name: Pi0
     min_success_rate: 0.0

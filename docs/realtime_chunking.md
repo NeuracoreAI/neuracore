@@ -42,7 +42,10 @@ policy = nc.policy_realtime(
     # mode="temporal_ensemble",
     # config=TemporalEnsembleConfig(execution_horizon=1, m=0.01),  # ACT every step
     control_hz=CONTROL_HZ,
+    adapt_inference_delay=True,  # RTC only; ignored for temporal_ensemble
 )
+
+# On hardware: size d from measured latency, then replace_config (see below).
 
 policy.start()
 # Seed an observation so the inference thread can produce the first chunk.
@@ -86,23 +89,78 @@ Replan:           obs@s → inference → swap (~s+d for RTC; ~immediate for TE)
   the new chunk was being generated.
 - `execution_horizon` (`s`): minimum actions consumed before replan; may grow
   with measured latency when `adapt_inference_delay=True`.
-- Must satisfy `d <= s <= H - d`.
-- Optional: `num_inference_steps`, `force_ddim`, `max_guidance_weight`.
+- Must satisfy `d <= s <= H - d` (equivalently `d <= s` and `d <= H - s`).
+- `num_inference_steps`: denoising steps for the RTC path (default `10`). Keep
+  this small enough that guided inference fits in the `H - s` buffer.
+- `force_ddim` (default `True`): use deterministic DDIM even if the model was
+  trained with DDPM. The frozen prefix must converge; a stochastic sampler
+  can break the RTC alignment.
+- `max_guidance_weight`: clip on guidance weight (`beta`; paper default `5`).
 
-Use `policy.benchmark(sync_point)` to time guided inference and size `d` / `s`
-before going on hardware.
+Pass `adapt_inference_delay=True` to `policy_realtime` (the default) so the
+controller can grow `d` and `s` when measured latency exceeds the configured
+delay. Set it `False` only when you want a fixed budget.
+
+### Sizing `d` / `s` before hardware
+
+Do not guess `d` on a real robot. Time guided inference on a representative
+observation, set `d` from the **worst** sample, then validate the real-time
+constraint before starting the controller:
+
+```python
+import math
+
+H = policy.prediction_horizon
+s = 16  # or int(H * 0.25), etc.
+tick = 1.0 / CONTROL_HZ
+
+# Provisional config so benchmark uses the intended denoise settings.
+policy.replace_config(
+    RTCConfig(inference_delay=1, execution_horizon=s),
+    control_hz=CONTROL_HZ,
+    adapt_inference_delay=True,
+)
+
+durations = policy.benchmark(observation, iterations=10)  # ascending seconds
+d = max(1, math.ceil(durations[-1] / tick))  # worst-case ticks
+assert d <= s and d <= H - s, (
+    f"Real-time constraint violated: d={d}, s={s}, H-s={H - s}. "
+    "Lower num_inference_steps, raise s, or lower CONTROL_HZ."
+)
+
+policy.replace_config(
+    RTCConfig(inference_delay=d, execution_horizon=s),
+    control_hz=CONTROL_HZ,
+)
+```
+
+`replace_config` updates the session and drops any existing controller, so call
+it **before** `start()` (or stop first if you are mid-session).
 
 ### Temporal ensemble (`TemporalEnsembleConfig`)
 
-Async TE now drives the same :class:`~neuracore.ml.utils.temporal_ensemble.ACTTemporalEnsembler`
-used by classic ACT (positive ``m`` favors **older** predictions):
+Async TE drives the same `ACTTemporalEnsembler` used by classic ACT (positive
+`m` favors **older** predictions). Because inference runs in the background,
+several control ticks can pass between updates; the controller tells the
+ensembler how many, so the rows it fuses stay aligned to the same wall-clock
+ticks rather than to the update count.
 
 - `execution_horizon` (`s`): actions per chunk before replan. Default **`1`**
-  (predict every control tick). Larger ``s`` only updates the ensembler every
-  ``s`` ticks.
-- `m`: ACT exponential decay (default ``0.01``).
-- `blend_steps`: optional continuity lerp of the chunk head (default ``0``;
+  (replan as often as possible). Larger `s` only updates the ensembler every
+  `s` ticks, so fewer predictions are averaged per tick.
+- `m`: ACT exponential decay (default `0.01`).
+- `blend_steps`: optional continuity lerp of the chunk head (default `0`;
   leave at 0 for ACT-matched behaviour).
+- `num_inference_steps`: sampler steps for models that have a step count
+  (default `10`). Ignored by ACT and CNNMLP. **Do not leave this at the model
+  default for a diffusion policy** — `DiffusionPolicy` ships with the offline
+  default of 100 denoising steps, which cannot finish inside a control tick.
+  `None` keeps whatever the model was built with.
+
+With `s = 1` and inference that completes within one control tick, this is
+exactly the synchronous predict-every-step ACT loop. As latency grows the
+ensemble simply averages fewer, staler predictions per tick — it stays
+correctly aligned, but the benefit shrinks.
 
 Standalone use without the async controller:
 
@@ -111,10 +169,38 @@ from neuracore.ml.utils.temporal_ensemble import ACTTemporalEnsembler
 
 ens = ACTTemporalEnsembler(m=0.01, chunk_size=policy.prediction_horizon)
 while running:
-    chunk = policy._policy.predict_action_chunk(observation)  # (H, A)
-    action = ens.update(chunk)  # (A,)
+    chunk = predict_chunk(observation)  # (H, A), your own inference call
+    # `advance` is the number of control ticks since the previous update; it is
+    # always 1 in a synchronous predict-every-step loop like this one.
+    action = ens.update(chunk, advance=1)  # (A,)
     send_to_robot(action)
 ```
+
+## Monitoring (`stats()`)
+
+After (or during) a run, inspect chunking health:
+
+```python
+stats = policy.stats()
+print(
+    f"chunks={stats.chunks} d={stats.inference_delay} "
+    f"s={stats.execution_horizon} "
+    f"deadline_misses={stats.deadline_misses} "
+    f"stalled_ticks={stats.stalled_ticks} "
+    f"median_latency_ms={stats.median_latency_s * 1e3:.1f}"
+)
+```
+
+| Field | Meaning |
+|-------|---------|
+| `inference_delay` / `execution_horizon` | Current `d` / `s` (may have adapted) |
+| `median_latency_s` | Typical replan time |
+| `deadline_misses` | RTC chunks that landed after the planned `d` ticks |
+| `stalled_ticks` | Ticks that repeated the last action because the chunk was exhausted |
+
+Rising `deadline_misses` or `stalled_ticks` usually means inference is too slow
+for the configured budget — raise `s`, lower `num_inference_steps`, or lower
+`control_hz`.
 
 ## Example
 

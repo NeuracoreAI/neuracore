@@ -188,7 +188,9 @@ class TemporalEnsembleReplanner:
         del inference_delay, execution_horizon  # TE swaps as soon as ready
         from neuracore.ml.utils.temporal_ensemble import continuity_blend
 
-        new_chunk = self._policy.predict_action_chunk(observation)
+        new_chunk = self._policy.predict_action_chunk(
+            observation, num_inference_steps=self._config.num_inference_steps
+        )
         horizon = int(new_chunk.shape[0])
         if self._ensembler is None or self._ensembler.chunk_size != horizon:
             from neuracore.ml.utils.temporal_ensemble import ACTTemporalEnsembler
@@ -196,8 +198,15 @@ class TemporalEnsembleReplanner:
             self._ensembler = ACTTemporalEnsembler(self._config.m, horizon)
         if prev_chunk is None:
             self._ensembler.reset()
+            advance = 1
+        else:
+            # The controller snapshots once ``ticks_consumed`` actions have been
+            # taken from the previous chunk, and it snapshots at the tick that
+            # chunk's row 0 belongs to -- so ``ticks_consumed`` is exactly the
+            # wall-clock gap between this prediction and the previous one.
+            advance = max(int(ticks_consumed), 1)
 
-        action = self._ensembler.update(new_chunk)
+        action = self._ensembler.update(new_chunk, advance=advance)
         assert self._ensembler.ensembled_actions is not None
         # Controller expects an H-row chunk; index 0 is the action just popped.
         merged = np.concatenate(

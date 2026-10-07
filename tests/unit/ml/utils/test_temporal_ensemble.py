@@ -68,3 +68,52 @@ def test_act_temporal_ensembler_reset_clears_buffer():
     ens.update(np.ones((3, 1)))
     ens.reset()
     assert not ens.is_warm
+
+
+@pytest.mark.parametrize("advance", [1, 2, 3, 5, 8, 11])
+def test_act_ensembler_tracks_a_consistent_oracle_at_any_advance(advance):
+    """Ensembling a self-consistent oracle must be lossless at any spacing.
+
+    Every chunk here agrees with every other about the action for a given wall
+    tick (chunk predicted at ``t`` is ``[t, t+1, ...]``), so any convex
+    combination of correctly aligned rows is still exactly that action. A
+    non-zero error therefore means rows belonging to different ticks were
+    fused - which is what happens when the buffer is shifted by one update
+    instead of by the ticks that actually elapsed.
+    """
+    horizon = 8
+    ens = ACTTemporalEnsembler(m=0.1, chunk_size=horizon)
+    for tick in range(0, 40, advance):
+        chunk = (tick + np.arange(horizon, dtype=np.float64)).reshape(horizon, 1)
+        action = ens.update(chunk, advance=advance)
+        np.testing.assert_allclose(
+            action, [float(tick)], atol=1e-9, err_msg=f"tick {tick}"
+        )
+
+
+def test_act_ensembler_advance_drops_elapsed_rows():
+    """``advance`` discards the buffer rows whose ticks already executed."""
+    ens = ACTTemporalEnsembler(m=0.0, chunk_size=4)
+    # Emits tick 0; the buffer then holds ticks 1, 2, 3 as 1.0, 2.0, 3.0.
+    ens.update(np.arange(4, dtype=np.float64).reshape(4, 1))
+    # Three ticks later ticks 1 and 2 have executed, so only tick 3 survives to
+    # be fused; the new chunk covers ticks 3, 4, 5, 6.
+    emitted = ens.update(np.full((4, 1), 100.0), advance=3)
+    # m=0 → equal weights → tick 3 is the mean of the old 3.0 and the new 100.0.
+    np.testing.assert_allclose(emitted, [51.5])
+    # Ticks 4, 5, 6 had no prior prediction, so they enter unweighted.
+    np.testing.assert_allclose(ens.ensembled_actions, np.full((3, 1), 100.0))
+
+
+def test_act_ensembler_advance_beyond_horizon_starts_clean():
+    ens = ACTTemporalEnsembler(m=0.0, chunk_size=4)
+    ens.update(np.zeros((4, 1)))
+    merged = ens.update(np.full((4, 1), 7.0), advance=9)
+    np.testing.assert_allclose(merged, [7.0])
+    np.testing.assert_allclose(ens.ensembled_actions, np.full((3, 1), 7.0))
+
+
+def test_act_ensembler_rejects_non_positive_advance():
+    ens = ACTTemporalEnsembler(m=0.01, chunk_size=4)
+    with pytest.raises(ValueError, match="advance"):
+        ens.update(np.ones((4, 1)), advance=0)

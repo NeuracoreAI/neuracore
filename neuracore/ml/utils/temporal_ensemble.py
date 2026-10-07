@@ -3,9 +3,9 @@
 Two forms live here:
 
 * :class:`ACTTemporalEnsembler` — classic ACT Algorithm 2 (predict every
-  control step). Used by the async
-  :class:`~neuracore.ml.utils.rtc_controller.TemporalEnsembleReplanner`
-  when ``execution_horizon=1``.
+  control step), extended with an ``advance`` argument so it stays aligned
+  to wall-clock ticks when a background thread drives it. Used by the async
+  :class:`~neuracore.ml.utils.rtc_controller.TemporalEnsembleReplanner`.
 * :func:`temporal_ensemble_merge` — pairwise two-chunk blend with the same
   ACT (favor-older) weights; kept for tests and sync prefetch helpers.
 """
@@ -15,6 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+
+# Mirrors real_time_chunking.DEFAULT_RTC_INFERENCE_STEPS. Duplicated rather
+# than imported so this module stays numpy-only: real_time_chunking pulls in
+# torch and diffusers.
+DEFAULT_TE_INFERENCE_STEPS = 10
 
 
 @dataclass(frozen=True)
@@ -34,11 +39,19 @@ class TemporalEnsembleConfig:
         blend_steps: Optional continuity lerp of the first N actions of a
             newly produced chunk toward the previous remaining head. ``0``
             disables it (recommended for ACT-matched behaviour).
+        num_inference_steps: Sampler steps for models that have a step count
+            (diffusion / flow matching); ignored by models that do not, such
+            as ACT and CNNMLP. Defaults to
+            :data:`DEFAULT_TE_INFERENCE_STEPS` rather than the model's own
+            setting, which for ``DiffusionPolicy`` is the offline default of
+            100 and cannot finish inside a control tick. ``None`` keeps
+            whatever the model was built with.
     """
 
     execution_horizon: int = 1
     m: float = 0.01
     blend_steps: int = 0
+    num_inference_steps: int | None = DEFAULT_TE_INFERENCE_STEPS
 
 
 def temporal_ensemble_merge(
@@ -146,9 +159,11 @@ class ACTTemporalEnsembler:
     it returns the ensembled action for the current step and shifts the buffer.
 
     The async :class:`~neuracore.ml.utils.rtc_controller.TemporalEnsembleReplanner`
-    feeds each background prediction into this class. With
+    feeds each background prediction into this class, passing ``advance`` so
+    the buffer tracks wall-clock ticks rather than update count. With
     ``execution_horizon=1`` and inference that finishes within one control
-    tick, behaviour matches the synchronous predict-every-step loop.
+    tick, ``advance`` is always 1 and behaviour is identical to the
+    synchronous predict-every-step loop.
     """
 
     def __init__(self, m: float, chunk_size: int) -> None:
@@ -176,13 +191,26 @@ class ACTTemporalEnsembler:
         """True once at least one chunk has been ingested."""
         return self.ensembled_actions is not None
 
-    def update(self, actions: np.ndarray) -> np.ndarray:
+    def update(self, actions: np.ndarray, advance: int = 1) -> np.ndarray:
         """Ingest one predicted chunk and pop the next ensembled action.
+
+        Row ``i`` of the buffer is the ensembled action for control tick
+        ``t + i``, where ``t`` is the tick this chunk was predicted for. Row 0
+        of ``actions`` must therefore line up with row 0 of the buffer before
+        they are fused, which is what ``advance`` restores: the caller may have
+        let several ticks pass since the previous update, and the rows covering
+        them have already executed.
 
         Args:
             actions: Shape ``(chunk_size, action_dim)``. Truncated or padded
                 with the last row if the model horizon differs from
                 ``chunk_size``.
+            advance: Control ticks between the previous update's tick and this
+                one. ``1`` is the synchronous predict-every-step case (classic
+                ACT / LeRobot). Larger values drop the ``advance - 1`` leading
+                buffer rows whose ticks have already elapsed; without that the
+                fused pairs are offset by ``advance - 1`` ticks and the error
+                compounds across updates.
 
         Returns:
             Shape ``(action_dim,)`` action to execute this step.
@@ -190,6 +218,8 @@ class ACTTemporalEnsembler:
         actions = np.asarray(actions, dtype=np.float64)
         if actions.ndim != 2:
             raise ValueError(f"actions must be 2-D, got shape {actions.shape}")
+        if advance < 1:
+            raise ValueError(f"advance must be >= 1, got {advance}")
         if actions.shape[0] != self.chunk_size:
             actions = _resize_chunk(actions, self.chunk_size)
 
@@ -198,27 +228,34 @@ class ACTTemporalEnsembler:
             self.ensembled_actions_count = np.ones((self.chunk_size, 1), dtype=np.int64)
         else:
             assert self.ensembled_actions_count is not None
-            count = self.ensembled_actions_count
-            overlap = actions[:-1]
-            if self.ensembled_actions.shape[0] != overlap.shape[0]:
-                raise RuntimeError(
-                    "ACT ensembler buffer length mismatch: "
-                    f"{self.ensembled_actions.shape[0]} vs {overlap.shape[0]}"
-                )
-            idx = np.clip(count[:, 0] - 1, 0, self.chunk_size - 1)
-            new_idx = np.clip(count[:, 0], 0, self.chunk_size - 1)
-            self.ensembled_actions = (
-                self.ensembled_actions * self.weights_cumsum[idx, None]
-                + overlap * self.weights[new_idx, None]
-            ) / self.weights_cumsum[new_idx, None]
-            self.ensembled_actions_count = np.clip(count + 1, 1, self.chunk_size)
+            # Discard the rows whose ticks are already in the past. An advance
+            # of at least chunk_size empties the buffer, which is correct:
+            # nothing the old chunks predicted still overlaps the new one.
+            if advance > 1:
+                self.ensembled_actions = self.ensembled_actions[advance - 1 :]
+                self.ensembled_actions_count = self.ensembled_actions_count[
+                    advance - 1 :
+                ]
+            overlap_len = self.ensembled_actions.shape[0]
+            if overlap_len:
+                count = self.ensembled_actions_count
+                overlap = actions[:overlap_len]
+                idx = np.clip(count[:, 0] - 1, 0, self.chunk_size - 1)
+                new_idx = np.clip(count[:, 0], 0, self.chunk_size - 1)
+                self.ensembled_actions = (
+                    self.ensembled_actions * self.weights_cumsum[idx, None]
+                    + overlap * self.weights[new_idx, None]
+                ) / self.weights_cumsum[new_idx, None]
+                self.ensembled_actions_count = np.clip(count + 1, 1, self.chunk_size)
+            # Ticks the buffer did not reach yet enter the ensemble unweighted.
+            tail = actions[overlap_len:]
             self.ensembled_actions = np.concatenate(
-                [self.ensembled_actions, actions[-1:]], axis=0
+                [self.ensembled_actions, tail], axis=0
             )
             self.ensembled_actions_count = np.concatenate(
                 [
                     self.ensembled_actions_count,
-                    np.ones((1, 1), dtype=np.int64),
+                    np.ones((tail.shape[0], 1), dtype=np.int64),
                 ],
                 axis=0,
             )

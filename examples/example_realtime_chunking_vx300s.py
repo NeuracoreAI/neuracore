@@ -37,7 +37,10 @@ from neuracore_types import (
 
 import neuracore as nc
 from neuracore.ml.utils.real_time_chunking import RTCConfig
-from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
+from neuracore.ml.utils.temporal_ensemble import (
+    DEFAULT_TE_INFERENCE_STEPS,
+    TemporalEnsembleConfig,
+)
 
 TRAINING_JOB_NAME = "MyTrainingJob"
 # MuJoCo camera name vs Neuracore stream name used in the Transfer Cube dataset.
@@ -126,6 +129,17 @@ def _parse_args() -> argparse.Namespace:
         help="ACT temporal-ensemble decay m (positive favors older)",
     )
     parser.add_argument(
+        "--ensemble-steps",
+        type=int,
+        default=DEFAULT_TE_INFERENCE_STEPS,
+        help=(
+            "Sampler steps per temporal-ensemble replan, for models that have "
+            "a step count. Ignored by ACT / CNNMLP; a diffusion policy's own "
+            "default is 100, far too slow for a control loop "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--num-rollouts",
         type=int,
         default=NUM_ROLLOUTS,
@@ -166,6 +180,7 @@ def main() -> None:
         config = TemporalEnsembleConfig(
             execution_horizon=execution_horizon,
             m=float(args.ensemble_m),
+            num_inference_steps=int(args.ensemble_steps),
         )
         adapt = False
 

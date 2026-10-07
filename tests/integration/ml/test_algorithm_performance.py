@@ -106,6 +106,11 @@ OUTPUT_EMBODIMENT_DESCRIPTION = {
 }
 
 
+# Distinguishes "key absent" (keep the dataclass default) from an explicit
+# ``num_inference_steps: null`` (keep whatever the model was trained with).
+_UNSET = object()
+
+
 def _evaluation_label(evaluation: dict[str, Any]) -> str:
     """Human-readable name for an evaluation variant."""
     mode = evaluation.get("mode") or "endpoint"
@@ -345,10 +350,16 @@ def _evaluate_realtime(
         adapt = bool(evaluation.get("adapt_inference_delay", True))
     elif mode == "temporal_ensemble":
         api_mode = "temporal_ensemble"
+        steps = evaluation.get("num_inference_steps", _UNSET)
         config = TemporalEnsembleConfig(
             execution_horizon=int(evaluation["execution_horizon"]),
             m=float(evaluation.get("m", 0.01)),
             blend_steps=int(evaluation.get("blend_steps", 0)),
+            **(
+                {}
+                if steps is _UNSET
+                else {"num_inference_steps": None if steps is None else int(steps)}
+            ),
         )
         adapt = False
     else:
