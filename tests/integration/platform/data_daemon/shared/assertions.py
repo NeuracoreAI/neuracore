@@ -28,6 +28,10 @@ compare afterwards to detect artefact leaks:
 offline recording session:
 :func:`assert_db_contents`, :func:`assert_disk_traces`.
 
+**Owed-frame assertions** — verify the frames each recording owes, as the
+producer logged them:
+:func:`assert_owed_frames`.
+
 **Online verification** — download the cloud dataset and verify every episode's
 data matches what was logged:
 :func:`verify_cloud_results` (structural + data passes),
@@ -82,6 +86,7 @@ if TYPE_CHECKING:
     )
     from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
+        RecordingExpectedTimestamps,
     )
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -194,6 +199,27 @@ def assert_daemon_cleanup() -> None:
     assert_no_daemon_pids()
     assert_no_pid_file()
     assert_no_producer_processes()
+
+
+# ---------------------------------------------------------------------------
+# Owed-frame assertions
+# ---------------------------------------------------------------------------
+
+
+def assert_owed_frames(
+    expected_by_recording: dict[str, RecordingExpectedTimestamps],
+) -> None:
+    """Assert no frame a recording owes breached the logging deadline."""
+    for disk_key, expected in expected_by_recording.items():
+        for trace_key, classification in expected.by_trace.items():
+            breaching = [
+                frame for frame in classification.owed if frame.deadline_breaches
+            ]
+            assert not breaching, (
+                f"{trace_key} logged {len(breaching)} frame(s) inside "
+                f"recording {disk_key} that breached the logging deadline: "
+                f"{breaching[0].deadline_breaches}"
+            )
 
 
 # ---------------------------------------------------------------------------
