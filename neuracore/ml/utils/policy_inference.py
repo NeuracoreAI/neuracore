@@ -4,8 +4,9 @@ import logging
 import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+import numpy as np
 import torch
 from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
@@ -30,6 +31,9 @@ from neuracore.ml.utils.preprocessing import (
     apply_preprocessing_methods,
     validate_preprocessing_configuration,
 )
+
+if TYPE_CHECKING:
+    from neuracore.ml.utils.real_time_chunking import RTCConfig
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +126,122 @@ class PolicyInference:
         self.prediction_horizon = (
             self.model.model_init_description.output_prediction_horizon
         )
+
+    @property
+    def supports_real_time_chunking(self) -> bool:
+        """Whether the loaded model exposes the hooks real-time chunking needs."""
+        from neuracore.ml.utils.real_time_chunking import supports_real_time_chunking
+
+        return supports_real_time_chunking(self.model)
+
+    def output_action_names(self) -> list[tuple[DataType, str | None]]:
+        """Describe the column layout of a raw action chunk.
+
+        Entry ``i`` names the sensor that column ``i`` of the ``(T, action_dim)``
+        array produced by :meth:`predict_action_chunk` belongs to. ``None`` marks
+        a cross-embodiment padding column with no sensor in this embodiment.
+
+        Returns:
+            list[tuple[DataType, str | None]]: One entry per action column.
+        """
+        names: list[tuple[DataType, str | None]] = []
+        for data_type in self.model.ordered_output_data_types:
+            start_idx, end_idx = self.model.output_dims[data_type]
+            indexed = self.output_embodiment_description.get(data_type, {})
+            for index in range(end_idx - start_idx):
+                names.append((data_type, indexed.get(index)))
+        return names
+
+    def predict_action_chunk(
+        self,
+        sync_point: SynchronizedPoint,
+        prev_chunk: np.ndarray | None = None,
+        rtc_config: "RTCConfig | None" = None,
+    ) -> np.ndarray:
+        """Predict one action chunk as a plain array.
+
+        Bypasses the per-sensor dict that :meth:`__call__` builds, which matters
+        when a real-time control loop replans several times a second. Column
+        order is described by :meth:`output_action_names`.
+
+        Without ``prev_chunk`` / ``rtc_config``, runs the model's ordinary
+        unguided sampler (any policy exposing ``_predict_action`` and an action
+        normalizer). With RTC arguments, requires a diffusion/flow model with
+        real-time chunking hooks.
+
+        Args:
+            sync_point: Observation to condition on.
+            prev_chunk: Previously predicted chunk with shape
+                ``(prediction_horizon, action_dim)``, already aligned to the new
+                chunk's timeline. ``None`` predicts without guidance.
+            rtc_config: Real-time chunking configuration. Required whenever
+                ``prev_chunk`` is given; when given alone, applies RTC sampler
+                overrides to an unguided bootstrap chunk.
+
+        Returns:
+            np.ndarray: Unnormalized actions with shape
+            ``(prediction_horizon, action_dim)``.
+
+        Raises:
+            ValueError: If ``prev_chunk`` is supplied without ``rtc_config``, or
+                the loaded model cannot produce an action chunk.
+        """
+        sync_point = sync_point.order(self.input_embodiment_description)
+        self._validate_input_sync_point(sync_point)
+        batch = self._preprocess(sync_point)
+
+        if prev_chunk is None and rtc_config is None:
+            return self._unguided_action_chunk(batch)
+
+        from neuracore.ml.utils.real_time_chunking import (
+            missing_rtc_attributes,
+            rtc_predict_actions,
+        )
+
+        if prev_chunk is not None and rtc_config is None:
+            raise ValueError("rtc_config is required when prev_chunk is provided.")
+        missing = missing_rtc_attributes(self.model)
+        if missing:
+            raise ValueError(
+                f"Real-time chunking is not supported for "
+                f"{type(self.model).__name__}: it is missing {', '.join(missing)}. "
+                "Real-time chunking requires a diffusion policy."
+            )
+
+        prev_tensor = None
+        if prev_chunk is not None:
+            prev_tensor = torch.as_tensor(
+                prev_chunk, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+
+        chunk = rtc_predict_actions(self.model, batch, prev_tensor, rtc_config)
+        return chunk[0].detach().cpu().numpy()
+
+    def _unguided_action_chunk(self, batch: BatchedInferenceInputs) -> np.ndarray:
+        """Run the model's ordinary sampler and return a flat action chunk.
+
+        Args:
+            batch: Preprocessed inference batch.
+
+        Returns:
+            np.ndarray: Unnormalized actions with shape ``(H, A)``.
+
+        Raises:
+            ValueError: If the model lacks the hooks needed to produce a chunk.
+        """
+        model = self.model
+        if not hasattr(model, "_predict_action") or not hasattr(
+            model, "action_normalizer"
+        ):
+            raise ValueError(
+                f"{type(model).__name__} cannot produce a raw action chunk: "
+                "it is missing _predict_action or action_normalizer."
+            )
+        horizon = self.prediction_horizon
+        with torch.no_grad():
+            normalized = model._predict_action(batch, horizon)
+            chunk = model.action_normalizer.unnormalize(normalized)
+        return chunk[0].detach().cpu().numpy()
 
     def _preprocess(self, sync_point: SynchronizedPoint) -> BatchedInferenceInputs:
         """Preprocess incoming sync point into model-compatible format.

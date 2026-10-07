@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 from subprocess import Popen
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import requests
 from neuracore_types import DataType, EmbodimentDescription, SynchronizedPoint
@@ -27,6 +27,10 @@ from neuracore.core.utils.http_session import thread_local_session
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
+
+    from neuracore.ml.utils.real_time_chunking import RTCConfig
+    from neuracore.ml.utils.rtc_controller import ChunkingController, ChunkingStats
+    from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
@@ -210,6 +214,279 @@ class DirectPolicy(Policy):
         sync_point.data = filtered_data
 
         return self._policy(sync_point)
+
+
+class RealTimePolicy(DirectPolicy):
+    """In-process policy with an async overlapping-chunk controller.
+
+    Supports two mutually exclusive modes bound at construction:
+
+    * ``"rtc"`` — guided denoising (diffusion/flow only; arXiv:2506.07339)
+    * ``"temporal_ensemble"`` — unguided predict + exponential merge
+
+    Drive execution with :meth:`start` / :meth:`get_action` / :meth:`stop`.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        mode: str,
+        config: "RTCConfig | TemporalEnsembleConfig",
+        control_hz: float,
+        adapt_inference_delay: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the realtime policy and validate mode/config.
+
+        Args:
+            *args: Forwarded to :class:`DirectPolicy`.
+            mode: ``"rtc"`` or ``"temporal_ensemble"``.
+            config: Mode-specific configuration.
+            control_hz: Rate at which :meth:`get_action` will be called.
+            adapt_inference_delay: For RTC, track measured latency with ``d``.
+                Ignored for temporal ensemble.
+            **kwargs: Forwarded to :class:`DirectPolicy`.
+
+        Raises:
+            EndpointError: If mode/config are inconsistent or RTC is requested
+                for a model without the required hooks.
+            ValueError: If ``mode`` is unknown.
+        """
+        super().__init__(*args, **kwargs)
+        if mode not in ("rtc", "temporal_ensemble"):
+            raise ValueError(
+                f"Unknown realtime mode {mode!r}; expected 'rtc' or "
+                "'temporal_ensemble'."
+            )
+        self._mode = mode
+        self._realtime_config = config
+        self._control_hz = control_hz
+        self._adapt_inference_delay = adapt_inference_delay
+        self._controller: ChunkingController | None = None
+
+        if mode == "rtc":
+            from neuracore.ml.utils.real_time_chunking import RTCConfig
+
+            if not isinstance(config, RTCConfig):
+                raise EndpointError(
+                    "mode='rtc' requires an RTCConfig; " f"got {type(config).__name__}."
+                )
+            if not self._policy.supports_real_time_chunking:
+                raise EndpointError(
+                    "Real-time chunking requires a diffusion policy; the loaded "
+                    f"model is a {type(self._policy.model).__name__}."
+                )
+        else:
+            from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
+
+            if not isinstance(config, TemporalEnsembleConfig):
+                raise EndpointError(
+                    "mode='temporal_ensemble' requires a TemporalEnsembleConfig; "
+                    f"got {type(config).__name__}."
+                )
+
+    @property
+    def mode(self) -> str:
+        """Realtime execution mode bound at construction."""
+        return self._mode
+
+    @property
+    def prediction_horizon(self) -> int:
+        """Number of actions in a chunk, as the model was trained."""
+        return self._policy.prediction_horizon
+
+    @property
+    def action_names(self) -> list[tuple[DataType, str | None]]:
+        """Column layout of a raw action chunk."""
+        return self._policy.output_action_names()
+
+    def replace_config(
+        self,
+        config: "RTCConfig | TemporalEnsembleConfig",
+        *,
+        control_hz: float | None = None,
+        adapt_inference_delay: bool | None = None,
+    ) -> None:
+        """Replace session config (e.g. after latency sizing) and drop the controller.
+
+        Args:
+            config: New mode-specific configuration (must match ``mode``).
+            control_hz: Optional updated control rate.
+            adapt_inference_delay: Optional RTC adaptation flag.
+        """
+        if self._mode == "rtc":
+            from neuracore.ml.utils.real_time_chunking import RTCConfig
+
+            if not isinstance(config, RTCConfig):
+                raise EndpointError(
+                    "mode='rtc' requires an RTCConfig; " f"got {type(config).__name__}."
+                )
+        else:
+            from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
+
+            if not isinstance(config, TemporalEnsembleConfig):
+                raise EndpointError(
+                    "mode='temporal_ensemble' requires a TemporalEnsembleConfig; "
+                    f"got {type(config).__name__}."
+                )
+        if self._controller is not None:
+            self._controller.request_stop()
+        self._realtime_config = config
+        if control_hz is not None:
+            self._control_hz = control_hz
+        if adapt_inference_delay is not None:
+            self._adapt_inference_delay = adapt_inference_delay
+        self._controller = None
+
+    def make_chunker(self) -> "ChunkingController":
+        """Build the async chunk controller for this policy.
+
+        Session settings come from construction; observations are pushed via
+        :meth:`ChunkingController.get_action`.
+
+        Returns:
+            ChunkingController: Not yet started; call ``start()`` on it (or on
+            this policy).
+        """
+        from neuracore.ml.utils.rtc_controller import (
+            ChunkingController,
+            RTCReplanner,
+            TemporalEnsembleReplanner,
+        )
+
+        if self._mode == "rtc":
+            from neuracore.ml.utils.real_time_chunking import RTCConfig
+
+            assert isinstance(self._realtime_config, RTCConfig)
+            return ChunkingController(
+                self._policy,
+                RTCReplanner(self._policy, self._realtime_config),
+                execution_horizon=self._realtime_config.execution_horizon,
+                inference_delay=self._realtime_config.inference_delay,
+                control_hz=self._control_hz,
+                adapt_inference_delay=self._adapt_inference_delay,
+                enforce_rtc_invariant=True,
+            )
+
+        from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
+
+        assert isinstance(self._realtime_config, TemporalEnsembleConfig)
+        return ChunkingController(
+            self._policy,
+            TemporalEnsembleReplanner(self._policy, self._realtime_config),
+            execution_horizon=self._realtime_config.execution_horizon,
+            inference_delay=0,
+            control_hz=self._control_hz,
+            adapt_inference_delay=False,
+            enforce_rtc_invariant=False,
+        )
+
+    def start(self) -> None:
+        """Start the async chunk controller."""
+        if self._controller is None:
+            self._controller = self.make_chunker()
+        self._controller.start()
+
+    def request_stop(self) -> None:
+        """Ask the controller to stop without joining the inference thread."""
+        if self._controller is not None:
+            self._controller.request_stop()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop the controller and wait for the inference thread.
+
+        Args:
+            timeout: Seconds to wait for the thread to join.
+        """
+        if self._controller is not None:
+            self._controller.stop(timeout=timeout)
+
+    def wait_for_first_chunk(self, timeout: float = 30.0) -> bool:
+        """Block until the first action chunk is ready.
+
+        Args:
+            timeout: Seconds to wait.
+
+        Returns:
+            bool: True if a chunk is ready.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called.
+        """
+        if self._controller is None:
+            raise RuntimeError("Call start() before wait_for_first_chunk().")
+        return self._controller.wait_for_first_chunk(timeout=timeout)
+
+    def get_action(self, observation: SynchronizedPoint | None = None) -> Any:
+        """Return the next action and advance the controller cursor.
+
+        Args:
+            observation: Explicit sync point. When ``None``, falls back to
+                :func:`~neuracore.core.get_latest_sync_point.get_latest_sync_point`.
+
+        Returns:
+            The action for this tick (``np.ndarray``), or ``None`` before the
+            first chunk.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called.
+        """
+        if self._controller is None:
+            raise RuntimeError("Call start() before get_action().")
+        return self._controller.get_action(observation)
+
+    def stats(self) -> "ChunkingStats":
+        """Return chunking health counters.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called.
+        """
+        if self._controller is None:
+            raise RuntimeError("Call start() before stats().")
+        return self._controller.stats()
+
+    def benchmark(
+        self,
+        sync_point: SynchronizedPoint,
+        iterations: int = 10,
+    ) -> list[float]:
+        """Time one replan so a caller can size its execution horizon.
+
+        The first iteration is discarded as warm-up, since it pays for lazy CUDA
+        initialisation and any cuDNN autotuning.
+
+        Args:
+            sync_point: A representative observation.
+            iterations: Timed iterations to run, after the warm-up.
+
+        Returns:
+            list[float]: Per-iteration durations in seconds, ascending.
+        """
+        import time
+
+        import numpy as np
+        import torch
+
+        from neuracore.ml.utils.real_time_chunking import RTCConfig
+
+        horizon = self.prediction_horizon
+        action_dim = len(self.action_names)
+        prev_chunk = np.zeros((horizon, action_dim), dtype=np.float32)
+
+        durations = []
+        for index in range(iterations + 1):
+            started = time.monotonic()
+            if isinstance(self._realtime_config, RTCConfig):
+                self._policy.predict_action_chunk(
+                    sync_point, prev_chunk, self._realtime_config
+                )
+            else:
+                self._policy.predict_action_chunk(sync_point)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if index > 0:
+                durations.append(time.monotonic() - started)
+        return sorted(durations)
 
 
 class ServerPolicy(Policy):
@@ -674,6 +951,72 @@ def policy(
         model_path=model_path,
         device=device,
         robot_id=robot_id,
+    )
+
+
+def policy_realtime(
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
+    input_preprocessing_config: PreprocessingConfiguration | None = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
+    robot_id: str | None = None,
+    *,
+    mode: str,
+    config: "RTCConfig | TemporalEnsembleConfig",
+    control_hz: float,
+    adapt_inference_delay: bool = True,
+) -> RealTimePolicy:
+    """Launch an in-process policy with async overlapping-chunk execution.
+
+    Args:
+        input_embodiment_description: Specification of the order that will
+            be fed into the model
+        output_embodiment_description: Specification of the order that will
+            be output from the model
+        input_preprocessing_config: Preprocessing configuration for the input data.
+        train_run_name: Name of the training run to load the model from.
+        model_file: Path to the model file to load.
+        device: Torch device to run the model on (CPU or GPU, or MPS).
+        robot_id: Robot ID used to select embodiments from the model archive
+            when embodiment descriptions are not explicitly provided.
+        mode: ``"rtc"`` or ``"temporal_ensemble"`` (required; no default).
+        config: Mode-specific configuration (:class:`RTCConfig` or
+            :class:`TemporalEnsembleConfig`).
+        control_hz: Rate at which :meth:`RealTimePolicy.get_action` will be called.
+        adapt_inference_delay: For RTC, track measured latency with ``d``.
+
+    Returns:
+        RealTimePolicy ready for :meth:`~RealTimePolicy.start`.
+
+    Raises:
+        ValueError: If neither train_run_name nor model_file is provided, or
+            ``mode`` is invalid.
+    """
+    org_id = get_current_org()
+    job_id = None
+    if train_run_name is not None:
+        job_id = _get_job_id(train_run_name, org_id)
+        model_path = _download_model(job_id, org_id)
+    elif model_file is not None:
+        model_path = Path(model_file)
+    else:
+        raise ValueError("Must specify either train_run_name or model_file")
+
+    return RealTimePolicy(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        input_preprocessing_config=input_preprocessing_config,
+        org_id=org_id,
+        job_id=job_id,
+        model_path=model_path,
+        device=device,
+        robot_id=robot_id,
+        mode=mode,
+        config=config,
+        control_hz=control_hz,
+        adapt_inference_delay=adapt_inference_delay,
     )
 
 
