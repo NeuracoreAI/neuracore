@@ -17,6 +17,7 @@ from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
+from tests.integration.ml.shared.training import ACTIVE_VM_STATUSES, TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 # separate so a failure identifies whether training or deletion became stuck.
 TRAINING_TIMEOUT_MINUTES = 120
 TRAINING_POLL_SECONDS = 20
-TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
 
 # A single epoch is sufficient to produce a resumable completed run while
 # limiting the integration test's execution time and compute cost.
@@ -81,9 +81,9 @@ def _wait_for_training_to_start(job_id: str) -> str:
     while True:
         status = nc.get_training_job_status(job_id)
         logger.info("Training job %s status: %s", job_id, status)
-        # A very short run may move directly from PENDING to COMPLETED between
+        # A very short run may move directly from QUEUED to COMPLETED between
         # polls, so all terminal states must also stop this loop.
-        if status == "RUNNING" or status in TERMINAL_STATES:
+        if status in ACTIVE_VM_STATUSES or status in TERMINAL_STATES:
             return status
         assert time.time() < deadline, (
             f"Training job {job_id} did not start within "
@@ -158,8 +158,8 @@ def _assert_resume_failed_without_starting_job(
         for phrase in ("deleted", "no longer exists", "does not exist", "not found")
     ), f"Resume failure did not explain that the dataset is gone: {error_message}"
 
-    # A fail-fast validation must leave the completed job untouched. A PENDING
-    # or RUNNING transition would mean the backend accepted the resume request.
+    # A fail-fast validation must leave the completed job untouched. A QUEUED
+    # or active-VM transition would mean the backend accepted the resume request.
     job_after_resume = nc.get_training_job_data(job_id)
     assert job_after_resume["status"] == job_before_resume["status"] == "COMPLETED", (
         "The failed resume changed the training job status: "
@@ -252,8 +252,7 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
         )
 
         started_status = _wait_for_training_to_start(job_id)
-        assert started_status in {
-            "RUNNING",
+        assert started_status in ACTIVE_VM_STATUSES | {
             "COMPLETED",
         }, f"Training failed before starting: status={started_status!r}"
         completed_job = _wait_for_training_to_complete(job_id)

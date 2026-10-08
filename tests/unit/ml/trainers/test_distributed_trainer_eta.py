@@ -11,6 +11,13 @@ from neuracore.ml.trainers.distributed_trainer import (
 )
 
 
+def _progress_from_call(call):
+    """Extract TrainingProgress from a mocked update_training_progress call."""
+    if call.args:
+        return call.args[0]
+    return call.kwargs["progress"]
+
+
 @pytest.fixture
 def trainer(tmp_path: Path) -> DistributedTrainer:
     trainer = DistributedTrainer.__new__(DistributedTrainer)
@@ -42,15 +49,15 @@ def test_train_skips_seconds_per_epoch_on_warmup_epoch(trainer: DistributedTrain
     # Initial progress + one call per completed epoch (1, 2, 3).
     assert len(progress_calls) == 4
 
-    warmup_call = progress_calls[1]
-    assert warmup_call.kwargs["epoch"] == 1
-    assert warmup_call.kwargs.get("seconds_per_epoch") is None
+    warmup = _progress_from_call(progress_calls[1])
+    assert warmup.epoch == 1
+    assert warmup.seconds_per_epoch is None
 
-    measured_epochs = [call.kwargs for call in progress_calls[2:]]
-    assert [call["epoch"] for call in measured_epochs] == [2, 3]
-    for call in measured_epochs:
-        assert call["seconds_per_epoch"] is not None
-        assert call["seconds_per_epoch"] >= 0
+    measured_epochs = [_progress_from_call(call) for call in progress_calls[2:]]
+    assert [progress.epoch for progress in measured_epochs] == [2, 3]
+    for progress in measured_epochs:
+        assert progress.seconds_per_epoch is not None
+        assert progress.seconds_per_epoch >= 0
 
 
 def test_train_skips_warmup_for_resumed_start_epoch(trainer: DistributedTrainer):
@@ -59,9 +66,10 @@ def test_train_skips_warmup_for_resumed_start_epoch(trainer: DistributedTrainer)
 
     progress_calls = trainer.storage_handler.update_training_progress.call_args_list
     by_epoch = {
-        call.kwargs["epoch"]: call.kwargs.get("seconds_per_epoch")
+        _progress_from_call(call).epoch: _progress_from_call(call).seconds_per_epoch
         for call in progress_calls
-        if "epoch" in call.kwargs and call.kwargs["epoch"] >= 6
+        if _progress_from_call(call).epoch is not None
+        and _progress_from_call(call).epoch >= 6
     }
     assert by_epoch[6] is None
     assert by_epoch[7] is not None
@@ -126,9 +134,9 @@ def test_train_reports_ema_not_raw_epoch_duration(
 
     progress_calls = trainer.storage_handler.update_training_progress.call_args_list
     by_epoch = {
-        call.kwargs["epoch"]: call.kwargs.get("seconds_per_epoch")
+        _progress_from_call(call).epoch: _progress_from_call(call).seconds_per_epoch
         for call in progress_calls
-        if call.kwargs.get("epoch") in (2, 3)
+        if _progress_from_call(call).epoch in (2, 3)
     }
     assert by_epoch[2] == pytest.approx(10.0)
     assert by_epoch[3] == pytest.approx(13.0)
@@ -172,9 +180,9 @@ def test_train_amortizes_checkpoint_into_seconds_per_epoch(
 
     progress_calls = trainer.storage_handler.update_training_progress.call_args_list
     by_epoch = {
-        call.kwargs["epoch"]: call.kwargs.get("seconds_per_epoch")
+        _progress_from_call(call).epoch: _progress_from_call(call).seconds_per_epoch
         for call in progress_calls
-        if call.kwargs.get("epoch") in (1, 2, 3)
+        if _progress_from_call(call).epoch in (1, 2, 3)
     }
     assert by_epoch[1] is None
     assert by_epoch[2] == pytest.approx(10.0)

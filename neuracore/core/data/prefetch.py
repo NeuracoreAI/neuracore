@@ -15,6 +15,7 @@ import asyncio
 import logging
 import tempfile
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,8 @@ class _PendingDecode:
     frames_dir: Path
     lock_file: Path
     temp_dir: tempfile.TemporaryDirectory
+    # Set by the download stage; completed when decode finishes (success or fail).
+    done: asyncio.Future[None] | None = None
 
 
 class VideoPrefetcher:
@@ -97,6 +100,7 @@ class VideoPrefetcher:
         inflight_requests: int = DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
         decode_workers: int = 4,
         download_videos: bool = True,
+        download_progress_reporter: Callable[[int, int], None] | None = None,
     ):
         """Initialize a prefetcher for one synchronized dataset.
 
@@ -108,6 +112,9 @@ class VideoPrefetcher:
             decode_workers: Threads used to run ffmpeg.
             download_videos: Whether to download videos, or only fetch the
                 synchronized metadata.
+            download_progress_reporter: Optional callback ``(done, total)`` when
+                a recording's videos have finished decoding (or it had nothing
+                to decode). ``total`` is the recording count.
         """
         self.dataset = dataset
         self.recordings = recordings
@@ -115,12 +122,18 @@ class VideoPrefetcher:
         self.inflight_requests = max(1, inflight_requests)
         self.decode_workers = max(1, decode_workers)
         self.download_videos = download_videos
+        self.download_progress_reporter = download_progress_reporter
         self.episodes: dict[int, SerializedSynchronizedEpisode] = {}
         self._failures = 0
         self._lock = threading.Lock()
         # Created once the event loop is running.
         self._api_requests: asyncio.Semaphore | None = None
         self._transfers: asyncio.Semaphore | None = None
+
+    def _report_download_progress(self, done: int, total: int) -> None:
+        """Invoke the progress callback after a recording is fully ready."""
+        if self.download_progress_reporter is not None:
+            self.download_progress_reporter(done, total)
 
     def run(self) -> dict[int, SerializedSynchronizedEpisode]:
         """Fetch metadata and, if enabled, download and decode every video.
@@ -283,15 +296,19 @@ class VideoPrefetcher:
         recording's metadata. Downloads run on this thread's event loop, ffmpeg
         in a thread pool, joined by a bounded queue that caps how many videos
         sit staged on disk awaiting decode.
+
+        Cloud/log progress counts a recording only once its videos are decoded.
         """
+        num_total_recordings = len(self.recordings)
+        num_downloaded_recordings = 0
         metadata_progress = tqdm(
-            total=len(self.recordings),
+            total=num_total_recordings,
             desc=f"Fetching synced data ({self.inflight_requests} in flight)",
             unit="Recording",
         )
-        # The video total is not known until each recording's metadata says how
-        # many cameras it has, so it grows as the pipeline discovers them.
         video_progress = tqdm(total=0, desc="Downloading videos", unit="Video")
+        logger.info("Downloading training data and videos…")
+        self._report_download_progress(0, num_total_recordings)
         queue: asyncio.Queue[_PendingDecode | None] = asyncio.Queue(
             maxsize=2 * self.decode_workers
         )
@@ -320,9 +337,13 @@ class VideoPrefetcher:
                         )
                         self._record_failure()
                     finally:
+                        if pending.done is not None and not pending.done.done():
+                            pending.done.set_result(None)
                         queue.task_done()
 
-            async def download(target: "_DownloadTarget") -> None:
+            async def download(
+                target: "_DownloadTarget",
+            ) -> asyncio.Future[None] | None:
                 """Stage one camera's video, then hand it to the decoders."""
                 pending = None
                 try:
@@ -339,50 +360,69 @@ class VideoPrefetcher:
                     video_progress.update(1)
                 # Queued outside every budget: blocking here while the decoders
                 # are saturated must not hold a request slot.
-                if pending is not None:
-                    await queue.put(pending)
+                if pending is None:
+                    return None
+                pending.done = loop.create_future()
+                await queue.put(pending)
+                return pending.done
 
             async def process_recording(index: int, recording: "Recording") -> None:
                 """Fetch one recording's metadata, then download its videos."""
-                async with api_requests:
-                    try:
-                        self.episodes[index] = await self._get_synced_data(
-                            session, recording.id
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            f"Could not fetch synced data for recording "
-                            f"{recording.id}: {exc}"
-                        )
-                        return
-                    finally:
-                        metadata_progress.update(1)
-
-                    targets = self._collect_targets_for(recording, self.episodes[index])
-                    # Mint each URL while still holding this slot. Semaphores
-                    # hand out slots in order, so a mint asking for a slot of
-                    # its own would queue behind every recording's metadata
-                    # request and not run until that stage had drained -- the
-                    # serialisation this pipeline exists to remove.
-                    ready = []
-                    for target in targets:
+                nonlocal num_downloaded_recordings
+                try:
+                    async with api_requests:
                         try:
-                            target.url = await self._get_video_url(session, target)
-                            ready.append(target)
+                            self.episodes[index] = await self._get_synced_data(
+                                session, recording.id
+                            )
                         except Exception as exc:
                             logger.warning(
-                                f"Could not resolve video for camera "
-                                f"{target.camera_id} of recording "
-                                f"{target.recording_id}: {exc}"
+                                f"Could not fetch synced data for recording "
+                                f"{recording.id}: {exc}"
                             )
-                            self._record_failure()
-                            target.release()
+                            return
+                        finally:
+                            metadata_progress.update(1)
 
-                if not ready:
-                    return
-                video_progress.total += len(ready)
-                video_progress.refresh()
-                await asyncio.gather(*[download(target) for target in ready])
+                        targets = self._collect_targets_for(
+                            recording, self.episodes[index]
+                        )
+                        # Mint each URL while still holding this slot. Semaphores
+                        # hand out slots in order, so a mint asking for a slot of
+                        # its own would queue behind every recording's metadata
+                        # request and not run until that stage had drained -- the
+                        # serialisation this pipeline exists to remove.
+                        ready = []
+                        for target in targets:
+                            try:
+                                target.url = await self._get_video_url(session, target)
+                                ready.append(target)
+                            except Exception as exc:
+                                logger.warning(
+                                    f"Could not resolve video for camera "
+                                    f"{target.camera_id} of recording "
+                                    f"{target.recording_id}: {exc}"
+                                )
+                                self._record_failure()
+                                target.release()
+
+                    if not ready:
+                        return
+                    video_progress.total += len(ready)
+                    video_progress.refresh()
+                    decode_futures = await asyncio.gather(
+                        *[download(target) for target in ready]
+                    )
+                    # Count the recording only once every staged video is decoded
+                    # (or failed), so cloud progress does not hit N/N early.
+                    await asyncio.gather(
+                        *(future for future in decode_futures if future is not None)
+                    )
+                finally:
+                    num_downloaded_recordings += 1
+                    self._report_download_progress(
+                        num_downloaded_recordings, num_total_recordings
+                    )
 
             consumers = [
                 asyncio.create_task(decode_consumer())
@@ -400,6 +440,14 @@ class VideoPrefetcher:
                 await asyncio.gather(*consumers, return_exceptions=True)
                 metadata_progress.close()
                 video_progress.close()
+                self._report_download_progress(
+                    num_downloaded_recordings, num_total_recordings
+                )
+                logger.info(
+                    f"Training data download complete "
+                    f"({num_downloaded_recordings}/{num_total_recordings} "
+                    f"recordings)."
+                )
 
     def _collect_download_targets(self) -> list["_DownloadTarget"]:
         """Find every camera whose frames are not already cached.
