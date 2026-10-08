@@ -524,8 +524,8 @@ def test_read_image_data_decodes_bigendian_mono16():
         logger=logging.getLogger(__name__),
     )
 
-    assert result.dtype == np.float32
-    np.testing.assert_array_equal(result, np.array([[1000, 2000]], dtype=np.float32))
+    assert result.dtype == np.uint16
+    np.testing.assert_array_equal(result, np.array([[1000, 2000]], dtype=np.uint16))
 
 
 def test_read_image_data_raises_on_unsupported_encoding():

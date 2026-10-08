@@ -4,7 +4,7 @@ import json
 import logging
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -14,6 +14,7 @@ from neuracore_types import (
     CameraData,
     CrossEmbodimentUnion,
     DataType,
+    DepthCameraData,
     EmbodimentDescription,
     NCData,
     NCDataUnion,
@@ -29,6 +30,7 @@ from neuracore_types import (
     SynchronizeRecordingStatus,
 )
 from neuracore_types.nc_data.point_cloud_data import decode_point_cloud_frame
+from neuracore_types.utils.depth_utils import DEPTH_GRID_SCALE_M
 from PIL import Image
 from pydantic import ValidationError as PydanticValidationError
 
@@ -38,7 +40,9 @@ from neuracore.core.data.frame_cache import (
     delete_decoding_lock,
     lock_file_for,
     point_cloud_lock_file_for,
-    publish_decoded_frames,
+    publish_camera_frames,
+    read_depth_frame,
+    read_packed_depth_frame,
     video_filename_preference,
     wait_for_lock_release,
 )
@@ -46,7 +50,6 @@ from neuracore.core.data.serialized_synchronized_episode import (
     SerializedSynchronizedEpisode,
 )
 from neuracore.core.exceptions import SynchronizationError
-from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 from neuracore.core.utils.download import download_bytes, stream_to_file
 from neuracore.core.utils.http_session import thread_local_session
 
@@ -438,8 +441,8 @@ class SynchronizedRecording:
                 stream_to_file(
                     self._get_video_url(camera_type, camera_id), video_location
                 )
-                publish_decoded_frames(
-                    video_location, staging_dir, video_frame_cache_path
+                publish_camera_frames(
+                    camera_type, video_location, staging_dir, video_frame_cache_path
                 )
         finally:
             delete_decoding_lock(lock_file)
@@ -448,7 +451,6 @@ class SynchronizedRecording:
         self,
         camera_type: DataType,
         camera_data: dict[str, CameraData],
-        transform_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     ) -> dict[str, CameraData]:
         """Get video frame from disk cache for camera data.
 
@@ -456,7 +458,6 @@ class SynchronizedRecording:
             camera_type: DataType indicating the type of camera data.
             camera_data: Dictionary of camera data with camera IDs as keys.
             frame_idx: Index of the frame to retrieve.
-            transform_fn: Optional function to transform frames (e.g., rgb_to_depth).
 
         Returns:
             Dictionary of CameraData with populated frames.
@@ -475,12 +476,29 @@ class SynchronizedRecording:
                     camera_type, cam_id, cam_id_rgb_root
                 )
 
+            if camera_type == DataType.DEPTH_IMAGES:
+                if (
+                    isinstance(cam_data, DepthCameraData)
+                    and cam_data.offset is not None
+                    and cam_data.length is not None
+                ):
+                    update = {
+                        "frame": read_depth_frame(
+                            cam_id_rgb_root, cam_data.offset, cam_data.length
+                        )
+                    }
+                else:
+                    update = {
+                        "frame": read_packed_depth_frame(
+                            cam_id_rgb_root, cam_data.frame_idx
+                        ),
+                        "depth_scale_m": DEPTH_GRID_SCALE_M,
+                    }
+                result[cam_id] = cam_data.model_copy(update=update)
+                continue
+
             frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
             frame = Image.open(frame_file)
-
-            if transform_fn:
-                frame = Image.fromarray(transform_fn(np.array(frame)))
-
             result[cam_id] = cam_data.model_copy(update={"frame": frame})
 
         return result
@@ -666,7 +684,7 @@ class SynchronizedRecording:
             )
         if data_type == DataType.DEPTH_IMAGES:
             return self._get_frame_from_disk_cache(
-                data_type, cast(dict[str, CameraData], frames), rgb_to_depth_storage
+                data_type, cast(dict[str, CameraData], frames)
             )
         return self._get_point_cloud_from_disk_cache(
             cast(dict[str, PointCloudData], frames)

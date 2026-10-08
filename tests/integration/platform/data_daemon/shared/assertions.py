@@ -50,6 +50,7 @@ from neuracore_types import Dataset, DataType
 
 import neuracore as nc
 from neuracore.core.data.recording import Recording
+from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.data_daemon.helpers import get_daemon_pid_path
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
@@ -72,6 +73,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     case_timeout_seconds,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    depth_scale_for_mode,
     encode_depth_frame,
     frame_code_base,
 )
@@ -384,9 +386,11 @@ def _collect_episode_summary(synced_episode: object) -> dict[str, object]:
             for camera_name, camera_data in sync_point[DataType.DEPTH_IMAGES].items():
                 name = str(camera_name)
                 depth_counts[name] = depth_counts.get(name, 0) + 1
-                depth_frames.setdefault(name, []).append(
-                    (int(camera_data.frame_idx), np.array(camera_data.frame))
-                )
+                depth_frames.setdefault(name, []).append((
+                    int(camera_data.frame_idx),
+                    camera_data.frame.astype(np.float32)
+                    * np.float32(camera_data.depth_scale_m),
+                ))
             summary["depth_counts"] = depth_counts
             summary["depth_frames"] = depth_frames
 
@@ -570,26 +574,32 @@ def _assert_synced_depth_values_round_trip(
     Synchronization can repeat or skip frames, and a boundary frame may be
     admitted without being strictly owed. Count and timestamp checks enforce
     episode shape independently; this check verifies that every retrieved value
-    matches a deterministic frame emitted inside or close enough to the
-    recording window.
+    matches, in meters, a deterministic frame emitted inside or close enough to
+    the recording window, as nc.log_depth records it.
     """
     assert depth_frames, f"No depth frames retrieved for camera {camera_name!r}"
     assert source_frame_indexes, f"Camera {camera_name!r}: no classified frames"
 
+    depth_scale = np.float32(depth_scale_for_mode(depth_mode))
     frame_code_prefix = frame_code_base(
         context_index=context_index,
         recording_ordinal=recording_index,
         camera_index=camera_index,
     )
-    expected_candidates = [
-        encode_depth_frame(
-            frame_code_prefix + source_frame_index,
-            image_width,
-            image_height,
-            depth_mode,
-        ).astype(np.float32)
-        for source_frame_index in source_frame_indexes
-    ]
+    expected_candidates = []
+    for source_frame_index in source_frame_indexes:
+        logged_m = (
+            encode_depth_frame(
+                frame_code_prefix + source_frame_index,
+                image_width,
+                image_height,
+                depth_mode,
+            ).astype(np.float32)
+            * depth_scale
+        )
+        expected_candidates.append(
+            np.where(logged_m > MAX_DEPTH, np.float32(0), logged_m)
+        )
 
     mismatches: list[tuple[int, float]] = []
     for frame_idx, actual in depth_frames:

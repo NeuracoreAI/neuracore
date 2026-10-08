@@ -290,6 +290,41 @@ def test_image_samples_are_readable_without_attachment_support(kind):
     np.testing.assert_array_equal(decoded, expected)
 
 
+def test_depth_frames_samples_are_float_metres(depth_frames_fn):
+    """Inline depth from a frames file is float TIFF in metres with holes at 0."""
+    import logging
+
+    from neuracore.importer.mcap.utils import read_image_data
+
+    frames = np.zeros((2, 4, 6), dtype=np.uint16)
+    frames[0, 1:, 2:] = 26000
+    frames[1, :, :3] = 65535
+    payload, ranges = depth_frames_fn(frames)
+    trace = [
+        {
+            "timestamp": float(index + 1),
+            "frame_idx": index,
+            "frame": None,
+            "depth_scale_m": 1e-4,
+            "offset": offset,
+            "length": length,
+        }
+        for index, (offset, length) in enumerate(ranges)
+    ]
+    media = ("depth/lossless.bin", "application/octet-stream", payload)
+
+    samples = list(McapExporter._samples(trace, DataType.DEPTH_IMAGES, media))
+
+    for sample, frame in zip(samples, frames, strict=True):
+        decoded = read_image_data(
+            DataType.DEPTH_IMAGES, sample, sample, logger=logging.getLogger(__name__)
+        )
+        assert decoded.dtype == np.float32
+        np.testing.assert_array_equal(
+            decoded, frame.astype(np.float32) * np.float32(1e-4)
+        )
+
+
 def test_camera_frame_count_mismatch_fails():
     media = (
         "video.mp4",

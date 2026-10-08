@@ -1,13 +1,20 @@
 """Tests for the frame cache's lock protocol and decoding step."""
 
 import time
+from fractions import Fraction
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import av
+import imagecodecs
+import numpy as np
 import pytest
 from neuracore_types import DataType
+from neuracore_types.utils.depth_utils import metres_to_depth_u16
 
 from neuracore.core.data.frame_cache import (
+    DEPTH_FRAMES_FILENAME,
     STALE_LOCK_TIMEOUT_S,
     acquire_decoding_lock,
     check_stale_lock_file,
@@ -16,11 +23,23 @@ from neuracore.core.data.frame_cache import (
     decode_video,
     delete_decoding_lock,
     lock_file_for,
+    publish_depth_frames,
+    read_depth_frame,
+    read_packed_depth_frame,
     video_filename_preference,
     wait_for_lock_release,
 )
+from neuracore.core.utils.depth_utils import depth_to_rgb_storage
 
 MODULE = "neuracore.core.data.frame_cache"
+
+
+def _depth_frames() -> np.ndarray:
+    rng = np.random.default_rng(7)
+    frames = rng.integers(1, 65535, size=(3, 6, 8), dtype=np.uint16)
+    frames[:, 0, :] = 0
+    frames[1, 2:4, 3:5] = 65535
+    return frames
 
 
 class TestVideoFilenamePreference:
@@ -34,8 +53,11 @@ class TestVideoFilenamePreference:
         )
 
     def test_depth_is_lossless_only(self):
-        """Depth has no lossy fallback: a lossy encode would corrupt depth."""
-        assert video_filename_preference(DataType.DEPTH_IMAGES) == ("lossless.mp4",)
+        """Depth prefers the frames file, then the old lossless video, never lossy."""
+        assert video_filename_preference(DataType.DEPTH_IMAGES) == (
+            "lossless.bin",
+            "lossless.mp4",
+        )
 
 
 class TestLockFileNaming:
@@ -241,3 +263,82 @@ class TestResolveFrameSyncArg:
             assert _resolve_frame_sync_arg() == "-fps_mode"
 
         mock_run.assert_called_once()
+
+
+class TestDepthFrames:
+    """Caching JPEG-XL depth frames files and reading frames out of them."""
+
+    def test_published_frames_file_serves_frames_by_byte_range(
+        self, tmp_path: Path, depth_frames_fn
+    ):
+        """A published frames file keeps its bytes and serves any frame exactly."""
+        frames = _depth_frames()
+        payload, ranges = depth_frames_fn(frames)
+        media = tmp_path / "depth.mp4"
+        media.write_bytes(payload)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        frames_dir = tmp_path / "cam"
+
+        publish_depth_frames(media, staging, frames_dir)
+
+        assert (frames_dir / DEPTH_FRAMES_FILENAME).read_bytes() == payload
+        for frame_idx in (2, 0, 1):
+            frame = read_depth_frame(frames_dir, *ranges[frame_idx])
+            assert frame.dtype == np.uint16
+            np.testing.assert_array_equal(frame, frames[frame_idx])
+
+    def test_truncated_frames_file_raises(self, tmp_path: Path, depth_frames_fn):
+        """A byte range past the end of the file fails."""
+        payload, ranges = depth_frames_fn(_depth_frames())
+        (tmp_path / DEPTH_FRAMES_FILENAME).write_bytes(payload[:-1])
+
+        with pytest.raises(ValueError, match="ends inside"):
+            read_depth_frame(tmp_path, *ranges[-1])
+
+    def test_frame_of_another_dtype_raises(self, tmp_path: Path):
+        """A frame that decodes to another dtype fails."""
+        payload = imagecodecs.jpegxl_encode(np.ones((2, 2), np.uint8), lossless=True)
+        (tmp_path / DEPTH_FRAMES_FILENAME).write_bytes(payload)
+
+        with pytest.raises(ValueError, match="decodes as"):
+            read_depth_frame(tmp_path, 0, len(payload))
+
+    def test_packed_video_matches_frames_file_within_one_grid_step(
+        self, tmp_path: Path, depth_frames_fn
+    ):
+        """A 24-bit packed recording and a frames file of it agree to one step."""
+        rng = np.random.default_rng(3)
+        metres = rng.uniform(0.05, 9.9, size=(2, 16, 16)).astype(np.float32)
+        metres[:, 0, :] = 0.0
+        video = tmp_path / "lossless.mp4"
+        with av.open(str(video), mode="w", format="mp4") as container:
+            stream = container.add_stream("libx264rgb")
+            stream.width, stream.height = 16, 16
+            stream.pix_fmt = "rgb24"
+            stream.codec_context.options = {"qp": "0", "preset": "ultrafast"}
+            stream.time_base = Fraction(1, 30)
+            for index, frame in enumerate(metres):
+                packed = av.VideoFrame.from_ndarray(
+                    depth_to_rgb_storage(frame), format="rgb24"
+                )
+                packed.pts = index
+                for packet in stream.encode(packed):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        payload, ranges = depth_frames_fn(metres_to_depth_u16(metres))
+        frames_file = tmp_path / "frames.bin"
+        frames_file.write_bytes(payload)
+
+        for source, name in ((video, "from_video"), (frames_file, "from_bin")):
+            staging = tmp_path / f"{name}_staging"
+            staging.mkdir()
+            publish_depth_frames(source, staging, tmp_path / name)
+
+        for frame_idx in range(len(metres)):
+            from_video = read_packed_depth_frame(tmp_path / "from_video", frame_idx)
+            from_bin = read_depth_frame(tmp_path / "from_bin", *ranges[frame_idx])
+            difference = from_video.astype(np.int32) - from_bin.astype(np.int32)
+            assert np.abs(difference).max() <= 1
+            np.testing.assert_array_equal(from_video == 0, from_bin == 0)

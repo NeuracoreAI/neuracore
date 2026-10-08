@@ -48,7 +48,7 @@ def parse_sync_point(
         data = cast(NCDataUnion, data)
 
         # Decode image data
-        if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
+        if data_type == DataType.RGB_IMAGES:
             data.frame = ImageStringEncoder.decode_image(data.frame)
 
         return SynchronizedPoint(

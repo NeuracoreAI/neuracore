@@ -40,7 +40,7 @@ from neuracore.core.data.frame_cache import (
     create_decoding_lock,
     delete_decoding_lock,
     lock_file_for,
-    publish_decoded_frames,
+    publish_camera_frames,
     video_filename_preference,
 )
 from neuracore.core.data.serialized_synchronized_episode import (
@@ -82,6 +82,7 @@ class _PendingDecode:
     temp_dir: tempfile.TemporaryDirectory
     # Set by the download stage; completed when decode finishes (success or fail).
     done: asyncio.Future[None] | None = None
+    data_type: DataType = DataType.RGB_IMAGES
 
 
 class VideoPrefetcher:
@@ -553,6 +554,7 @@ class VideoPrefetcher:
             frames_dir=target.frames_dir,
             lock_file=target.lock_file,
             temp_dir=temp_dir,
+            data_type=target.data_type,
         )
 
     async def _stream_video(
@@ -642,8 +644,11 @@ def _decode_and_publish(pending: _PendingDecode) -> None:
         pending: The staged video to decode.
     """
     try:
-        publish_decoded_frames(
-            pending.video_path, pending.staging_dir, pending.frames_dir
+        publish_camera_frames(
+            pending.data_type,
+            pending.video_path,
+            pending.staging_dir,
+            pending.frames_dir,
         )
     finally:
         delete_decoding_lock(pending.lock_file)

@@ -205,8 +205,8 @@ data_import_config:
   DEPTH_IMAGES:
     source: observation # path to the data in the input dataset
     format:
-      distance_units: M # M | MM
-    # makes all nans, posinf, neginf zeroes
+      depth_scale_m: 0.001 # meters per unit of the source image, required
+    # depth images must be integer sensor units that fit uint16
     mapping:
       - name: depth_static
         source_name: depth_static

@@ -402,6 +402,7 @@ def _log_camera_data(
     robot_name: str | None = None,
     instance: int = 0,
     dry_run: bool = False,
+    stream_frame: np.ndarray | None = None,
 ) -> None:
     """Log camera data for a robot.
 
@@ -414,6 +415,8 @@ def _log_camera_data(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         dry_run: If True, skip actual logging (validation only)
+        stream_frame: Frame the live data stream holds, when it differs from
+            the image sent for recording. None holds the image itself.
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -456,7 +459,9 @@ def _log_camera_data(
     # camera_data_without_frame object to avoid serializing the frame to JSON
     # or having to make two copies for streaming and bucket storage.
     stream.log(
-        camera_data_without_frame, frame=image, recording_epoch=robot._recording_epoch()
+        camera_data_without_frame,
+        frame=image if stream_frame is None else stream_frame,
+        recording_epoch=robot._recording_epoch(),
     )
 
     contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
@@ -1292,18 +1297,21 @@ def log_depth(
     instance: int = 0,
     timestamp: float | None = None,
     dry_run: bool = False,
+    depth_scale: float | None = None,
 ) -> None:
     """Log depth image from a camera.
 
     Args:
         name: Unique identifier for the camera
-        depth: Depth image as numpy array (HxW, dtype=float16 or float32, in meters)
+        depth: Depth image as an HxW uint16 numpy array in sensor units, with 0
+            meaning no return
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
+        depth_scale: Meters per sensor unit, required
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -1311,16 +1319,15 @@ def log_depth(
     """
     if not isinstance(depth, np.ndarray):
         raise ValueError("Depth image must be a numpy array")
-    if depth.dtype not in (np.float16, np.float32):
-        raise ValueError(
-            f"Depth image must be float16 or float32, but got {depth.dtype}"
-        )
-    if depth.max() > MAX_DEPTH:
-        raise ValueError(
-            "Depth image should be in meters. "
-            f"You are attempting to log depth values > {MAX_DEPTH}. "
-            "The values you are passing in are likely in millimeters."
-        )
+    if depth.dtype != np.uint16:
+        raise ValueError(f"Depth image must be uint16, but got {depth.dtype}")
+    if depth_scale is None:
+        raise ValueError("Depth images need depth_scale in meters per unit")
+    if not np.isfinite(depth_scale) or depth_scale <= 0:
+        raise ValueError(f"depth_scale must be positive, got {depth_scale}")
+    depth_scale_m = float(depth_scale)
+    depth_m = depth.astype(np.float32) * np.float32(depth_scale_m)
+    recorded = np.where(depth_m > MAX_DEPTH, np.float32(0), depth_m)
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     if timestamp is None:
         timestamp = time.time()
@@ -1329,15 +1336,17 @@ def log_depth(
         extrinsics=extrinsics,
         intrinsics=intrinsics,
         frame=None,
+        depth_scale_m=depth_scale_m,
     )
     _log_camera_data(
         DataType.DEPTH_IMAGES,
         depth_camera_data,
-        depth,
+        recorded,
         name,
         robot_name,
         instance,
         dry_run,
+        stream_frame=depth,
     )
 
 

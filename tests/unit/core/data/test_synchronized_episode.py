@@ -8,13 +8,14 @@ import numpy as np
 import pytest
 import requests
 from neuracore_types import (
-    CameraData,
     DataType,
+    DepthCameraData,
     JointData,
     SynchronizationDetails,
     SynchronizedPoint,
     SynchronizeRecordingRequest,
 )
+from neuracore_types.utils.depth_utils import DEPTH_GRID_SCALE_M
 from PIL import Image
 
 from neuracore.core.const import API_URL
@@ -446,31 +447,47 @@ class TestSynchronizedRecording:
             mock_download.assert_not_called()
 
     def test_depth_image_processing(self, synced_recording: SynchronizedRecording):
-        """Test that depth images are processed correctly."""
+        """Serve depth from a packed video as uint16 on the fixed grid."""
         sync_point = cast(SynchronizedPoint, synced_recording[0])
 
-        for cam_id, cam_data in sync_point.data[DataType.DEPTH_IMAGES].items():
-            cam_data = cast(CameraData, cam_data)
-            assert cam_data.frame is not None
-            assert isinstance(cam_data.frame, Image.Image)
+        for cam_data in sync_point.data[DataType.DEPTH_IMAGES].values():
+            cam_data = cast(DepthCameraData, cam_data)
+            assert isinstance(cam_data.frame, np.ndarray)
+            assert cam_data.frame.dtype == np.uint16
+            assert cam_data.frame.ndim == 2
+            assert cam_data.depth_scale_m == DEPTH_GRID_SCALE_M
 
-    def test_rgb_to_depth_storage_called_when_retrieving_frame(
+    def test_depth_frames_download_serves_uint16_with_scale(
         self,
         dataset_mock,
         mock_data_requests,
-        tmp_path,
+        depth_frames_fn,
+        synced_data,
+        synced_episode_download_url,
     ):
-        """Test that rgb_to_depth_storage is called when retrieving a frame
-        with depth images."""
+        """Serve each depth frame from its byte range with its trace scale."""
         rgb_cache = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
-        depth_cache = (
-            dataset_mock.cache_dir / "rec1" / DataType.DEPTH_IMAGES.value / "cam2"
-        )
         rgb_cache.mkdir(parents=True, exist_ok=True)
-        depth_cache.mkdir(parents=True, exist_ok=True)
-        fake_image = Image.fromarray(np.ones((224, 224, 3), dtype=np.uint8) * 128)
-        fake_image.save(rgb_cache / "0.png")
-        fake_image.save(depth_cache / "0.png")
+        Image.fromarray(np.full((224, 224, 3), 128, dtype=np.uint8)).save(
+            rgb_cache / "0.png"
+        )
+        frames = np.zeros((2, 6, 8), dtype=np.uint16)
+        frames[0, 1:, 2:] = 26000
+        payload, ranges = depth_frames_fn(frames)
+        for point in synced_data.observations:
+            camera = point.data[DataType.DEPTH_IMAGES]["cam2"]
+            offset, length = ranges[camera.frame_idx]
+            point.data[DataType.DEPTH_IMAGES]["cam2"] = DepthCameraData(
+                timestamp=camera.timestamp,
+                frame_idx=camera.frame_idx,
+                depth_scale_m=1e-4,
+                offset=offset,
+                length=length,
+            )
+        mock_data_requests.get(
+            synced_episode_download_url, json=synced_data.model_dump(mode="json")
+        )
+        mock_data_requests.get("https://example.com/test-video.mp4", content=payload)
 
         synced = SynchronizedRecording(
             dataset=dataset_mock,
@@ -483,15 +500,19 @@ class TestSynchronizedRecording:
                 cross_embodiment_union=None,
             ),
         )
+        depth = cast(
+            DepthCameraData,
+            next(
+                iter(
+                    cast(SynchronizedPoint, synced[0])
+                    .data[DataType.DEPTH_IMAGES]
+                    .values()
+                )
+            ),
+        )
 
-        with patch(
-            "neuracore.core.data.synced_recording.rgb_to_depth_storage"
-        ) as mock_rgb_to_depth_storage:
-            mock_rgb_to_depth_storage.return_value = np.zeros(
-                (224, 224), dtype=np.uint8
-            )
-            _ = synced[0]
-            mock_rgb_to_depth_storage.assert_called()
+        np.testing.assert_array_equal(depth.frame, frames[depth.frame_idx])
+        assert depth.depth_scale_m == 1e-4
 
     def test_camera_data_copy_independence(
         self, synced_recording: SynchronizedRecording
