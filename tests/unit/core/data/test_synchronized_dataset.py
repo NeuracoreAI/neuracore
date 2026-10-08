@@ -307,7 +307,7 @@ class TestSynchronizedDataset:
                 max_prefetch_decode_workers=8,
             )
 
-            mock_prefetch.assert_called_once_with()
+            mock_prefetch.assert_called_once_with(download_progress_reporter=None)
         assert synced_dataset._max_prefetch_decode_workers == 8
         assert synced_dataset._prefetch_videos is True
 

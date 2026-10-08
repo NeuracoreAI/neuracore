@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from neuracore_types import TrainingProgress
 
 from neuracore.core.const import API_URL
 from neuracore.ml.utils import upload_storage_mixin
@@ -550,7 +551,7 @@ class TestUpdateTrainingProgress:
     ):
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
-        handler.update_training_progress(epoch=3, step=150)
+        handler.update_training_progress(TrainingProgress(epoch=3, step=150))
         handler.wait_for_pending_progress_updates()
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
@@ -560,7 +561,9 @@ class TestUpdateTrainingProgress:
     def test_includes_seconds_per_epoch_when_provided(self, handler, requests_mock):
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
-        handler.update_training_progress(epoch=3, step=150, seconds_per_epoch=12.5)
+        handler.update_training_progress(
+            TrainingProgress(epoch=3, step=150, seconds_per_epoch=12.5)
+        )
         handler.wait_for_pending_progress_updates()
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
@@ -575,7 +578,9 @@ class TestUpdateTrainingProgress:
     def test_omits_seconds_per_epoch_when_none(self, handler, requests_mock):
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
-        handler.update_training_progress(epoch=1, step=10, seconds_per_epoch=None)
+        handler.update_training_progress(
+            TrainingProgress(epoch=1, step=10, seconds_per_epoch=None)
+        )
         handler.wait_for_pending_progress_updates()
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
@@ -587,14 +592,14 @@ class TestUpdateTrainingProgress:
         monkeypatch.setattr("neuracore.login", login)
         matcher = requests_mock.put(f"{BASE_JOB_URL}/update", status_code=401)
 
-        handler.update_training_progress(epoch=3, step=150)
+        handler.update_training_progress(TrainingProgress(epoch=3, step=150))
         handler.wait_for_pending_progress_updates()
 
         assert matcher.call_count == 1
         assert not login.called
 
     def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
-        local_handler.update_training_progress(epoch=1, step=1)
+        local_handler.update_training_progress(TrainingProgress(epoch=1, step=1))
         local_handler.wait_for_pending_progress_updates()
 
         assert len(requests_mock.request_history) == 0
@@ -620,10 +625,10 @@ class TestUpdateTrainingProgress:
 
         requests_mock.put(f"{BASE_JOB_URL}/update", text=_blocking_response)
 
-        handler.update_training_progress(epoch=1, step=10)
+        handler.update_training_progress(TrainingProgress(epoch=1, step=10))
         assert first_put_started.wait(timeout=5)
-        handler.update_training_progress(epoch=1, step=20)
-        handler.update_training_progress(epoch=1, step=30)
+        handler.update_training_progress(TrainingProgress(epoch=1, step=20))
+        handler.update_training_progress(TrainingProgress(epoch=1, step=30))
         release_first_put.set()
         handler.wait_for_pending_progress_updates()
 
@@ -645,9 +650,13 @@ class TestUpdateTrainingProgress:
 
         requests_mock.put(f"{BASE_JOB_URL}/update", text=_blocking_response)
 
-        handler.update_training_progress(epoch=2, step=10, seconds_per_epoch=11.0)
+        handler.update_training_progress(
+            TrainingProgress(epoch=2, step=10, seconds_per_epoch=11.0)
+        )
         assert first_put_started.wait(timeout=5)
-        handler.update_training_progress(epoch=3, step=20, seconds_per_epoch=9.5)
+        handler.update_training_progress(
+            TrainingProgress(epoch=3, step=20, seconds_per_epoch=9.5)
+        )
         release_first_put.set()
         handler.wait_for_pending_progress_updates()
 
@@ -658,7 +667,7 @@ class TestUpdateTrainingProgress:
         """Progress reporting is best-effort; it must not fail a training run."""
         requests_mock.put(f"{BASE_JOB_URL}/update", exc=ConnectionError("down"))
 
-        handler.update_training_progress(epoch=3, step=150)
+        handler.update_training_progress(TrainingProgress(epoch=3, step=150))
         handler.wait_for_pending_progress_updates()
 
 

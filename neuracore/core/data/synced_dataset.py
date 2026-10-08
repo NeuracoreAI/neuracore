@@ -3,6 +3,7 @@
 import logging
 import sys
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Union, cast
 
 import requests
@@ -58,6 +59,7 @@ class SynchronizedDataset:
         trim_start_end: bool = True,
         trim_no_movement_at_start_threshold: float | None = None,
         synced_recording_cache: dict[int, SynchronizedRecording] | None = None,
+        download_progress_reporter: Callable[[int, int], None] | None = None,
     ):
         """Initialize a dataset from server response data.
 
@@ -82,6 +84,8 @@ class SynchronizedDataset:
             synced_recording_cache: Already-fetched synced recordings keyed by
                 index, used when slicing to avoid re-fetching data the parent
                 dataset already loaded.
+            download_progress_reporter: Optional callback forwarded only to the
+                initial ``VideoPrefetcher`` run. Not retained on this instance.
         """
         self.id = id
         self.dataset = dataset
@@ -104,7 +108,9 @@ class SynchronizedDataset:
         )
 
         if not self._is_synced_recording_cache_complete():
-            self._perform_synced_data_prefetch()
+            self._perform_synced_data_prefetch(
+                download_progress_reporter=download_progress_reporter
+            )
 
     def _is_synced_recording_cache_complete(self) -> bool:
         """Check whether every recording is already in the synced cache."""
@@ -112,12 +118,20 @@ class SynchronizedDataset:
             idx in self._synced_recording_cache for idx in range(len(self.dataset))
         )
 
-    def _perform_synced_data_prefetch(self) -> None:
+    def _perform_synced_data_prefetch(
+        self,
+        download_progress_reporter: Callable[[int, int], None] | None = None,
+    ) -> None:
         """Fetch synced metadata, and optionally videos, for every recording.
 
         ``VideoPrefetcher`` issues the requests concurrently from one thread and
         decodes videos in a thread pool. The metadata it returns is handed to
         each ``SynchronizedRecording`` so none of them requests it again.
+
+        Args:
+            download_progress_reporter: Optional callback ``(done, total)`` while
+                prefetching recordings onto the machine. Not stored on this
+                dataset — only forwarded to ``VideoPrefetcher``.
         """
         # Indexing the last recording pages in all metadata up front, so the
         # prefetch below reads cache instead of paging concurrently.
@@ -136,6 +150,7 @@ class SynchronizedDataset:
             inflight_requests=self._num_concurrent_prefetch_requests,
             decode_workers=self._max_prefetch_decode_workers,
             download_videos=self._prefetch_videos,
+            download_progress_reporter=download_progress_reporter,
         )
         episodes = prefetcher.run()
 

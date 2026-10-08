@@ -9,7 +9,7 @@ Stages run in this order:
 1. Collect demo data.
 2. Merge with a shared, pre-existing dataset (cross-embodiment training).
 3. Start training on the merged dataset.
-4. Retrieve logs while the job is RUNNING.
+4. Retrieve logs once the job reaches an active VM phase.
 5. Assert the job COMPLETED.
 6-8. Serve the trained model via all three inference paths (direct, local
    server, remote endpoint), each with both explicit embodiment
@@ -49,6 +49,8 @@ from tests.integration.ml.shared.dataset import (
     wait_for_dataset_recording_count,
 )
 from tests.integration.ml.shared.training import (
+    ACTIVE_VM_STATUSES,
+    RESUME_ACCEPTED_STATUSES,
     TERMINAL_STATES,
     assert_no_training_log_errors,
     build_cross_embodiment_descriptions,
@@ -414,14 +416,17 @@ class TestMLLifecycle:
         running_deadline = time.time() + RUNNING_STATE_TIMEOUT_MINUTES * 60
         while True:
             job_status = nc.get_training_job_status(job_id=self.job_id)
-            logger.info(f"Job {self.job_id} status: {job_status} (waiting for RUNNING)")
-            if job_status == "RUNNING":
+            logger.info(
+                f"Job {self.job_id} status: {job_status} "
+                f"(waiting for active VM phase)"
+            )
+            if job_status in ACTIVE_VM_STATUSES:
                 break
             assert (
                 job_status not in TERMINAL_STATES
-            ), f"Job reached {job_status} before entering RUNNING state"
+            ), f"Job reached {job_status} before entering an active VM phase"
             assert time.time() < running_deadline, (
-                f"Job did not reach RUNNING state within"
+                f"Job did not reach an active VM phase within"
                 f" {RUNNING_STATE_TIMEOUT_MINUTES} minutes"
             )
             time.sleep(JOB_STATE_POLL_SECONDS)
@@ -451,7 +456,7 @@ class TestMLLifecycle:
                 assert "message" in entry, f"Log entry missing 'message': {entry}"
             assert_no_training_log_errors(
                 job_id=self.job_id,
-                context="Step 4 (training logs while RUNNING)",
+                context="Step 4 (training logs while active)",
             )
             logger.info(
                 f"[STEP 4] [PASSED] Retrieved {logs['total_entries']} Log Entries"
@@ -615,10 +620,10 @@ class TestMLLifecycle:
         resumed_job = nc.resume_training_run(job_id=job_id, additional_epochs=1)
         logger.info(f"Resume response: {resumed_job}")
 
-        assert resumed_job["status"] in {
-            "PENDING",
-            "RUNNING",
-        }, f"Expected PENDING/RUNNING after resume, got: {resumed_job['status']!r}"
+        assert resumed_job["status"] in RESUME_ACCEPTED_STATUSES, (
+            f"Expected {RESUME_ACCEPTED_STATUSES} after resume, "
+            f"got: {resumed_job['status']!r}"
+        )
         assert resumed_job.get(
             "resume_points"
         ), "Expected non-empty resume_points after resume"

@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
 
+# VM-owned phases after the cloud instance is running. Includes legacy RUNNING.
+ACTIVE_VM_STATUSES = {
+    "STARTING",
+    "SYNCING_DATA",
+    "FETCHING_DATA",
+    "CALCULATING_STATISTICS",
+    "TUNING_BATCH_SIZE",
+    "TRAINING",
+    "RUNNING",
+}
+
+# Status immediately after a successful resume is accepted by the backend.
+RESUME_ACCEPTED_STATUSES = {"QUEUED", "PENDING"}
+
 
 def cancel_incomplete_training_jobs(
     job_ids: list[str],
@@ -78,7 +92,7 @@ def wait_for_training_running_duration(
     timeout_minutes: int = 120,
     poll_seconds: int = 20,
 ) -> str:
-    """Block until *job_id* has been RUNNING for at least *running_minutes*.
+    """Block until *job_id* has been in an active VM phase for *running_minutes*.
 
     Returns early if the job reaches a terminal state. This is used to give a
     training job enough time to snapshot/prepare its dataset before a later
@@ -86,7 +100,7 @@ def wait_for_training_running_duration(
     affected by the mutation. Returns the last observed status.
     """
     deadline = time.time() + timeout_minutes * 60
-    running_since: float | None = None
+    active_since: float | None = None
     while True:
         status = nc.get_training_job_status(job_id=job_id)
         now = time.time()
@@ -96,23 +110,26 @@ def wait_for_training_running_duration(
                 f"running for {running_minutes} minutes"
             )
             return status
-        if status == "RUNNING":
-            if running_since is None:
-                running_since = now
+        if status in ACTIVE_VM_STATUSES:
+            if active_since is None:
+                active_since = now
                 logger.info(
-                    f"Training job {job_id} is RUNNING; waiting {running_minutes} "
+                    f"Training job {job_id} is {status}; waiting {running_minutes} "
                     f"minutes before proceeding"
                 )
-            elapsed_running_minutes = (now - running_since) / 60
-            if elapsed_running_minutes >= running_minutes:
+            elapsed_active_minutes = (now - active_since) / 60
+            if elapsed_active_minutes >= running_minutes:
                 logger.info(
-                    f"Training job {job_id} has been RUNNING for "
-                    f"{elapsed_running_minutes:.1f} minutes"
+                    f"Training job {job_id} has been active for "
+                    f"{elapsed_active_minutes:.1f} minutes (status={status})"
                 )
                 return status
         else:
-            running_since = None
-            logger.info(f"Training job {job_id}: status={status} (waiting for RUNNING)")
+            active_since = None
+            logger.info(
+                f"Training job {job_id}: status={status} "
+                f"(waiting for active VM phase)"
+            )
         if now >= deadline:
             cancel_incomplete_training_jobs([job_id])
             assert False, (

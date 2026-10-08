@@ -1,9 +1,9 @@
 """Integration test: a cloud training job whose synchronization step fails.
 
-A training job synchronizes its dataset (the ``PREPARING_DATA`` phase) before any
-training VM runs. A *permanent* synchronization failure during that phase must
-move the job to ``FAILED`` and surface the synchronization reason verbatim in the
-job's ``error`` field, without a training VM ever starting.
+A training job synchronizes its dataset before any training VM runs. A
+*permanent* synchronization failure during that phase must move the job to
+``FAILED`` and surface the synchronization reason verbatim in the job's
+``error`` field, without a training VM ever starting.
 
 Two distinct permanent failures are exercised against a single collected dataset,
 asserting the backend returns the *correct* reason for each:
@@ -142,8 +142,8 @@ class TestTrainingSyncFailure:
     case starts its own training job (with its own derived synced dataset), so
     reusing the source recordings across cases is safe and avoids re-collecting
     per parameter. The requested synchronization is impossible to satisfy, so
-    the backend permanently fails each job during PREPARING_DATA, before any
-    training VM runs.
+    the backend permanently fails each job during dataset synchronization,
+    before any training VM runs.
 
     Assertions:
     1. Every case's job reaches FAILED status (not stuck, not COMPLETED).
@@ -248,7 +248,7 @@ class TestTrainingSyncFailure:
             assert status == "FAILED", (
                 f"[{case.id}] Expected FAILED status, got: {status!r}. "
                 "The impossible synchronization request should permanently fail "
-                "the job during PREPARING_DATA."
+                "the job during dataset synchronization."
             )
         logger.info(
             f"[STEP 3] [PASSED] All {len(self.job_ids)} Jobs Reached FAILED On Sync"

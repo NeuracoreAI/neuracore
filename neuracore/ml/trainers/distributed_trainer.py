@@ -9,6 +9,7 @@ from typing import cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from neuracore_types import TrainingJobStatus, TrainingProgress
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
@@ -275,7 +276,7 @@ class DistributedTrainer:
                 and self.global_train_step % UPDATE_TRAINING_METADATA_EVERY == 0
             ):
                 self.storage_handler.update_training_progress(
-                    epoch=epoch, step=self.global_train_step
+                    TrainingProgress(epoch=epoch, step=self.global_train_step)
                 )
 
             # Free-up GPU during validation or before next forward pass
@@ -342,7 +343,11 @@ class DistributedTrainer:
         """
         if self.rank == 0:
             self.storage_handler.update_training_progress(
-                epoch=start_epoch, step=self.global_train_step
+                TrainingProgress(
+                    epoch=start_epoch,
+                    step=self.global_train_step,
+                    status=TrainingJobStatus.TRAINING,
+                )
             )
 
         self._seconds_per_epoch_ema = None
@@ -393,9 +398,11 @@ class DistributedTrainer:
                             train_val_seconds
                         )
                     self.storage_handler.update_training_progress(
-                        epoch=epoch,
-                        step=self.global_train_step,
-                        seconds_per_epoch=seconds_per_epoch,
+                        TrainingProgress(
+                            epoch=epoch,
+                            step=self.global_train_step,
+                            seconds_per_epoch=seconds_per_epoch,
+                        )
                     )
                     # Flush logger to ensure data is written
                     if hasattr(self.training_logger, "flush"):
@@ -483,7 +490,7 @@ class DistributedTrainer:
         """
         if not self.save_checkpoints or self.rank != 0:
             return
-        logger.info("Saving checkpoint...")
+        logger.info(f"Saving checkpoint for epoch {epoch}…")
 
         # Get the model state dict (different for DDP vs non-DDP models)
         model_state = self.get_model_without_ddp().state_dict()
@@ -509,7 +516,7 @@ class DistributedTrainer:
             )
             self.storage_handler.delete_checkpoint(checkpoint_to_remove)
 
-        logger.info("... checkpoint saved!")
+        logger.info("Checkpoint saved.")
 
     def load_checkpoint(self, path: str) -> dict:
         """Load checkpoint and restore training state.
