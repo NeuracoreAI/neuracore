@@ -31,6 +31,7 @@ jobs:
         with open("tests/integration/ml/algorithm_configs.yaml") as f:
             staging_config = yaml.safe_load(f)
 
+        # One matrix cell per training job (nested evaluations share the job).
         matrix = [
             {
                 "algorithm": algorithm["name"],

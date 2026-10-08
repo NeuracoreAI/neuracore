@@ -139,6 +139,7 @@ predictions = policy.predict(timeout=5)
 
 - [Examples](./examples/README.md)
 - [Tutorial](./docs/tutorial.md)
+- [Realtime Chunking (RTC / temporal ensemble)](./docs/realtime_chunking.md)
 - [Training](./docs/training.md)
 - [Command Line Tools](./docs/commandline.md)
 - [Dataset Importer](./docs/dataset_importer.md)
