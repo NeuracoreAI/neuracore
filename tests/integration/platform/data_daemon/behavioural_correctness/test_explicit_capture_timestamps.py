@@ -190,11 +190,11 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
 
     ensure_login()
     dataset_name = create_testing_dataset_name(_CASE)
-    spec = build_context_specs(_CASE)[0]
+    spec = build_context_specs(_CASE, dataset_name=dataset_name)[0]
     capture_start_s = _SYNTHETIC_CAPTURE_START_S
     capture_stop_s = capture_start_s + _CASE.duration_sec
 
-    with scoped_storage_state(_CASE):
+    with scoped_storage_state(_CASE, [spec]):
         with offline_daemon_running():
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
@@ -258,7 +258,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
 
     ensure_login()
     dataset_name = create_testing_dataset_name(_CASE)
-    spec = build_context_specs(_CASE)[0]
+    spec = build_context_specs(_CASE, dataset_name=dataset_name)[0]
     # The second recording's whole timeline — its bracket and its frames — sits
     # a day below the first's.
     earlier_spec = dataclasses.replace(
@@ -267,7 +267,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
         timestamp_end_s=_EARLIER_CAPTURE_START_S + _CASE.duration_sec,
     )
 
-    with scoped_storage_state(_CASE):
+    with scoped_storage_state(_CASE, [spec]):
         with offline_daemon_running():
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
@@ -375,14 +375,14 @@ def test_a_backwards_timestamp_inside_one_recording_is_rejected(
 
     ensure_login()
     dataset_name = create_testing_dataset_name(_CASE)
-    spec = dataclasses.replace(build_context_specs(_CASE)[0], dataset_name=dataset_name)
+    spec = build_context_specs(_CASE, dataset_name=dataset_name)[0]
     joint_name = "joint_0"
     # A remote start is the backend's to mint, so the daemon has to be online
     # to be told about it.
     remote = controller_type is RemoteRecordingController
     daemon = online_daemon_running if remote else offline_daemon_running
 
-    with scoped_storage_state(_CASE):
+    with scoped_storage_state(_CASE, [spec]):
         with daemon():
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
