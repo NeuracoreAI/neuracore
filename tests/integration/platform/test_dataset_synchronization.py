@@ -274,10 +274,15 @@ def _collected_dataset(
         yield dataset
     finally:
         if dataset is not None:
+            dataset_name = dataset.name
+            dataset_id = dataset.id
             try:
                 dataset.delete()
+                logger.info("Deleted dataset %s (id %s)", dataset_name, dataset_id)
             except Exception:  # noqa: BLE001
-                logger.warning("Failed to clean up dataset %s", dataset.id)
+                logger.warning(
+                    "Failed to clean up dataset %s (id %s)", dataset_name, dataset_id
+                )
         delete_cloud_robot(robot_name)
 
 
@@ -446,10 +451,15 @@ def test_dataset_synchronization_after_mutation() -> None:
             )
     finally:
         if dataset is not None:
+            dataset_name = dataset.name
+            dataset_id = dataset.id
             try:
                 dataset.delete()
+                logger.info("Deleted dataset %s (id %s)", dataset_name, dataset_id)
             except Exception:  # noqa: BLE001
-                logger.warning("Failed to clean up dataset %s", dataset.id)
+                logger.warning(
+                    "Failed to clean up dataset %s (id %s)", dataset_name, dataset_id
+                )
         delete_cloud_robot(robot_name)
 
 

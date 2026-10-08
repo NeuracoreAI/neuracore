@@ -256,8 +256,10 @@ def delete_cloud_dataset(dataset_name: str) -> None:
     """
     try:
         ensure_login()
-        nc.get_dataset(dataset_name).delete()
-        logger.info("Deleted cloud dataset %r", dataset_name)
+        dataset = nc.get_dataset(dataset_name)
+        dataset_id = dataset.id
+        dataset.delete()
+        logger.info("Deleted cloud dataset %r (id %s)", dataset_name, dataset_id)
     except Exception:  # noqa: BLE001
         logger.warning("Failed to delete cloud dataset %r", dataset_name, exc_info=True)
 

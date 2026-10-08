@@ -93,8 +93,10 @@ class TestBackToBackTraining:
             except Exception:
                 logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
         if cls.dataset is not None:
+            dataset_id = cls.dataset.id
             try:
                 cls.dataset.delete()
+                logger.info(f"Deleted dataset {cls.dataset_name} (id {dataset_id})")
             except Exception:
                 logger.warning(
                     f"Failed to delete dataset {cls.dataset_name}", exc_info=True
