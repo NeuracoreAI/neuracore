@@ -51,8 +51,7 @@ from tests.integration.platform.data_daemon.shared.test_case.context_worker impo
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    cloud_resource_deleter,
-    cloud_resource_names,
+    scoped_storage_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -336,9 +335,8 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
     """
 
     specs = build_context_specs(case=case)
-    dataset_name, robot_names = cloud_resource_names(specs)
 
-    with cloud_resource_deleter(dataset_name, robot_names):
+    with scoped_storage_state(case, specs):
         with online_daemon_running():
             pid_first = assert_exactly_one_daemon_pid()
             results = run_case_contexts(case, specs=specs)
@@ -384,9 +382,8 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
       5. Assert full cleanup after the second block exits.
     """
     specs = build_context_specs(case=case)
-    dataset_name, robot_names = cloud_resource_names(specs)
 
-    with cloud_resource_deleter(dataset_name, robot_names):
+    with scoped_storage_state(case, specs):
         with online_daemon_running():
             pid_first = assert_exactly_one_daemon_pid()
 

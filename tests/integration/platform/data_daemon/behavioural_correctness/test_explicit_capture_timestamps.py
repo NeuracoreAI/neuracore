@@ -34,13 +34,15 @@ from tests.integration.platform.data_daemon.shared.runners import (
     online_daemon_running,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+    DataDaemonTestBatch,
+    DataDaemonTestCase,
     Synchronous,
+    case_ids,
     has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_NO_WAIT_SLA_S,
-    STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
     ContextSpec,
@@ -60,17 +62,20 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
 )
 
-_CASE = Synchronous(
-    duration_sec=3,
-    joint_count=4,
-    video_count=1,
-    image_width=64,
-    image_height=64,
-    # Equal rates, so every trace shares one expected timestamp list.
-    joint_fps=10,
-    video_fps=10,
-    storage_state_action=STORAGE_STATE_DELETE,
-)
+_CASES = DataDaemonTestBatch(
+    cases=(
+        Synchronous(
+            duration_sec=3,
+            joint_count=4,
+            video_count=1,
+            image_width=64,
+            image_height=64,
+            # Equal rates, so every trace shares one expected timestamp list.
+            joint_fps=10,
+            video_fps=10,
+        ),
+    ),
+).as_cases()
 
 _MARKER_NAME = "marker_capture_timestamps"
 
@@ -180,7 +185,10 @@ def _fetch_only_recording(robot: Any) -> dict[str, Any]:
     return rows[0]
 
 
-def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> None:
+@pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
+def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone(
+    case: DataDaemonTestCase,
+) -> None:
     """Capture timestamps reach the row verbatim and do not move the window."""
     if not has_configured_org():
         pytest.skip(
@@ -189,12 +197,12 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
         )
 
     ensure_login()
-    dataset_name = create_testing_dataset_name(_CASE)
-    spec = build_context_specs(_CASE)[0]
+    dataset_name = create_testing_dataset_name(case)
+    spec = build_context_specs(case, dataset_name=dataset_name)[0]
     capture_start_s = _SYNTHETIC_CAPTURE_START_S
-    capture_stop_s = capture_start_s + _CASE.duration_sec
+    capture_stop_s = capture_start_s + case.duration_sec
 
-    with scoped_storage_state(_CASE):
+    with scoped_storage_state(case, spec):
         with offline_daemon_running():
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
@@ -237,7 +245,10 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
                 )
 
 
-def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
+@pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
+def test_a_recording_may_start_below_where_the_last_one_ended(
+    case: DataDaemonTestCase,
+) -> None:
     """A source's second recording is free to carry an earlier capture clock.
 
     An importer replaying episodes newest-first does exactly this: each episode
@@ -257,17 +268,17 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
         )
 
     ensure_login()
-    dataset_name = create_testing_dataset_name(_CASE)
-    spec = build_context_specs(_CASE)[0]
+    dataset_name = create_testing_dataset_name(case)
+    spec = build_context_specs(case, dataset_name=dataset_name)[0]
     # The second recording's whole timeline — its bracket and its frames — sits
     # a day below the first's.
     earlier_spec = dataclasses.replace(
         spec,
         timestamp_start_s=_EARLIER_CAPTURE_START_S,
-        timestamp_end_s=_EARLIER_CAPTURE_START_S + _CASE.duration_sec,
+        timestamp_end_s=_EARLIER_CAPTURE_START_S + case.duration_sec,
     )
 
-    with scoped_storage_state(_CASE):
+    with scoped_storage_state(case, spec):
         with offline_daemon_running():
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
@@ -279,7 +290,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 robot,
                 spec,
                 capture_start_s=_SYNTHETIC_CAPTURE_START_S,
-                capture_stop_s=_SYNTHETIC_CAPTURE_START_S + _CASE.duration_sec,
+                capture_stop_s=_SYNTHETIC_CAPTURE_START_S + case.duration_sec,
             )
             # A ValueError out of any log_* call here is the regression: before
             # the check was scoped to a recording, the first frame of this one
@@ -288,7 +299,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 robot,
                 earlier_spec,
                 capture_start_s=_EARLIER_CAPTURE_START_S,
-                capture_stop_s=_EARLIER_CAPTURE_START_S + _CASE.duration_sec,
+                capture_stop_s=_EARLIER_CAPTURE_START_S + case.duration_sec,
                 after_index=later_index,
             )
 
@@ -338,12 +349,14 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                     )
 
 
+@pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
 @pytest.mark.parametrize(
     "controller_type",
     [LocalRecordingController, RemoteRecordingController],
     ids=["local", "remote"],
 )
 def test_a_backwards_timestamp_inside_one_recording_is_rejected(
+    case: DataDaemonTestCase,
     controller_type: type[RecordingController],
 ) -> None:
     """The check is live, and scoped to a recording rather than switched off.
@@ -374,15 +387,15 @@ def test_a_backwards_timestamp_inside_one_recording_is_rejected(
         )
 
     ensure_login()
-    dataset_name = create_testing_dataset_name(_CASE)
-    spec = dataclasses.replace(build_context_specs(_CASE)[0], dataset_name=dataset_name)
+    dataset_name = create_testing_dataset_name(case)
+    spec = build_context_specs(case, dataset_name=dataset_name)[0]
     joint_name = "joint_0"
     # A remote start is the backend's to mint, so the daemon has to be online
     # to be told about it.
     remote = controller_type is RemoteRecordingController
     daemon = online_daemon_running if remote else offline_daemon_running
 
-    with scoped_storage_state(_CASE):
+    with scoped_storage_state(case, spec):
         with daemon():
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
@@ -430,5 +443,5 @@ def test_a_backwards_timestamp_inside_one_recording_is_rejected(
                         timestamp=capture_start_s + 0.5,
                     )
             finally:
-                controller.close(capture_start_s + _CASE.duration_sec)
+                controller.close(capture_start_s + case.duration_sec)
                 controller.shutdown()

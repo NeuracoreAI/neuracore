@@ -47,6 +47,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     PerThread,
     ProcessPerCamera,
+    Synchronous,
     case_ids,
     has_configured_org,
 )
@@ -74,7 +75,6 @@ from tests.integration.platform.data_daemon.shared.test_case.recording_control i
     remote_control_post,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    cloud_resource_deleter,
     scoped_storage_state,
     set_case_analysis_report,
 )
@@ -123,11 +123,14 @@ def test_connect_robot_starts_the_daemon() -> None:
             " or a saved current organization."
         )
 
-    robot_name = f"startup_robot_{uuid.uuid4().hex[:10]}"
+    case = Synchronous()
     dataset_name = f"testing_dataset_startup_{uuid.uuid4().hex[:6]}"
+    spec = build_context_specs(case, dataset_name=dataset_name)[0]
+    robot_name = spec.robot_name
 
     with scoped_daemon_storage_env(), scoped_online_mode():
-        with cloud_resource_deleter(dataset_name, [robot_name]):
+        stop_daemon_and_verify()
+        with scoped_storage_state(case, spec):
             peer = ChildProcess("peer-startup-control")
             commands = peer.queue()
             acks = peer.queue()
@@ -135,7 +138,6 @@ def test_connect_robot_starts_the_daemon() -> None:
             peer_retired = False
             recording_id = None
             try:
-                stop_daemon_and_verify()
                 nc.create_dataset(dataset_name)
                 dataset_id = nc.get_dataset(dataset_name).id
 
