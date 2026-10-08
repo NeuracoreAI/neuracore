@@ -50,7 +50,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
-    STORAGE_STATE_EMPTY,
     DepthMode,
     ProducerChannels,
     ProducerPacing,
@@ -360,7 +359,7 @@ class DataDaemonTestCase:
     image_width: int | None = None
     image_height: int | None = None
     kill_daemon_between_tests: bool = True
-    storage_state_action: StorageStateAction = STORAGE_STATE_EMPTY
+    storage_state_action: StorageStateAction = STORAGE_STATE_DELETE
     stop_method: StopMethod = STOP_METHOD_CLI
     preserve_artifacts_per_test: bool = False
     context_duration_mode: str = DURATION_MODE_FIXED

@@ -127,7 +127,7 @@ def setup_per_test_artifact_dirs() -> tuple[Path, Path]:
 @contextmanager
 def scoped_storage_state(
     case: DataDaemonTestCase,
-    specs: Sequence[ContextSpec] = (),
+    specs: ContextSpec | Sequence[ContextSpec],
 ) -> Generator[None]:
     """Apply local storage and cloud cleanup around the block.
 
@@ -139,12 +139,14 @@ def scoped_storage_state(
     Args:
         case: Test case whose ``storage_state_action`` decides what is
             cleaned.
-        specs: Context specs naming the cloud dataset and robots to delete.
-            Empty skips cloud cleanup entirely.
+        specs: A context spec, or several, naming the cloud dataset and robots
+            to delete. An empty sequence skips cloud cleanup.
 
     Yields:
         ``None``.
     """
+    if not isinstance(specs, Sequence):
+        specs = [specs]
     dataset_name, robot_names = cloud_resource_names(specs)
     if case.storage_state_action == STORAGE_STATE_PRESERVE and (
         dataset_name is not None or robot_names
@@ -156,7 +158,7 @@ def scoped_storage_state(
         )
         dataset_name, robot_names = None, []
 
-    with cloud_resource_deleter(dataset_name, robot_names):
+    with _cloud_resource_deleter(dataset_name, robot_names):
         with report_step("Prepare local daemon storage"):
             with Timer(
                 30.0,
@@ -334,7 +336,7 @@ def cloud_resource_names(
 
 
 @contextmanager
-def cloud_resource_deleter(
+def _cloud_resource_deleter(
     dataset_name: str | None = None,
     robot_names: Sequence[str] = (),
 ) -> Generator[None]:
