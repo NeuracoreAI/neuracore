@@ -45,7 +45,6 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
-from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.core.video_encoding import Codec
 from neuracore.data_daemon.bridge import notify_daemon_config_changed
 from neuracore.data_daemon.video_codec import set_active_profile_video_codec
@@ -402,7 +401,7 @@ def _log_camera_data(
     robot_name: str | None = None,
     instance: int = 0,
     dry_run: bool = False,
-    stream_frame: np.ndarray | None = None,
+    depth_scale_m: float | None = None,
 ) -> None:
     """Log camera data for a robot.
 
@@ -415,8 +414,7 @@ def _log_camera_data(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         dry_run: If True, skip actual logging (validation only)
-        stream_frame: Frame the live data stream holds, when it differs from
-            the image sent for recording. None holds the image itself.
+        depth_scale_m: Meters per sensor unit of a uint16 depth image.
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -460,7 +458,7 @@ def _log_camera_data(
     # or having to make two copies for streaming and bucket storage.
     stream.log(
         camera_data_without_frame,
-        frame=image if stream_frame is None else stream_frame,
+        frame=image,
         recording_epoch=robot._recording_epoch(),
     )
 
@@ -473,6 +471,7 @@ def _log_camera_data(
         image.dtype.name,
         memoryview(contiguous).cast("B"),
         camera_data_without_frame.timestamp,
+        depth_scale_m,
     )
 
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
@@ -1326,8 +1325,6 @@ def log_depth(
     if not np.isfinite(depth_scale) or depth_scale <= 0:
         raise ValueError(f"depth_scale must be positive, got {depth_scale}")
     depth_scale_m = float(depth_scale)
-    depth_m = depth.astype(np.float32) * np.float32(depth_scale_m)
-    recorded = np.where(depth_m > MAX_DEPTH, np.float32(0), depth_m)
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     if timestamp is None:
         timestamp = time.time()
@@ -1341,12 +1338,12 @@ def log_depth(
     _log_camera_data(
         DataType.DEPTH_IMAGES,
         depth_camera_data,
-        recorded,
+        depth.astype("<u2", copy=False),
         name,
         robot_name,
         instance,
         dry_run,
-        stream_frame=depth,
+        depth_scale_m=depth_scale_m,
     )
 
 

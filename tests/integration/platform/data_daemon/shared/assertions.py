@@ -50,7 +50,6 @@ from neuracore_types import Dataset, DataType
 
 import neuracore as nc
 from neuracore.core.data.recording import Recording
-from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.data_daemon.helpers import get_daemon_pid_path
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
@@ -95,7 +94,7 @@ if TYPE_CHECKING:
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_TYPE_BY_STREAM,
-    DEPTH_ROUND_TRIP_ATOL_M,
+    DEPTH_HOLE_SIZE,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
@@ -325,7 +324,9 @@ def _collect_episode_summary(synced_episode: object) -> dict[str, object]:
         - ``frame_codes`` — per-camera list of decoded frame numbers from
             :func:`decode_frame_number`.
     - ``depth_counts`` — per-camera frame counts.
-        - ``depth_frames`` — per-camera list of ``(frame_idx, frame)`` pairs,
+        - ``depth_frames``: per-camera list of
+          ``(frame_idx, frame, depth_scale_m)`` triples holding the stored
+          uint16 frame,
           where ``frame_idx`` is the *original capture-order* index the
           synchronized episode reports for that frame (see
           ``CameraData.frame_idx`` — "needed so we can index video after
@@ -388,8 +389,8 @@ def _collect_episode_summary(synced_episode: object) -> dict[str, object]:
                 depth_counts[name] = depth_counts.get(name, 0) + 1
                 depth_frames.setdefault(name, []).append((
                     int(camera_data.frame_idx),
-                    camera_data.frame.astype(np.float32)
-                    * np.float32(camera_data.depth_scale_m),
+                    np.asarray(camera_data.frame),
+                    float(camera_data.depth_scale_m),
                 ))
             summary["depth_counts"] = depth_counts
             summary["depth_frames"] = depth_frames
@@ -569,67 +570,73 @@ def _assert_synced_depth_values_round_trip(
     image_height: int,
     depth_mode: DepthMode,
 ) -> None:
-    """Verify retrieved depth values came from frames admitted at this boundary.
+    """Verify retrieved depth frames are frames admitted at this boundary.
 
     Synchronization can repeat or skip frames, and a boundary frame may be
     admitted without being strictly owed. Count and timestamp checks enforce
-    episode shape independently; this check verifies that every retrieved value
-    matches, in meters, a deterministic frame emitted inside or close enough to
-    the recording window, as nc.log_depth records it.
+    episode shape independently; this check verifies that every retrieved
+    frame equals, bit for bit, the uint16 frame of a deterministic frame
+    emitted inside or close enough to the recording window, with its holes
+    still 0.
     """
     assert depth_frames, f"No depth frames retrieved for camera {camera_name!r}"
     assert source_frame_indexes, f"Camera {camera_name!r}: no classified frames"
 
-    depth_scale = np.float32(depth_scale_for_mode(depth_mode))
+    expected_scale = depth_scale_for_mode(depth_mode)
     frame_code_prefix = frame_code_base(
         context_index=context_index,
         recording_ordinal=recording_index,
         camera_index=camera_index,
     )
-    expected_candidates = []
-    for source_frame_index in source_frame_indexes:
-        logged_m = (
-            encode_depth_frame(
-                frame_code_prefix + source_frame_index,
-                image_width,
-                image_height,
-                depth_mode,
-            ).astype(np.float32)
-            * depth_scale
+    expected_candidates = [
+        encode_depth_frame(
+            frame_code_prefix + source_frame_index,
+            image_width,
+            image_height,
+            depth_mode,
         )
-        expected_candidates.append(
-            np.where(logged_m > MAX_DEPTH, np.float32(0), logged_m)
-        )
+        for source_frame_index in source_frame_indexes
+    ]
 
-    mismatches: list[tuple[int, float]] = []
-    for frame_idx, actual in depth_frames:
+    mismatches: list[tuple[int, str]] = []
+    for frame_idx, actual, depth_scale_m in depth_frames:
         assert frame_idx >= 0, f"Camera {camera_name!r}: negative frame_idx {frame_idx}"
-        actual_f32 = np.asarray(actual, dtype=np.float32)
-        shape_matches = [
-            expected
-            for expected in expected_candidates
-            if actual_f32.shape == expected.shape
+        if actual.dtype != np.uint16:
+            mismatches.append((frame_idx, f"dtype {actual.dtype}"))
+            continue
+        if not math.isclose(depth_scale_m, expected_scale, rel_tol=1e-9):
+            mismatches.append((frame_idx, f"depth_scale_m {depth_scale_m}"))
+            continue
+        holes = actual[
+            image_height - DEPTH_HOLE_SIZE :, image_width - DEPTH_HOLE_SIZE :
         ]
+        if holes.any():
+            mismatches.append((frame_idx, "no-return pixels filled"))
+            continue
         matching = any(
-            abs(float(actual_f32.flat[0] - expected.flat[0])) <= DEPTH_ROUND_TRIP_ATOL_M
-            and np.allclose(actual_f32, expected, atol=DEPTH_ROUND_TRIP_ATOL_M)
-            for expected in shape_matches
+            actual.shape == expected.shape
+            and actual.flat[0] == expected.flat[0]
+            and np.array_equal(actual, expected)
+            for expected in expected_candidates
         )
         if not matching:
-            max_abs_diff = min(
+            fewest_differences = min(
                 (
-                    float(np.max(np.abs(actual_f32 - expected)))
-                    for expected in shape_matches
+                    int(np.count_nonzero(actual != expected))
+                    for expected in expected_candidates
+                    if actual.shape == expected.shape
                 ),
-                default=float("nan"),
+                default=-1,
             )
-            mismatches.append((frame_idx, max_abs_diff))
+            mismatches.append(
+                (frame_idx, f"{fewest_differences} pixel(s) differ from the closest")
+            )
 
     assert not mismatches, (
         f"Camera {camera_name!r}: {len(mismatches)}/{len(depth_frames)} depth "
-        f"frame(s) failed the round-trip value check against what was logged "
-        f"(tolerance={DEPTH_ROUND_TRIP_ATOL_M}m); "
-        f"first (frame_idx, max_abs_diff_m): {mismatches[:5]}"
+        f"frame(s) are not a logged frame "
+        f"(mode={depth_mode}, scale={expected_scale}); "
+        f"first (frame_idx, reason): {mismatches[:5]}"
     )
 
 
