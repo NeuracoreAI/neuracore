@@ -6,6 +6,7 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import logging
+from typing import Any
 
 import requests
 from neuracore_types import (
@@ -20,9 +21,15 @@ from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.endpoint import DirectPolicy, LocalServerPolicy, RemoteServerPolicy
+from neuracore.core.endpoint import (
+    DirectPolicy,
+    LocalServerPolicy,
+    RealTimePolicy,
+    RemoteServerPolicy,
+)
 from neuracore.core.endpoint import policy as _policy
 from neuracore.core.endpoint import policy_local_server as _policy_local_server
+from neuracore.core.endpoint import policy_realtime as _policy_realtime
 from neuracore.core.endpoint import policy_remote_server as _policy_remote_server
 from neuracore.core.get_latest_sync_point import (
     check_remote_nodes_connected as _check_remote_nodes_connected,
@@ -111,6 +118,85 @@ def policy(
         model_file=model_file,
         device=device,
         robot_id=robot_id,
+    )
+
+
+def policy_realtime(
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
+    robot_id: str | None = None,
+    robot_name: str | None = None,
+    instance: int = 0,
+    *,
+    mode: str,
+    config: Any,
+    control_hz: float,
+    adapt_inference_delay: bool = True,
+) -> RealTimePolicy:
+    """Launch an in-process policy with async overlapping-chunk execution.
+
+    Modes (mutually exclusive; required — no default):
+
+    * ``"rtc"`` — real-time chunking (arXiv:2506.07339); diffusion/flow only.
+      Pass an :class:`~neuracore.ml.utils.real_time_chunking.RTCConfig`.
+    * ``"temporal_ensemble"`` — unguided predict + exponential merge. Pass a
+      :class:`~neuracore.ml.utils.temporal_ensemble.TemporalEnsembleConfig`.
+
+    Drive with ``policy.start()`` then ``policy.get_action(obs=None)`` each
+    control tick (``obs=None`` uses :func:`get_latest_sync_point`).
+
+    Args:
+        input_embodiment_description: Specification of the model input data order.
+        output_embodiment_description: Specification of the model output data order.
+        train_run_name: Name of the training run to load the model from.
+        model_file: Path to the model file to load.
+        device: Torch device to run the model on (CPU or GPU, or MPS).
+        robot_id: Robot ID used to select embodiments from the model archive when
+            input/output embodiments are not provided. If both robot_id and
+            robot_name are omitted, the active robot is used as a fallback.
+        robot_name: Robot name to resolve to robot_id before model loading.
+        instance: Robot instance number used with robot_name resolution.
+        mode: ``"rtc"`` or ``"temporal_ensemble"``.
+        config: Mode-specific configuration.
+        control_hz: Rate at which ``get_action`` will be called.
+        adapt_inference_delay: For RTC, track measured latency with ``d``.
+
+    Returns:
+        RealTimePolicy ready for ``start()`` / ``get_action()``.
+
+    Raises:
+        EndpointError: If the model download or initialization fails, or the
+            model does not support the requested mode.
+        ConfigError: If there is an error trying to get the current org.
+        ValueError: If the embodiment descriptions cannot be resolved.
+    """
+    if not (input_embodiment_description and output_embodiment_description):
+        try:
+            robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+        except Exception:
+            raise ValueError(
+                "Missing input_embodiment_description or "
+                "output_embodiment_description for policy inference. "
+                "Tried to load from training metadata or the model archive "
+                "using robot_id/robot_name/active robot, but failed. "
+                "Please provide a robot_id/robot_name or connect to "
+                "a robot first."
+            )
+
+    return _policy_realtime(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        train_run_name=train_run_name,
+        model_file=model_file,
+        device=device,
+        robot_id=robot_id,
+        mode=mode,
+        config=config,
+        control_hz=control_hz,
+        adapt_inference_delay=adapt_inference_delay,
     )
 
 

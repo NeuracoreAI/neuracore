@@ -222,3 +222,29 @@ policy = nc.policy_local_server(
     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION)
 ```
+
+#### Realtime overlapping-chunk execution
+
+For continuous robot control where inference latency matters, use
+`nc.policy_realtime` so the next chunk is generated in the background while
+actions stream from the current chunk. Modes: `"rtc"` (diffusion/flow guided
+sampling) or `"temporal_ensemble"` (unguided predict + merge).
+
+```python
+from neuracore.ml.utils.real_time_chunking import RTCConfig
+
+policy = nc.policy_realtime(
+    train_run_name="MyTrainingJob",
+    mode="rtc",
+    config=RTCConfig(inference_delay=4, execution_horizon=16),
+    control_hz=50.0,
+)
+policy.start()
+policy.get_action()  # seed obs from Neuracore streams (or pass SynchronizedPoint)
+assert policy.wait_for_first_chunk(timeout=30.0)
+action = policy.get_action()  # one action per control tick; non-blocking
+policy.stop()
+```
+
+Full guide: [realtime_chunking.md](realtime_chunking.md). Example:
+[`examples/example_realtime_chunking_vx300s.py`](../examples/example_realtime_chunking_vx300s.py).
