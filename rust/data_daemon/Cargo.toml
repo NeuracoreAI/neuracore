@@ -20,6 +20,8 @@ crc32c.workspace = true
 dashmap.workspace = true
 data_daemon_shared = { path = "../data_daemon_shared" }
 dirs.workspace = true
+gamut-core = "=2.0.1"
+gamut-jxl = { version = "=0.4.0", default-features = false, features = ["encode"] }
 iceoryx2.workspace = true
 libc.workspace = true
 logroller.workspace = true

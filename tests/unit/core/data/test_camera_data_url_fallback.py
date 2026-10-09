@@ -1,4 +1,4 @@
-"""Tests for the lossless -> lossy video URL fallback in SynchronizedRecording."""
+"""Tests for the camera data URL candidates in SynchronizedRecording."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _response(status_code: int, url: str | None = None) -> MagicMock:
     return response
 
 
-def _call_get_video_url(
+def _call_get_camera_data_url(
     session: MagicMock, camera_type: DataType = DataType.RGB_IMAGES
 ) -> str:
     fake_self = SimpleNamespace(id="rec-1", dataset=SimpleNamespace(org_id="org-1"))
@@ -39,7 +39,7 @@ def _call_get_video_url(
         patch(f"{MODULE}.thread_local_session", return_value=session),
         patch(f"{MODULE}.get_auth", return_value=auth),
     ):
-        return SynchronizedRecording._get_video_url(fake_self, camera_type, "cam")
+        return SynchronizedRecording._get_camera_data_url(fake_self, camera_type, "cam")
 
 
 def test_falls_back_to_lossy_when_lossless_missing() -> None:
@@ -55,7 +55,7 @@ def test_falls_back_to_lossy_when_lossless_missing() -> None:
     session = MagicMock()
     session.get.side_effect = fake_get
 
-    assert _call_get_video_url(session) == "https://example.com/lossy.mp4"
+    assert _call_get_camera_data_url(session) == "https://example.com/lossy.mp4"
     # Lossless is tried first, lossy second.
     assert requested == [
         "RGB_IMAGES/cam/lossless.mp4",
@@ -73,7 +73,7 @@ def test_uses_lossless_when_present() -> None:
     session = MagicMock()
     session.get.side_effect = fake_get
 
-    assert _call_get_video_url(session) == "https://example.com/lossless.mp4"
+    assert _call_get_camera_data_url(session) == "https://example.com/lossless.mp4"
     # The lossless hit short-circuits — lossy is never requested.
     assert requested == ["RGB_IMAGES/cam/lossless.mp4"]
 
@@ -83,7 +83,7 @@ def test_raises_when_neither_lossless_nor_lossy_found() -> None:
     session.get.side_effect = lambda *args, **kwargs: _response(404)
 
     with pytest.raises(requests.HTTPError):
-        _call_get_video_url(session)
+        _call_get_camera_data_url(session)
 
 
 def test_non_404_on_lossless_raises_without_falling_back() -> None:
@@ -100,7 +100,7 @@ def test_non_404_on_lossless_raises_without_falling_back() -> None:
     session.get.side_effect = fake_get
 
     with pytest.raises(requests.HTTPError):
-        _call_get_video_url(session)
+        _call_get_camera_data_url(session)
     # Only the lossless request is made; the lossy fallback is never attempted.
     assert requested == ["RGB_IMAGES/cam/lossless.mp4"]
 
@@ -118,11 +118,11 @@ def test_depth_requests_lossless_only_and_never_falls_back_to_lossy() -> None:
     session.get.side_effect = fake_get
 
     with pytest.raises(requests.HTTPError):
-        _call_get_video_url(session, DataType.DEPTH_IMAGES)
-    assert requested == ["DEPTH_IMAGES/cam/lossless.mp4"]
+        _call_get_camera_data_url(session, DataType.DEPTH_IMAGES)
+    assert requested == ["DEPTH_IMAGES/cam/lossless.bin"]
 
 
-def test_get_video_url_requests_a_retrying_session() -> None:
+def test_get_camera_data_url_requests_a_retrying_session() -> None:
     fake_self = SimpleNamespace(id="rec-1", dataset=SimpleNamespace(org_id="org-1"))
     fake_self._get_recording_file_url = MethodType(
         SynchronizedRecording._get_recording_file_url, fake_self
@@ -136,7 +136,9 @@ def test_get_video_url_requests_a_retrying_session() -> None:
         patch(f"{MODULE}.thread_local_session", return_value=session) as mock_session,
         patch(f"{MODULE}.get_auth", return_value=auth),
     ):
-        SynchronizedRecording._get_video_url(fake_self, DataType.RGB_IMAGES, "cam")
+        SynchronizedRecording._get_camera_data_url(
+            fake_self, DataType.RGB_IMAGES, "cam"
+        )
 
     mock_session.assert_called_with(retry_transient=True)
 
@@ -153,4 +155,4 @@ def test_non_404_on_lossy_fallback_propagates() -> None:
     session.get.side_effect = fake_get
 
     with pytest.raises(requests.HTTPError):
-        _call_get_video_url(session)
+        _call_get_camera_data_url(session)

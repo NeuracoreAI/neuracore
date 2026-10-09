@@ -14,6 +14,7 @@ from neuracore_types import (
     CameraData,
     CrossEmbodimentUnion,
     DataType,
+    DepthCameraData,
     EmbodimentDescription,
     NCData,
     NCDataUnion,
@@ -29,24 +30,25 @@ from neuracore_types import (
     SynchronizeRecordingStatus,
 )
 from neuracore_types.nc_data.point_cloud_data import decode_point_cloud_frame
-from PIL import Image
 from pydantic import ValidationError as PydanticValidationError
 
 from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.data.frame_cache import (
     acquire_decoding_lock,
+    cache_depth_frames,
+    decode_and_cache_rgb_frames,
     delete_decoding_lock,
+    get_camera_data_filenames,
     lock_file_for,
     point_cloud_lock_file_for,
-    publish_decoded_frames,
-    video_filename_preference,
+    read_depth_frame,
+    read_rgb_frame,
     wait_for_lock_release,
 )
 from neuracore.core.data.serialized_synchronized_episode import (
     SerializedSynchronizedEpisode,
 )
 from neuracore.core.exceptions import SynchronizationError
-from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 from neuracore.core.utils.download import download_bytes, stream_to_file
 from neuracore.core.utils.http_session import thread_local_session
 
@@ -359,26 +361,26 @@ class SynchronizedRecording:
         response.raise_for_status()
         return response.json()["url"]
 
-    def _get_video_url(self, camera_type: DataType, camera_id: str) -> str:
-        """Get streaming URL for a specific camera's video data.
+    def _get_camera_data_url(self, camera_type: DataType, camera_id: str) -> str:
+        """Get the download URL for a camera's data file.
 
         Args:
-            camera_type: Type of camera (e.g., "rgbs", "depths").
+            camera_type: Type of camera (e.g. rgb_images, depth_images).
             camera_id: Unique identifier for the camera.
 
         Returns:
-            URL string for downloading the video file.
+            URL string for downloading the camera data file.
 
         Raises:
             requests.HTTPError: If every candidate is absent (404), or for any
                 non-404 HTTP error.
         """
-        filename_preference = video_filename_preference(camera_type)
+        preferred_filenames = get_camera_data_filenames(camera_type)
 
-        for video_filename in filename_preference:
+        for filename in preferred_filenames:
             try:
                 return self._get_recording_file_url(
-                    f"{camera_type.value}/{camera_id}/{video_filename}"
+                    f"{camera_type.value}/{camera_id}/{filename}"
                 )
             except requests.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 404:
@@ -387,7 +389,7 @@ class SynchronizedRecording:
 
         raise requests.HTTPError(
             f"No candidate filename found for recording {self.id} "
-            f"(camera {camera_type.value}/{camera_id}); tried: {filename_preference}"
+            f"(camera {camera_type.value}/{camera_id}); tried: {preferred_filenames}"
         )
 
     def _get_point_cloud_url(self, sensor_id: str, filename: str) -> str:
@@ -404,59 +406,83 @@ class SynchronizedRecording:
             f"{DataType.POINT_CLOUDS.value}/{sensor_id}/{filename}"
         )
 
-    def _download_video_and_cache_frames_to_disk(
-        self, camera_type: DataType, camera_id: str, video_frame_cache_path: Path
+    def _download_rgb_video_and_cache_frames_to_disk(
+        self, camera_id: str, frames_dir: Path
     ) -> None:
-        """Download video and cache individual frames as images.
+        """Download an RGB video and cache its frames as images.
 
         Args:
-            camera_type: Type of camera (e.g., "rgbs", "depths").
             camera_id: Unique identifier for the camera.
-            video_frame_cache_path: Path to the directory where video frames are cached.
+            frames_dir: Cache directory to move the frames to.
         """
-        video_frame_cache_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = lock_file_for(video_frame_cache_path)
-        acquire_decoding_lock(lock_file, camera_id)
+        self._download_and_cache_camera_data(
+            DataType.RGB_IMAGES, camera_id, frames_dir, decode_and_cache_rgb_frames
+        )
+
+    def _download_depth_images_and_cache_frames_to_disk(
+        self, camera_id: str, frames_dir: Path
+    ) -> None:
+        """Download a depth frames file and cache it.
+
+        Args:
+            camera_id: Unique identifier for the camera.
+            frames_dir: Cache directory to move the frames to.
+        """
+        self._download_and_cache_camera_data(
+            DataType.DEPTH_IMAGES, camera_id, frames_dir, cache_depth_frames
+        )
+
+    def _download_and_cache_camera_data(
+        self,
+        camera_type: DataType,
+        camera_id: str,
+        frames_dir: Path,
+        cache_frames: Callable[[Path, Path, Path], None],
+    ) -> None:
+        """Download a camera data file and cache its frames under a lock.
+
+        Args:
+            camera_type: Data type of the camera.
+            camera_id: Unique identifier for the camera.
+            frames_dir: Cache directory to move the frames to.
+            cache_frames: Function taking the downloaded file, the staging
+                directory and the frames directory, that caches the frames.
+        """
+        frames_dir.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_file_for(frames_dir)
+        acquire_decoding_lock(lock_file, camera_type, camera_id)
 
         try:
-            # Another process may have published this cache while we waited for
+            # Another process may have cached these frames while we waited for
             # the lock; nothing left to do.
-            if video_frame_cache_path.exists():
+            if frames_dir.exists():
                 return
 
             self.cache_manager.ensure_space_available()
 
             # Stage the download+decode in a temp dir on the same filesystem, then
-            # publish atomically. A reader sees either a complete frames directory
-            # or none at all -- never a partially decoded one.
-            with tempfile.TemporaryDirectory(
-                dir=video_frame_cache_path.parent
-            ) as temp_dir:
+            # move into the cache atomically. A reader sees either a complete frames
+            # directory or none at all -- never a partially decoded one.
+            with tempfile.TemporaryDirectory(dir=frames_dir.parent) as temp_dir:
                 staging_dir = Path(temp_dir) / "frames"
                 staging_dir.mkdir()
-                video_location = Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
+                camera_data_path = (
+                    Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
+                )
                 stream_to_file(
-                    self._get_video_url(camera_type, camera_id), video_location
+                    self._get_camera_data_url(camera_type, camera_id), camera_data_path
                 )
-                publish_decoded_frames(
-                    video_location, staging_dir, video_frame_cache_path
-                )
+                cache_frames(camera_data_path, staging_dir, frames_dir)
         finally:
             delete_decoding_lock(lock_file)
 
-    def _get_frame_from_disk_cache(
-        self,
-        camera_type: DataType,
-        camera_data: dict[str, CameraData],
-        transform_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    def _get_rgb_frame_from_disk_cache(
+        self, camera_data: dict[str, CameraData]
     ) -> dict[str, CameraData]:
-        """Get video frame from disk cache for camera data.
+        """Get RGB frames from disk cache for camera data.
 
         Args:
-            camera_type: DataType indicating the type of camera data.
             camera_data: Dictionary of camera data with camera IDs as keys.
-            frame_idx: Index of the frame to retrieve.
-            transform_fn: Optional function to transform frames (e.g., rgb_to_depth).
 
         Returns:
             Dictionary of CameraData with populated frames.
@@ -464,23 +490,55 @@ class SynchronizedRecording:
         # Create new dict with new CameraData instances to avoid mutating originals
         result = {}
         for cam_id, cam_data in camera_data.items():
-            cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type.value / cam_id
-            lock_file = lock_file_for(cam_id_rgb_root)
-            wait_for_lock_release(lock_file, cam_id_rgb_root)
+            frames_dir = (
+                self.cache_dir / f"{self.id}" / DataType.RGB_IMAGES.value / cam_id
+            )
+            wait_for_lock_release(lock_file_for(frames_dir), frames_dir)
 
-            if not cam_id_rgb_root.exists():
-                # Not in cache: download and decode. The frames directory is
-                # published atomically, so its existence means it is complete.
-                self._download_video_and_cache_frames_to_disk(
-                    camera_type, cam_id, cam_id_rgb_root
+            if not frames_dir.exists():
+                # Not in cache: download and decode. The frames directory moves into
+                # the cache atomically, so its existence means it is complete.
+                self._download_rgb_video_and_cache_frames_to_disk(cam_id, frames_dir)
+
+            frame = read_rgb_frame(frames_dir, cam_data.frame_idx)
+            result[cam_id] = cam_data.model_copy(update={"frame": frame})
+
+        return result
+
+    def _get_depth_frame_from_disk_cache(
+        self, camera_data: dict[str, CameraData]
+    ) -> dict[str, CameraData]:
+        """Get depth frames from disk cache for camera data.
+
+        Args:
+            camera_data: Dictionary of depth camera data with camera IDs as keys.
+
+        Returns:
+            Dictionary of CameraData with populated frames.
+
+        Raises:
+            ValueError: If a depth frame has no byte range in lossless.bin.
+        """
+        result = {}
+        for cam_id, cam_data in camera_data.items():
+            if (
+                not isinstance(cam_data, DepthCameraData)
+                or cam_data.offset is None
+                or cam_data.length is None
+            ):
+                raise ValueError(
+                    f"Depth frame {cam_data.frame_idx} of camera {cam_id} needs "
+                    "an offset and length in lossless.bin"
                 )
+            frames_dir = (
+                self.cache_dir / f"{self.id}" / DataType.DEPTH_IMAGES.value / cam_id
+            )
+            wait_for_lock_release(lock_file_for(frames_dir), frames_dir)
 
-            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
-            frame = Image.open(frame_file)
+            if not frames_dir.exists():
+                self._download_depth_images_and_cache_frames_to_disk(cam_id, frames_dir)
 
-            if transform_fn:
-                frame = Image.fromarray(transform_fn(np.array(frame)))
-
+            frame = read_depth_frame(frames_dir, cam_data.offset, cam_data.length)
             result[cam_id] = cam_data.model_copy(update={"frame": frame})
 
         return result
@@ -561,7 +619,7 @@ class SynchronizedRecording:
     ) -> None:
         """Download point cloud trace files and cache frames to disk."""
         lock_file = point_cloud_lock_file_for(point_cloud_cache_path)
-        acquire_decoding_lock(lock_file, sensor_id)
+        acquire_decoding_lock(lock_file, DataType.POINT_CLOUDS, sensor_id)
 
         try:
             self.cache_manager.ensure_space_available()
@@ -658,19 +716,21 @@ class SynchronizedRecording:
         Raises:
             ValueError: If data_type is not one of FRAME_DATA_TYPES.
         """
-        if data_type not in FRAME_DATA_TYPES:
-            raise ValueError(f"Data type {data_type} has no frames to load")
-        if data_type == DataType.RGB_IMAGES:
-            return self._get_frame_from_disk_cache(
-                data_type, cast(dict[str, CameraData], frames)
-            )
-        if data_type == DataType.DEPTH_IMAGES:
-            return self._get_frame_from_disk_cache(
-                data_type, cast(dict[str, CameraData], frames), rgb_to_depth_storage
-            )
-        return self._get_point_cloud_from_disk_cache(
-            cast(dict[str, PointCloudData], frames)
-        )
+        match data_type:
+            case DataType.RGB_IMAGES:
+                return self._get_rgb_frame_from_disk_cache(
+                    cast(dict[str, CameraData], frames)
+                )
+            case DataType.DEPTH_IMAGES:
+                return self._get_depth_frame_from_disk_cache(
+                    cast(dict[str, CameraData], frames)
+                )
+            case DataType.POINT_CLOUDS:
+                return self._get_point_cloud_from_disk_cache(
+                    cast(dict[str, PointCloudData], frames)
+                )
+            case _:
+                raise ValueError(f"Data type {data_type} has no frames to load")
 
     def get_sync_point(
         self, timestep: int, embodiment_description: EmbodimentDescription

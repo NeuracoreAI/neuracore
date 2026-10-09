@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import av
+import numpy as np
 import requests
 from neuracore_types import DataType
 from neuracore_types.utils.name_utils import to_safe_name
@@ -17,9 +18,9 @@ from PIL import Image
 
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.data.frame_cache import video_filename_preference
+from neuracore.core.data.frame_cache import get_camera_data_filenames
 from neuracore.core.data.recording import Recording
-from neuracore.core.utils.depth_utils import rgb_to_depth_storage
+from neuracore.core.utils.depth_utils import decode_depth_frame
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
 
@@ -47,14 +48,19 @@ class McapExporter(DatasetExporter):
             return path, "application/octet-stream", recording.download(path)
         if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
             return None
-        for filename in video_filename_preference(data_type):
+        media_type = (
+            "video/mp4"
+            if data_type == DataType.RGB_IMAGES
+            else "application/octet-stream"
+        )
+        for filename in get_camera_data_filenames(data_type):
             path = f"{prefix}/{filename}"
             try:
-                return path, "video/mp4", recording.download(path)
+                return path, media_type, recording.download(path)
             except requests.HTTPError as exc:
                 if exc.response is None or exc.response.status_code != 404:
                     raise
-        raise ValueError(f"No video payload found for sensor {prefix}.")
+        raise ValueError(f"No camera data found for sensor {prefix}.")
 
     def check_dependencies(self) -> None:
         """Require only the MCAP optional dependencies."""
@@ -95,15 +101,18 @@ class McapExporter(DatasetExporter):
     ) -> Iterator[dict]:
         """Keep raw trace fields and embed independently decodable camera frames.
 
-        Original videos remain attachments. Inline PNG (RGB) and float TIFF
-        (depth in meters) let message-based importers read every image without
-        needing Neuracore-specific attachment handling.
+        Original videos and depth frames files remain attachments. Inline PNG (RGB)
+        and float TIFF (depth in meters) let message-based importers read every
+        image without needing Neuracore-specific attachment handling.
         """
         if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
             yield from trace
             return
         if media is None:
-            raise ValueError("Camera trace has no video payload.")
+            raise ValueError("Camera trace has no camera data.")
+        if data_type == DataType.DEPTH_IMAGES:
+            yield from McapExporter._depth_frames_samples(trace, media)
+            return
         with av.open(io.BytesIO(media[2])) as video:
             frames = video.decode(video=0)
             for index, item in enumerate(trace):
@@ -113,18 +122,45 @@ class McapExporter(DatasetExporter):
                 if frame is None:
                     raise ValueError(f"Missing video frame {index} in {media[0]}.")
                 pixels = frame.to_ndarray(format="rgb24")
-                image_format = "PNG"
-                if data_type == DataType.DEPTH_IMAGES:
-                    pixels = rgb_to_depth_storage(pixels)
-                    image_format = "TIFF"
                 with io.BytesIO() as encoded:
-                    Image.fromarray(pixels).save(encoded, format=image_format)
+                    Image.fromarray(pixels).save(encoded, format="PNG")
                     yield {
                         **item,
                         "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
                     }
             if next(frames, None) is not None:
                 raise ValueError(f"Unreferenced video frames in {media[0]}.")
+
+    @staticmethod
+    def _depth_frames_samples(
+        trace: list[dict], media: tuple[str, str, bytes]
+    ) -> Iterator[dict]:
+        """Embed each frame of a depth frames file as a float TIFF in meters.
+
+        Args:
+            trace: Trace entries of the depth camera, each holding the offset,
+                length and metres per unit of its frame.
+            media: Frames file path, media type and bytes.
+
+        Yields:
+            Trace entries with their frame attached as base64 TIFF data.
+
+        Raises:
+            ValueError: If a trace entry has no byte range inside the file.
+        """
+        payload = media[2]
+        for item in trace:
+            offset, length = item.get("offset"), item.get("length")
+            if offset is None or length is None or offset + length > len(payload):
+                raise ValueError(f"Invalid depth frame range in {media[0]}: {item}.")
+            frame = decode_depth_frame(payload[offset : offset + length])
+            metres = frame.astype(np.float32) * np.float32(item["depth_scale_m"])
+            with io.BytesIO() as encoded:
+                Image.fromarray(metres).save(encoded, format="TIFF")
+                yield {
+                    **item,
+                    "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
+                }
 
     def prepare(self, dataset: Dataset, output: Path) -> None:
         """Set the destination for this dataset's MCAP files."""

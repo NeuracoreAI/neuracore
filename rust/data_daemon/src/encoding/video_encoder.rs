@@ -18,6 +18,16 @@
 //!   `ffv1` would also be lossless but is incompatible with the `.mp4`
 //!   container the on-disk layout contract requires.
 //!
+//! A depth trace (chunks of uint16 grey samples, see [`DepthEncode`]) gets two
+//! different outputs from the same single ffmpeg invocation:
+//!
+//! - `chunk_NNNN_lossy.mp4`: the depth viewer video, the samples mapped along
+//!   a log curve to 8-bit grey (see [`depth_preview_filter`]) and encoded by
+//!   `libx264` `-pix_fmt yuv420p -preset veryfast -crf 23` at preview size.
+//! - `chunk_NNNN_lossless.bin`: raw gray16 frames that ffmpeg writes to a pipe
+//!   on [`DEPTH_RAW_FD`], each encoded by the daemon as a lossless JPEG-XL
+//!   codestream and written back to back in frame order.
+//!
 //! A batch of one delegates to [`VideoEncoder::encode_chunk`], which skips
 //! both the concat demuxer and `verify_nut_header`. A batch of two or more
 //! goes through the ffmpeg concat demuxer with a list file that carries one
@@ -33,22 +43,29 @@
 //!
 //! On `EndTrace` the per-trace actor calls [`VideoEncoder::concat_segments`]
 //! which stream-copies the per-chunk segments into the final `lossy.mp4` /
-//! `lossless.mp4`. Stream-copy avoids a second decode/encode pass, so the
-//! tail of a recording finishes in seconds regardless of total length.
+//! `lossless.mp4`, and [`concat_depth_frames`] which appends a depth trace's
+//! frame segments into `lossless.bin`. Stream-copy avoids a second
+//! decode/encode pass, so the tail of a recording finishes in seconds
+//! regardless of total length.
 //!
 //! Both outputs are verified non-empty before the caller is told the
 //! invocation succeeded; ffmpeg occasionally exits 0 but produces a
 //! zero-byte file when the requested codec is unavailable in the local
 //! build.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use data_daemon_shared::ffmpeg::passthrough_frame_sync_arg;
 use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
+use gamut_core::{Dimensions, EncodeImage, Gray16, ImageRef};
+use gamut_jxl::{ColorSpec, Effort, JxlEncoder};
 use serde::{Serialize, Serializer};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
@@ -205,11 +222,11 @@ impl LossyVideoCodec {
     /// codec string (the resolved `NCD_VIDEO_CODEC` / active-profile
     /// `video_codec`).
     ///
-    /// Only RGB cameras honour the selection — a depth trace's lossy proxy is a
-    /// visualisation, not precise depth, so depth (and every non-RGB stream)
-    /// always keeps a lossless archive. This RGB-only gate is
-    /// deliberately narrower than the video-family predicate in
-    /// [`crate::cloud::cloud_files`] (which includes depth). Kept pure (the
+    /// Only RGB cameras honour the selection. A depth trace's lossy output is
+    /// a viewer video, not precise depth, so depth (and every non-RGB stream)
+    /// always keeps a lossless output, which for depth is `lossless.bin`. This
+    /// RGB-only gate is deliberately narrower than the video-family predicate
+    /// in [`crate::cloud::cloud_files`] (which includes depth). Kept pure (the
     /// config string is passed in, not read here) so the encoder path and the
     /// registration coordinator resolve from the same source, and the gate is
     /// unit-testable without touching the environment.
@@ -258,6 +275,37 @@ impl Serialize for LossyVideoCodec {
     }
 }
 
+/// Log curve offset (metres) of the depth viewer video.
+pub const DEPTH_PREVIEW_SHIFT_M: f64 = 1.0;
+/// Nearest depth (metres) the depth viewer video resolves.
+pub const DEPTH_PREVIEW_MIN_M: f64 = 0.05;
+/// Farthest depth (metres) the depth viewer video resolves.
+pub const DEPTH_PREVIEW_MAX_M: f64 = 6.55;
+/// Grey levels of the depth viewer video: 0 is no return, 1 to 255 are depth.
+pub const DEPTH_PREVIEW_LEVELS: u32 = 256;
+/// libx264 `-preset` of the depth viewer video.
+const DEPTH_PREVIEW_PRESET: &str = "veryfast";
+/// libx264 `-crf` of the depth viewer video.
+const DEPTH_PREVIEW_CRF: &str = "23";
+/// JPEG-XL effort of the lossless depth frames.
+pub const DEPTH_FRAMES_EFFORT: Effort = Effort::Thunder;
+/// File descriptor the encode child writes raw gray16 depth frames to.
+const DEPTH_RAW_FD: libc::c_int = 3;
+
+/// Depth encode parameters for a trace whose chunks hold uint16 grey samples.
+///
+/// A depth encode writes the log-curve viewer video as its lossy output and
+/// lossless JPEG-XL frames back to back as its lossless output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthEncode {
+    /// Metres per uint16 unit of the stored samples.
+    pub depth_scale_m: f64,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+}
+
 /// Inputs to one single-entry transcode invocation.
 #[derive(Debug, Clone)]
 pub struct ChunkEncodeRequest {
@@ -279,6 +327,8 @@ pub struct ChunkEncodeRequest {
     /// dispatcher resolved as published before this recording's window opened.
     /// Zero for a chunk whose first frame the window already owns.
     pub skip_frames: u32,
+    /// Depth encode parameters, `None` for an RGB trace.
+    pub depth: Option<DepthEncode>,
 }
 
 /// One NUT entry of a batched chunk encode.
@@ -315,16 +365,21 @@ pub struct BatchEncodeRequest {
     pub lossless_out: PathBuf,
     /// Lossy codec selection for this trace.
     pub codec: LossyVideoCodec,
+    /// Depth encode parameters, `None` for an RGB trace.
+    pub depth: Option<DepthEncode>,
 }
 
 /// Outcome of a successful transcode: the sizes of the batch's lossy and
 /// lossless output files.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ChunkEncodeOutcome {
     /// Bytes written to the lossy segment.
     pub lossy_bytes: u64,
     /// Bytes written to the lossless segment.
     pub lossless_bytes: u64,
+    /// Byte length of each JPEG-XL frame in a depth lossless segment, in
+    /// frame order. Empty for RGB.
+    pub depth_frame_lengths: Vec<u64>,
 }
 
 /// Outcome of a successful concat invocation.
@@ -397,6 +452,45 @@ pub enum VideoEncodeError {
     InvalidNutInput {
         /// The input that failed the header check.
         path: PathBuf,
+    },
+    /// The raw depth stream ended inside a frame.
+    #[error("raw depth stream for {path} ended {trailing} bytes into a frame")]
+    PartialDepthFrame {
+        /// Depth frames segment being written.
+        path: PathBuf,
+        /// Bytes of the incomplete trailing frame.
+        trailing: usize,
+    },
+    /// The JPEG-XL encoder failed to encode a depth frame.
+    #[error("JPEG-XL encode of depth frame {frame} for {path} failed: {source}")]
+    DepthEncode {
+        /// Depth frames segment being written.
+        path: PathBuf,
+        /// Index of the frame within the segment.
+        frame: usize,
+        /// Underlying encoder error.
+        #[source]
+        source: gamut_core::Error,
+    },
+    /// Depth segments held a different number of frames than their chunks.
+    #[error("depth frames {path} hold {actual} frames, expected {expected}")]
+    DepthFrameCount {
+        /// Depth frames file being written.
+        path: PathBuf,
+        /// Frames the trace's chunks announced.
+        expected: usize,
+        /// Frames the segments held.
+        actual: usize,
+    },
+    /// A depth frames segment's size differs from the sum of its frame lengths.
+    #[error("depth frames segment {path} holds {actual} bytes, expected {expected}")]
+    DepthSegmentSize {
+        /// Segment that was appended.
+        path: PathBuf,
+        /// Sum of the segment's frame lengths.
+        expected: u64,
+        /// Bytes the segment held.
+        actual: u64,
     },
 }
 
@@ -707,6 +801,7 @@ impl VideoEncoder {
         append_encode_output_args(
             &mut command,
             request.codec,
+            request.depth,
             encode_threads,
             self.frame_sync_arg(),
             request.frame_count,
@@ -716,8 +811,14 @@ impl VideoEncoder {
         );
         let lossless_out =
             (!request.codec.is_lossy_only()).then_some(request.lossless_out.as_path());
-        self.run_encode_command(command, &request.lossy_out, lossless_out)
-            .await
+        self.run_encode_command(
+            command,
+            &request.lossy_out,
+            lossless_out,
+            request.depth,
+            encode_threads,
+        )
+        .await
     }
 
     /// Transcode a contiguous batch of NUT chunks with one ffmpeg
@@ -740,6 +841,7 @@ impl VideoEncoder {
                         codec: request.codec,
                         frame_count: single.frame_count,
                         skip_frames: single.skip_frames,
+                        depth: request.depth,
                     },
                     encode_threads,
                 )
@@ -781,6 +883,7 @@ impl VideoEncoder {
         append_encode_output_args(
             &mut command,
             request.codec,
+            request.depth,
             encode_threads,
             self.frame_sync_arg(),
             batch_frame_count(&request.inputs),
@@ -795,7 +898,13 @@ impl VideoEncoder {
         let lossless_out =
             (!request.codec.is_lossy_only()).then_some(request.lossless_out.as_path());
         let result = self
-            .run_encode_command(command, &request.lossy_out, lossless_out)
+            .run_encode_command(
+                command,
+                &request.lossy_out,
+                lossless_out,
+                request.depth,
+                encode_threads,
+            )
             .await;
         let _ = std::fs::remove_file(&list_path);
         result
@@ -804,11 +913,17 @@ impl VideoEncoder {
     /// Configure the encode child's stdio and niceness, run it, and verify
     /// the expected outputs are non-empty. `lossless_out` is `None` in
     /// lossy-only mode, where no lossless archive is produced.
+    ///
+    /// For a depth encode the child writes raw gray16 frames to
+    /// [`DEPTH_RAW_FD`], and a blocking thread encodes them into the depth
+    /// frames segment at `lossless_out` while ffmpeg runs.
     async fn run_encode_command(
         &self,
         mut command: Command,
         lossy_out: &Path,
         lossless_out: Option<&Path>,
+        depth: Option<DepthEncode>,
+        encode_threads: usize,
     ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
         command
             // ffmpeg keeps file descriptors open across `fork`/`exec`; the
@@ -822,16 +937,67 @@ impl VideoEncoder {
         // userspace lock or allocator state, so it is safe to call here between
         // fork and exec. A failed renice is non-fatal (ignored), so the encode
         // still runs at default priority.
+        let raw_depth = match (depth, lossless_out) {
+            (Some(depth), Some(segment)) => {
+                let (read_end, write_end) =
+                    cloexec_pipe().map_err(|source| VideoEncodeError::Io {
+                        path: segment.to_path_buf(),
+                        source,
+                    })?;
+                Some((depth, segment.to_path_buf(), read_end, write_end))
+            }
+            _ => None,
+        };
+        let child_raw_fd = raw_depth
+            .as_ref()
+            .map(|(_, _, _, write_end)| write_end.as_raw_fd());
+        // SAFETY: as above; `dup2` and `fcntl` are single raw syscalls that
+        // touch no userspace lock or allocator state.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 libc::setpriority(libc::PRIO_PROCESS, 0, ENCODER_NICENESS);
+                if let Some(fd) = child_raw_fd {
+                    if libc::dup2(fd, DEPTH_RAW_FD) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if fd == DEPTH_RAW_FD && libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
                 Ok(())
             });
         }
 
-        let output = self
-            .run_watched(command, lossy_out, FFMPEG_STALL_TIMEOUT)
-            .await?;
+        let (frames_task, close_after_spawn) = match raw_depth {
+            Some((depth, segment, read_end, write_end)) => {
+                let task = tokio::task::spawn_blocking(move || {
+                    write_depth_frames(
+                        std::fs::File::from(read_end),
+                        depth,
+                        encode_threads,
+                        &segment,
+                    )
+                });
+                (Some(task), Some(write_end))
+            }
+            None => (None, None),
+        };
+
+        let watched = self
+            .run_watched_closing(command, lossy_out, FFMPEG_STALL_TIMEOUT, close_after_spawn)
+            .await;
+        let frames_result = match frames_task {
+            Some(task) => Some(task.await.unwrap_or_else(|join_error| {
+                Err(VideoEncodeError::Io {
+                    path: lossless_out.map(Path::to_path_buf).unwrap_or_default(),
+                    source: std::io::Error::other(format!(
+                        "depth frames task join failed: {join_error}"
+                    )),
+                })
+            })),
+            None => None,
+        };
+        let output = watched?;
 
         if !output.status.success() {
             let stderr_tail = tail_stderr(&output.stderr);
@@ -840,6 +1006,11 @@ impl VideoEncoder {
                 stderr_tail,
             });
         }
+
+        let depth_frame_lengths = match frames_result {
+            Some(result) => result?,
+            None => Vec::new(),
+        };
 
         let lossy_bytes = non_empty_file_size(lossy_out)?;
         // With no lossless archive there is no file to size; report zero
@@ -852,28 +1023,45 @@ impl VideoEncoder {
         Ok(ChunkEncodeOutcome {
             lossy_bytes,
             lossless_bytes,
+            depth_frame_lengths,
         })
     }
     /// Run an ffmpeg `command` writing `out`, killing it if its progress
     /// stalls for `stall_timeout`.
     async fn run_watched(
         &self,
+        command: Command,
+        out: &Path,
+        stall_timeout: Duration,
+    ) -> Result<std::process::Output, VideoEncodeError> {
+        self.run_watched_closing(command, out, stall_timeout, None)
+            .await
+    }
+
+    /// [`Self::run_watched`], closing `close_after_spawn` in this process once
+    /// the child holds its own copy, so a pipe the child writes reaches end of
+    /// file when the child exits.
+    async fn run_watched_closing(
+        &self,
         mut command: Command,
         out: &Path,
         stall_timeout: Duration,
+        close_after_spawn: Option<OwnedFd>,
     ) -> Result<std::process::Output, VideoEncodeError> {
         let spawn_error = |source| VideoEncodeError::Spawn {
             binary: self.binary.clone(),
             source,
         };
-        let mut child = command
+        let child = command
             .arg("-progress")
             .arg("pipe:1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(spawn_error)?;
+            .map_err(spawn_error);
+        drop(close_after_spawn);
+        let mut child = child?;
         let progress = child.stdout.take().expect("stdout is piped");
         let mut stderr = child.stderr.take().expect("stderr is piped");
         let stderr_reader = tokio::spawn(async move {
@@ -981,6 +1169,7 @@ impl VideoEncoder {
 fn append_encode_output_args(
     command: &mut Command,
     codec: LossyVideoCodec,
+    depth: Option<DepthEncode>,
     encode_threads: usize,
     frame_sync_arg: &'static str,
     frame_count: u32,
@@ -1002,6 +1191,55 @@ fn append_encode_output_args(
         .arg("0:v")
         .arg(frame_sync_arg)
         .arg("passthrough");
+    if let Some(depth) = depth {
+        let mut preview_filter = String::new();
+        if let Some(skip) = head_skip.as_deref() {
+            preview_filter.push_str(skip);
+            preview_filter.push(',');
+        }
+        preview_filter.push_str(&depth_preview_filter(depth.depth_scale_m));
+        preview_filter.push(',');
+        preview_filter.push_str(&preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT));
+        command
+            .arg("-vf")
+            .arg(&preview_filter)
+            .arg("-enc_time_base")
+            .arg(&enc_time_base)
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-threads")
+            .arg(&encode_threads)
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-preset")
+            .arg(DEPTH_PREVIEW_PRESET)
+            .arg("-crf")
+            .arg(DEPTH_PREVIEW_CRF)
+            .arg("-video_track_timescale")
+            .arg(&track_timescale);
+        if let Some(limit) = frame_limit.as_deref() {
+            command.arg("-frames:v").arg(limit);
+        }
+        command
+            .arg(lossy_out)
+            .arg("-map")
+            .arg("0:v")
+            .arg(frame_sync_arg)
+            .arg("passthrough");
+        if let Some(skip) = head_skip.as_deref() {
+            command.arg("-vf").arg(skip);
+        }
+        if let Some(limit) = frame_limit.as_deref() {
+            command.arg("-frames:v").arg(limit);
+        }
+        command
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("gray16le")
+            .arg(format!("pipe:{DEPTH_RAW_FD}"));
+        return;
+    }
     if codec.is_lossy_only() {
         // Single full-resolution training-quality video: libx264 CRF 23 at the
         // codec's preset (`medium`, or `veryfast` for `h264_fast`). No preview
@@ -1092,6 +1330,239 @@ fn append_encode_output_args(
         }
         command.arg(lossless_out);
     }
+}
+
+/// ffmpeg `-vf` chain that maps uint16 depth samples at `depth_scale_m`
+/// metres per unit to the 8-bit log-curve grey of the depth viewer video.
+///
+/// Sample 0 stays 0 (no return); depth clips to
+/// [`DEPTH_PREVIEW_MIN_M`]..[`DEPTH_PREVIEW_MAX_M`] and maps to grey levels 1
+/// to 255 along `log(depth + shift)`, rounding half away from zero. The `lut`
+/// writes `257 * level`, which the dither-free accurate-rounding scale turns
+/// into exactly `level` in 8 bits. `neuracore.core.utils.depth_utils.
+/// depth_to_log_gray` is the same curve in Python.
+pub fn depth_preview_filter(depth_scale_m: f64) -> String {
+    let low = (DEPTH_PREVIEW_MIN_M + DEPTH_PREVIEW_SHIFT_M).ln();
+    let span = (DEPTH_PREVIEW_MAX_M + DEPTH_PREVIEW_SHIFT_M).ln() - low;
+    let steps = DEPTH_PREVIEW_LEVELS - 2;
+    format!(
+        "lut=y=if(eq(val\\,0)\\,0\\,257*(1+round((log(clip(val*{depth_scale_m:?}\\,{DEPTH_PREVIEW_MIN_M:?}\\,{DEPTH_PREVIEW_MAX_M:?})+{DEPTH_PREVIEW_SHIFT_M:?})-{low:?})/{span:?}*{steps}))),scale=sws_dither=none:sws_flags=accurate_rnd,format=gray"
+    )
+}
+
+/// Create a pipe whose two ends close on exec, returned as (read, write).
+fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `pipe` writes two descriptors into the two-element array.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created and are owned by nobody else.
+    let (read_end, write_end) =
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [&read_end, &write_end] {
+        // SAFETY: `fcntl` on a descriptor this function owns.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok((read_end, write_end))
+}
+
+/// Lossless JPEG-XL encoder for depth frames.
+fn depth_frame_encoder() -> JxlEncoder {
+    JxlEncoder::lossless()
+        .with_effort(DEPTH_FRAMES_EFFORT)
+        .with_color(ColorSpec::LinearSrgb)
+}
+
+/// Read raw little-endian gray16 frames from `raw` until end of file, encode
+/// each with lossless JPEG-XL on `encode_threads` worker threads, and write
+/// the codestreams back to back in frame order to `segment`. Returns the byte
+/// length of every frame.
+///
+/// The stream is read to its end even after an encode fails, so ffmpeg never
+/// blocks on a full pipe; the first failure is returned once it ends.
+fn write_depth_frames(
+    mut raw: std::fs::File,
+    depth: DepthEncode,
+    encode_threads: usize,
+    segment: &Path,
+) -> Result<Vec<u64>, VideoEncodeError> {
+    let io_error = |source| VideoEncodeError::Io {
+        path: segment.to_path_buf(),
+        source,
+    };
+    let frame_bytes = depth.width as usize * depth.height as usize * 2;
+    let workers = encode_threads.max(1);
+    let (job_tx, job_rx) = mpsc::sync_channel::<(usize, Vec<u16>)>(workers * 2);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (result_tx, result_rx) = mpsc::channel::<(usize, Result<Vec<u8>, gamut_core::Error>)>();
+    let file = std::fs::File::create(segment).map_err(io_error)?;
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = result_tx.clone();
+            scope.spawn(move || {
+                let encoder = depth_frame_encoder();
+                let dimensions = Dimensions {
+                    width: depth.width,
+                    height: depth.height,
+                };
+                loop {
+                    let job = job_rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
+                    let Ok((index, samples)) = job else { break };
+                    let result = ImageRef::<Gray16>::new(&samples, dimensions)
+                        .and_then(|image| encoder.encode_to_vec(image));
+                    if result_tx.send((index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(result_tx);
+
+        let writer = scope.spawn(move || -> Result<Vec<u64>, VideoEncodeError> {
+            let mut out = std::io::BufWriter::new(file);
+            let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+            let mut lengths: Vec<u64> = Vec::new();
+            let mut first_error: Option<VideoEncodeError> = None;
+            for (index, result) in result_rx {
+                match result {
+                    Ok(bytes) => {
+                        pending.insert(index, bytes);
+                    }
+                    Err(source) => {
+                        first_error.get_or_insert(VideoEncodeError::DepthEncode {
+                            path: segment.to_path_buf(),
+                            frame: index,
+                            source,
+                        });
+                    }
+                }
+                while let Some(bytes) = pending.remove(&lengths.len()) {
+                    if first_error.is_none() {
+                        if let Err(source) = out.write_all(&bytes) {
+                            first_error = Some(io_error(source));
+                        }
+                    }
+                    lengths.push(bytes.len() as u64);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            out.flush().map_err(io_error)?;
+            Ok(lengths)
+        });
+
+        let mut read_error: Option<VideoEncodeError> = None;
+        let mut index = 0usize;
+        let mut buffer = vec![0u8; frame_bytes];
+        loop {
+            let mut filled = 0usize;
+            while filled < frame_bytes {
+                match raw.read(&mut buffer[filled..]) {
+                    Ok(0) => break,
+                    Ok(read) => filled += read,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        read_error.get_or_insert(io_error(error));
+                        break;
+                    }
+                }
+            }
+            if filled == 0 || read_error.is_some() {
+                break;
+            }
+            if filled < frame_bytes {
+                read_error = Some(VideoEncodeError::PartialDepthFrame {
+                    path: segment.to_path_buf(),
+                    trailing: filled,
+                });
+                break;
+            }
+            let samples: Vec<u16> = buffer
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            if job_tx.send((index, samples)).is_err() {
+                break;
+            }
+            index += 1;
+        }
+        if read_error.is_some() {
+            let mut sink = [0u8; 64 * 1024];
+            while matches!(raw.read(&mut sink), Ok(read) if read > 0) {}
+        }
+        drop(job_tx);
+        let written = writer.join().unwrap_or_else(|_| {
+            Err(io_error(std::io::Error::other(
+                "depth frames writer panicked",
+            )))
+        });
+        match read_error {
+            Some(error) => Err(error),
+            None => written,
+        }
+    })
+}
+
+/// Append per-batch depth frame `segments` into `out`, the trace's JPEG-XL
+/// codestreams back to back in segment order. Each segment comes with the
+/// byte length of each of its frames. Returns the byte offset and length of
+/// every frame in `out`.
+///
+/// Fails when the segments hold a different number of frames than `frames`,
+/// or when a segment's size differs from the sum of its frame lengths.
+pub fn concat_depth_frames(
+    segments: &[(PathBuf, Vec<u64>)],
+    frames: usize,
+    out: &Path,
+) -> Result<Vec<(u64, u64)>, VideoEncodeError> {
+    if segments.is_empty() {
+        return Err(VideoEncodeError::EmptySegments);
+    }
+    let actual: usize = segments.iter().map(|(_, lengths)| lengths.len()).sum();
+    if actual != frames {
+        return Err(VideoEncodeError::DepthFrameCount {
+            path: out.to_path_buf(),
+            expected: frames,
+            actual,
+        });
+    }
+    ensure_parent_dirs(out)?;
+    let io_error = |path: &Path, source| VideoEncodeError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let file = std::fs::File::create(out).map_err(|source| io_error(out, source))?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut ranges = Vec::with_capacity(frames);
+    let mut offset = 0u64;
+    for (segment, lengths) in segments {
+        let mut reader =
+            std::fs::File::open(segment).map_err(|source| io_error(segment, source))?;
+        let copied =
+            std::io::copy(&mut reader, &mut writer).map_err(|source| io_error(out, source))?;
+        let expected: u64 = lengths.iter().sum();
+        if copied != expected {
+            return Err(VideoEncodeError::DepthSegmentSize {
+                path: segment.clone(),
+                expected,
+                actual: copied,
+            });
+        }
+        for &length in lengths {
+            ranges.push((offset, length));
+            offset += length;
+        }
+    }
+    writer.flush().map_err(|source| io_error(out, source))?;
+    Ok(ranges)
 }
 
 /// Frames a batch's outputs may hold: the sum of what every entry owns.
@@ -1779,6 +2250,7 @@ mod tests {
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 8,
             skip_frames: 0,
+            depth: None,
         };
         let outcome = encoder
             .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
@@ -1847,6 +2319,7 @@ mod tests {
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 6,
                     skip_frames: 0,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1933,6 +2406,7 @@ mod tests {
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 3,
                     skip_frames: 0,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -2018,6 +2492,7 @@ mod tests {
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 5,
                     skip_frames: 3,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -2056,6 +2531,7 @@ mod tests {
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 2,
                     skip_frames: 3,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -2096,6 +2572,7 @@ mod tests {
                     codec: LossyVideoCodec::H264MediumLossyOnly,
                     frame_count: 6,
                     skip_frames: 0,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -2184,6 +2661,7 @@ mod tests {
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 8,
                     skip_frames: 0,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -2199,6 +2677,7 @@ mod tests {
                     codec: LossyVideoCodec::H264MediumLossyOnly,
                     frame_count: 8,
                     skip_frames: 0,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -2307,6 +2786,7 @@ mod tests {
                         codec: LossyVideoCodec::LosslessPlusPreview,
                         frame_count: frames_per_chunk as u32,
                         skip_frames: 0,
+                        depth: None,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -2499,6 +2979,7 @@ mod tests {
                         codec: LossyVideoCodec::LosslessPlusPreview,
                         frame_count: 4,
                         skip_frames: 0,
+                        depth: None,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -2635,6 +3116,7 @@ mod tests {
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 1,
             skip_frames: 0,
+            depth: None,
         };
         let encoder = VideoEncoder::new();
         let error = encoder
@@ -2659,6 +3141,7 @@ mod tests {
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 1,
             skip_frames: 0,
+            depth: None,
         };
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");
@@ -2938,6 +3421,7 @@ mod tests {
                 lossy_out: lossy_out.clone(),
                 lossless_out: lossless_out.clone(),
                 codec,
+                depth: None,
             };
             VideoEncoder::new()
                 .encode_chunk_batch(&request, ENCODE_THREADS_PER_OUTPUT)
@@ -3041,6 +3525,7 @@ mod tests {
                         codec,
                         frame_count: 4,
                         skip_frames: 0,
+                        depth: None,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -3061,6 +3546,7 @@ mod tests {
                         lossy_out: batch_lossy.clone(),
                         lossless_out: batch_lossless.clone(),
                         codec,
+                        depth: None,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -3119,6 +3605,7 @@ mod tests {
                     lossy_out: lossy_out.clone(),
                     lossless_out: lossless_out.clone(),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -3179,6 +3666,7 @@ mod tests {
                     lossy_out: lossy_out.clone(),
                     lossless_out: lossless_out.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -3233,6 +3721,7 @@ mod tests {
                     lossy_out: lossy_out.clone(),
                     lossless_out: tempdir.path().join("chunk_0000_lossless.mp4"),
                     codec: LossyVideoCodec::LosslessPlusPreview,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -3294,6 +3783,7 @@ mod tests {
                     lossy_out: lossy_out.clone(),
                     lossless_out: lossless_out.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -3359,6 +3849,7 @@ mod tests {
                         lossy_out: lossy_out.clone(),
                         lossless_out: lossless_out.clone(),
                         codec,
+                        depth: None,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -3430,6 +3921,7 @@ mod tests {
                     lossy_out: lossy_out.clone(),
                     lossless_out: tempdir.path().join("chunk_0000_lossless.mp4"),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
+                    depth: None,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -3516,6 +4008,7 @@ mod tests {
                         lossy_out: lossy_out.clone(),
                         lossless_out: lossless_out.clone(),
                         codec,
+                        depth: None,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -3767,5 +4260,167 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The depth viewer level of one uint16 sample, the reference the lut
+    /// filter must reproduce: 0 stays 0, depth maps along the log curve to
+    /// 1..=255, rounding half away from zero.
+    fn reference_log_level(sample: u16, depth_scale_m: f64) -> u8 {
+        if sample == 0 {
+            return 0;
+        }
+        let low = (DEPTH_PREVIEW_MIN_M + DEPTH_PREVIEW_SHIFT_M).ln();
+        let span = (DEPTH_PREVIEW_MAX_M + DEPTH_PREVIEW_SHIFT_M).ln() - low;
+        let metres =
+            (f64::from(sample) * depth_scale_m).clamp(DEPTH_PREVIEW_MIN_M, DEPTH_PREVIEW_MAX_M);
+        let normalized = ((metres + DEPTH_PREVIEW_SHIFT_M).ln() - low) / span;
+        (1.0 + (normalized * f64::from(DEPTH_PREVIEW_LEVELS - 2)).round()) as u8
+    }
+
+    #[test]
+    fn depth_preview_filter_matches_the_log_curve_exactly() {
+        let Some(ffmpeg) = locate_binary("ffmpeg") else {
+            eprintln!("ffmpeg not on PATH, skipping depth preview filter test.");
+            return;
+        };
+        let (width, height) = (256usize, 256usize);
+        let samples: Vec<u16> = (0..width * height).map(|index| index as u16).collect();
+        let raw: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        for depth_scale_m in [1e-4, 10.0 / 65535.0, 1e-3] {
+            let mut child = StdCommand::new(&ffmpeg)
+                .args([
+                    "-v", "error", "-f", "rawvideo", "-pix_fmt", "gray16le", "-s",
+                ])
+                .arg(format!("{width}x{height}"))
+                .args(["-i", "-", "-vf"])
+                .arg(depth_preview_filter(depth_scale_m))
+                .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn ffmpeg");
+            let mut stdin = child.stdin.take().unwrap();
+            let input = raw.clone();
+            let feeder = std::thread::spawn(move || stdin.write_all(&input));
+            let output = child.wait_with_output().unwrap();
+            feeder.join().unwrap().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mismatched: Vec<(u16, u8, u8)> = samples
+                .iter()
+                .zip(&output.stdout)
+                .filter_map(|(&sample, &level)| {
+                    let expected = reference_log_level(sample, depth_scale_m);
+                    (level != expected).then_some((sample, level, expected))
+                })
+                .take(5)
+                .collect();
+            assert!(
+                mismatched.is_empty(),
+                "scale {depth_scale_m}: {mismatched:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn depth_concat_rejects_a_frame_count_mismatch() {
+        let tempdir = TempDir::new().unwrap();
+        let segment = tempdir.path().join("chunk_0000_lossless.bin");
+        std::fs::write(&segment, b"frame").unwrap();
+        let error = concat_depth_frames(
+            &[(segment, vec![5])],
+            2,
+            &tempdir.path().join("lossless.bin"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                VideoEncodeError::DepthFrameCount {
+                    expected: 2,
+                    actual: 1,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn depth_concat_rejects_a_segment_size_mismatch() {
+        let tempdir = TempDir::new().unwrap();
+        let segment = tempdir.path().join("chunk_0000_lossless.bin");
+        std::fs::write(&segment, b"frame").unwrap();
+        let error = concat_depth_frames(
+            &[(segment, vec![3])],
+            1,
+            &tempdir.path().join("lossless.bin"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                VideoEncodeError::DepthSegmentSize {
+                    expected: 3,
+                    actual: 5,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn depth_frames_writer_rejects_a_partial_trailing_frame() {
+        let tempdir = TempDir::new().unwrap();
+        let raw_path = tempdir.path().join("raw.gray16");
+        let depth = DepthEncode {
+            depth_scale_m: 1e-4,
+            width: 4,
+            height: 2,
+        };
+        let mut raw = vec![7u8; 4 * 2 * 2];
+        raw.extend_from_slice(&[1, 2, 3]);
+        std::fs::write(&raw_path, raw).unwrap();
+        let error = write_depth_frames(
+            std::fs::File::open(&raw_path).unwrap(),
+            depth,
+            2,
+            &tempdir.path().join("out.bin"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                VideoEncodeError::PartialDepthFrame { trailing: 3, .. }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn depth_frames_writer_encodes_the_fixture_codestream() {
+        let tempdir = TempDir::new().unwrap();
+        let raw_path = tempdir.path().join("raw.gray16");
+        std::fs::write(
+            &raw_path,
+            include_bytes!("../../tests/fixtures/depth_16x12.u16le"),
+        )
+        .unwrap();
+        let depth = DepthEncode {
+            depth_scale_m: 1e-4,
+            width: 16,
+            height: 12,
+        };
+        let segment = tempdir.path().join("out.bin");
+        let lengths =
+            write_depth_frames(std::fs::File::open(&raw_path).unwrap(), depth, 2, &segment)
+                .unwrap();
+        let fixture: &[u8] = include_bytes!("../../tests/fixtures/depth_16x12.jxl");
+        assert_eq!(lengths, vec![fixture.len() as u64]);
+        assert_eq!(std::fs::read(&segment).unwrap(), fixture);
     }
 }

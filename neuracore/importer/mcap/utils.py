@@ -972,8 +972,6 @@ def _decode_raw_image(
         "8uc1": (np.uint8, 1),
         "mono16": (np.uint16, 1),
         "16uc1": (np.uint16, 1),
-        "32fc1": (np.float32, 1),
-        "64fc1": (np.float64, 1),
     }
     if encoding_name not in enc_map:
         raise ImportError(f"Unsupported image encoding '{encoding_name}'.")
@@ -1157,17 +1155,10 @@ def _drop_alpha_channel(
     *,
     logger: logging.Logger,
 ) -> np.ndarray:
-    """Normalize image arrays into Neuracore-friendly shape and dtype."""
+    """Drop the alpha channel of RGBA images, keeping depth in its source dtype."""
     if data_type == DataType.RGB_IMAGES and array.ndim == 3 and array.shape[2] == 4:
         logger.warning("Dropping alpha channel for RGB image import.")
         array = array[:, :, :3]
-
-    if data_type == DataType.DEPTH_IMAGES and array.dtype not in (
-        np.float16,
-        np.float32,
-        np.float64,
-    ):
-        array = array.astype(np.float32, copy=False)
 
     return array
 

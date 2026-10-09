@@ -5,6 +5,7 @@ import io
 import re
 from collections.abc import Generator
 from fractions import Fraction
+from urllib.parse import unquote
 
 import av
 import numpy as np
@@ -13,6 +14,7 @@ import requests_mock
 from neuracore_types import (
     Dataset,
     DataType,
+    DepthCameraData,
     JointData,
     Recording,
     RecordingMetadata,
@@ -137,8 +139,8 @@ def mock_prefetch_transport(monkeypatch):
     )
 
     from neuracore.core.auth import get_auth
-    from neuracore.core.data.frame_cache import video_filename_preference
-    from neuracore.core.data.prefetch import VideoPrefetcher
+    from neuracore.core.data.frame_cache import get_camera_data_filenames
+    from neuracore.core.data.prefetch import CameraDataPrefetcher
     from neuracore.core.data.serialized_synchronized_episode import (
         SerializedSynchronizedEpisode,
     )
@@ -171,9 +173,9 @@ def mock_prefetch_transport(monkeypatch):
             SynchronizedEpisodeModel.model_validate_json(response.content)
         )
 
-    async def fake_get_video_url(self, session, target):
-        preference = video_filename_preference(target.data_type)
-        for filename in preference:
+    async def fake_get_camera_data_url(self, session, target):
+        preferred_filenames = get_camera_data_filenames(target.data_type)
+        for filename in preferred_filenames:
             response = thread_local_session().get(
                 f"{API_URL}/org/{self.dataset.org_id}"
                 f"/recording/{target.recording_id}/download_url",
@@ -192,12 +194,14 @@ def mock_prefetch_transport(monkeypatch):
             f"No candidate filename found for recording {target.recording_id}"
         )
 
-    async def fake_stream_video(self, session, url, destination):
+    async def fake_stream_to_file(self, session, url, destination):
         stream_to_file(url, destination)
 
-    monkeypatch.setattr(VideoPrefetcher, "_get_synced_data", fake_get_synced_data)
-    monkeypatch.setattr(VideoPrefetcher, "_get_video_url", fake_get_video_url)
-    monkeypatch.setattr(VideoPrefetcher, "_stream_video", fake_stream_video)
+    monkeypatch.setattr(CameraDataPrefetcher, "_get_synced_data", fake_get_synced_data)
+    monkeypatch.setattr(
+        CameraDataPrefetcher, "_get_camera_data_url", fake_get_camera_data_url
+    )
+    monkeypatch.setattr(CameraDataPrefetcher, "_stream_to_file", fake_stream_to_file)
 
 
 @pytest.fixture
@@ -260,8 +264,19 @@ def recordings_list():
 
 
 @pytest.fixture
-def synced_data():
+def depth_frames_file(depth_frames_fn):
+    """Return the uint16 frames of depth camera cam2, its lossless.bin and ranges."""
+    frames = np.zeros((2, 6, 8), dtype=np.uint16)
+    frames[0, 1:, 2:] = 26000
+    frames[1, :3, :] = 1500
+    payload, ranges = depth_frames_fn(frames)
+    return frames, payload, ranges
+
+
+@pytest.fixture
+def synced_data(depth_frames_file):
     """Create synced data fixture."""
+    _, _, ranges = depth_frames_file
     # Create camera data with frame indices
     camera1 = RGBCameraData(
         timestamp=1000.0,
@@ -270,11 +285,14 @@ def synced_data():
         intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
     )
 
-    camera2 = RGBCameraData(
+    camera2 = DepthCameraData(
         timestamp=1000.0,
         frame_idx=0,
         extrinsics=np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
         intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
+        depth_scale_m=1e-4,
+        offset=ranges[0][0],
+        length=ranges[0][1],
     )
 
     # Create sync points
@@ -294,6 +312,7 @@ def synced_data():
     camera2 = copy.deepcopy(camera2)
     camera1.frame_idx = 1
     camera2.frame_idx = 1
+    camera2.offset, camera2.length = ranges[1]
 
     frame2 = SynchronizedPoint(
         timestamp=1.0,
@@ -353,6 +372,7 @@ def mock_data_requests(
     synced_data,
     mocked_org_id,
     create_test_video_fn,
+    depth_frames_file,
 ) -> Generator[requests_mock.Mocker, None, None]:
     """Set up mocks for Dataset API endpoints."""
     mock_auth_requests.get(
@@ -469,10 +489,18 @@ def mock_data_requests(
     video_data = create_test_video_fn(num_frames=10)
 
     # Mock video URL endpoint
+    def video_url_callback(request, context):
+        if "DEPTH_IMAGES" in unquote(request.url):
+            return {"url": "https://example.com/test-depth.bin"}
+        return {"url": "https://example.com/test-video.mp4"}
+
     mock_auth_requests.get(
         re.compile(f"{API_URL}/org/{mocked_org_id}/recording/.*/download_url"),
-        json={"url": "https://example.com/test-video.mp4"},
+        json=video_url_callback,
         status_code=200,
+    )
+    mock_auth_requests.get(
+        "https://example.com/test-depth.bin", content=depth_frames_file[1]
     )
 
     # Define a custom response handler for the video content

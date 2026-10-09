@@ -130,7 +130,8 @@ def _create_nc_data_at_timestep(
         return DepthCameraData(
             extrinsics=np.eye(4, dtype=np.float32),
             intrinsics=np.eye(3, dtype=np.float32),
-            frame=np.full((2, 2), marker, dtype=np.float32),
+            frame=np.full((2, 2), marker, dtype=np.uint16),
+            depth_scale_m=1.0,
         )
     if data_type == DataType.POINT_CLOUDS:
         from neuracore_types.nc_data.point_cloud_data import PointCloudData

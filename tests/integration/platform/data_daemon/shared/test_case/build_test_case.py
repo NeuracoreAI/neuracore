@@ -320,8 +320,9 @@ class DataDaemonTestCase:
             ``image_height``, ``video_fps``, and the RGB video timestamp
             schedule — depth intentionally adds no separate resolution or
             frame-rate knobs.
-        depth_mode: The NumPy dtype depth frames are logged as — ``"float16"``
-            or ``"float32"``. Ignored when ``depth_count`` is ``0``.
+        depth_mode: The unit of the uint16 depth frames, uint16_tenth_mm or
+            uint16_mm, logged with the matching depth_scale_m. Ignored when
+            depth_count is 0.
         video_detail: Pixel content of the synthetic camera frames — realistic
             costs full compression/encode, flat is a cheap solid fill; frame
             identity is embedded either way.
@@ -370,7 +371,7 @@ class DataDaemonTestCase:
     skip: bool = False
     video_codec: str | None = None
     depth_count: int = 0
-    depth_mode: DepthMode = "float32"
+    depth_mode: DepthMode = "uint16_mm"
     video_detail: VideoDetail = DETAIL_REALISTIC
     producer_pacing: ProducerPacing = PACING_DEADLINE
     producer_process_streams: tuple[tuple[str, ...], ...] = ()

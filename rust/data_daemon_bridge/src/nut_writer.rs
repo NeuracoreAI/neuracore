@@ -2,10 +2,11 @@
 //! frames.
 //!
 //! The video trace actor spools captured frames into a `.nut` file with this
-//! writer; the file is then handed off to an `ffmpeg` transcoder. The caller
-//! always supplies packed RGB24; the writer PNG-encodes each frame (see
-//! [`PngScratch::encode`]) so the on-disk spool — and the daemon's transcode
-//! read-back of it — is a small fraction of the raw video bandwidth.
+//! writer; the file is then handed off to an `ffmpeg` transcoder. Frames are
+//! per-frame PNGs: truecolour 8-bit for RGB ([`encode_png_frame`]) and
+//! greyscale 16-bit for depth ([`encode_png_gray16_frame`]), so the on-disk
+//! spool and the daemon's transcode read-back of it are a small fraction of
+//! the raw video bandwidth.
 //!
 //! The output is intentionally the bare minimum NUT spec elements needed for
 //! `ffprobe`/`ffmpeg` to demux the PNG stream: file id string, main header,
@@ -109,8 +110,9 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 const PNG_FILTER_UP: u8 = 2;
 
 /// Configuration captured at writer-creation time. The writer is single
-/// stream; the caller always supplies packed RGB24 (3 bytes per pixel, no
-/// padding), which the writer stores as per-frame lossless PNG.
+/// stream of per-frame lossless PNGs: [`NutWriter::write_frame`] takes packed
+/// RGB24 and encodes it, and [`NutWriter::write_frame_precompressed`] takes a
+/// PNG already encoded by [`encode_png_frame`] or [`encode_png_gray16_frame`].
 #[derive(Debug, Clone, Copy)]
 pub struct NutVideoConfig {
     /// Frame width in pixels. Must be non-zero.
@@ -869,7 +871,14 @@ impl PngScratch {
     /// pull in an image crate; the IDAT payload is a miniz_oxide zlib stream and
     /// the chunk checksums use a standard CRC-32 ([`png_crc32`]).
     fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> usize {
-        let row_bytes = width as usize * 3;
+        self.encode_layout(width, height, rgb, PngLayout::Rgb8)
+    }
+
+    /// Encode one frame of `layout` as a standalone PNG ("Up" filter) into
+    /// `self.output`, returning the byte length written. Gray16 samples must
+    /// already be big-endian, the PNG sample byte order.
+    fn encode_layout(&mut self, width: u32, height: u32, rgb: &[u8], layout: PngLayout) -> usize {
+        let row_bytes = width as usize * layout.bytes_per_pixel();
 
         // Filtered scanlines: each row is a one-byte filter tag followed by the
         // row's filtered bytes — the input to the zlib stream that becomes IDAT.
@@ -908,8 +917,8 @@ impl PngScratch {
         let mut ihdr = [0u8; 13];
         ihdr[0..4].copy_from_slice(&width.to_be_bytes());
         ihdr[4..8].copy_from_slice(&height.to_be_bytes());
-        ihdr[8] = 8; // bit depth
-        ihdr[9] = 2; // colour type: truecolour (RGB)
+        ihdr[8] = layout.bit_depth();
+        ihdr[9] = layout.colour_type();
         ihdr[10] = 0; // compression method: zlib/deflate
         ihdr[11] = 0; // filter method: adaptive (per-row tag; all Up here)
         ihdr[12] = 0; // interlace: none
@@ -931,6 +940,48 @@ thread_local! {
     /// each frame. Thread-local (not a shared pool) because [`encode_png_frame`]
     /// runs on multiple compression worker threads concurrently.
     static ENCODE_SCRATCH: RefCell<PngScratch> = RefCell::new(PngScratch::new());
+}
+
+/// Sample layout of one per-frame PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PngLayout {
+    /// Packed RGB24: truecolour, 8 bits per channel.
+    Rgb8,
+    /// Big-endian uint16 greyscale.
+    Gray16,
+}
+
+impl PngLayout {
+    fn bytes_per_pixel(self) -> usize {
+        match self {
+            PngLayout::Rgb8 => 3,
+            PngLayout::Gray16 => 2,
+        }
+    }
+
+    fn bit_depth(self) -> u8 {
+        match self {
+            PngLayout::Rgb8 => 8,
+            PngLayout::Gray16 => 16,
+        }
+    }
+
+    fn colour_type(self) -> u8 {
+        match self {
+            PngLayout::Rgb8 => 2,
+            PngLayout::Gray16 => 0,
+        }
+    }
+}
+
+/// Compress one depth frame of big-endian uint16 grey samples (exactly
+/// `width * height * 2` bytes) to a standalone 16-bit greyscale PNG.
+pub fn encode_png_gray16_frame(width: u32, height: u32, gray16_be: &[u8]) -> Vec<u8> {
+    ENCODE_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let len = scratch.encode_layout(width, height, gray16_be, PngLayout::Gray16);
+        scratch.output[..len].to_vec()
+    })
 }
 
 /// Compress one packed RGB24 frame to a standalone per-frame PNG, returning the
@@ -1364,5 +1415,117 @@ mod tests {
             decoded.stdout.len(),
             expected.len()
         );
+    }
+
+    /// Split a PNG bitstream into its IHDR payload and concatenated IDAT data.
+    fn png_ihdr_and_idat(png: &[u8]) -> ([u8; 13], Vec<u8>) {
+        assert_eq!(&png[..8], &PNG_SIGNATURE);
+        let mut offset = 8;
+        let mut ihdr = [0u8; 13];
+        let mut idat = Vec::new();
+        while offset < png.len() {
+            let length = u32::from_be_bytes(png[offset..offset + 4].try_into().unwrap()) as usize;
+            let kind = &png[offset + 4..offset + 8];
+            let data = &png[offset + 8..offset + 8 + length];
+            if kind == b"IHDR" {
+                ihdr.copy_from_slice(data);
+            } else if kind == b"IDAT" {
+                idat.extend_from_slice(data);
+            }
+            offset += 12 + length;
+        }
+        (ihdr, idat)
+    }
+
+    #[test]
+    fn gray16_png_stores_big_endian_samples_under_the_up_filter() {
+        let (width, height) = (5u32, 3u32);
+        let samples: Vec<u16> = (0..width * height)
+            .map(|index| (index as u16).wrapping_mul(4099).wrapping_add(1))
+            .collect();
+        let be: Vec<u8> = samples.iter().flat_map(|v| v.to_be_bytes()).collect();
+        let png = encode_png_gray16_frame(width, height, &be);
+
+        let (ihdr, idat) = png_ihdr_and_idat(&png);
+        assert_eq!(u32::from_be_bytes(ihdr[0..4].try_into().unwrap()), width);
+        assert_eq!(u32::from_be_bytes(ihdr[4..8].try_into().unwrap()), height);
+        assert_eq!(ihdr[8], 16, "bit depth");
+        assert_eq!(ihdr[9], 0, "colour type greyscale");
+
+        let filtered = miniz_oxide::inflate::decompress_to_vec_zlib(&idat).expect("inflate");
+        let row_bytes = width as usize * 2;
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        for row in filtered.chunks_exact(row_bytes + 1) {
+            assert_eq!(row[0], PNG_FILTER_UP);
+            let mut current: Vec<u8> = row[1..].to_vec();
+            if let Some(above) = rows.last() {
+                for (value, prior) in current.iter_mut().zip(above) {
+                    *value = value.wrapping_add(*prior);
+                }
+            }
+            rows.push(current);
+        }
+        let decoded: Vec<u16> = rows
+            .concat()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(decoded, samples);
+    }
+
+    #[test]
+    fn gray16_nut_decodes_bit_exact_through_ffmpeg() {
+        let Some(ffmpeg) = locate_on_path("ffmpeg") else {
+            eprintln!("ffmpeg not on PATH, skipping gray16 NUT round trip.");
+            return;
+        };
+        let (width, height) = (16u32, 8u32);
+        let tempdir = TempDir::new().unwrap();
+        let path = tempdir.path().join("depth.nut");
+        let config = NutVideoConfig {
+            width,
+            height,
+            time_base_num: 1,
+            time_base_den: 1_000_000,
+        };
+        let mut writer = NutWriter::create(&path, config).unwrap();
+        let mut expected_le = Vec::new();
+        for frame in 0..3u16 {
+            let samples: Vec<u16> = (0..(width * height) as u16)
+                .map(|index| {
+                    if index % 7 == 0 {
+                        0
+                    } else {
+                        index.wrapping_mul(997).wrapping_add(frame * 13)
+                    }
+                })
+                .collect();
+            let be: Vec<u8> = samples.iter().flat_map(|v| v.to_be_bytes()).collect();
+            expected_le.extend(samples.iter().flat_map(|v| v.to_le_bytes()));
+            let png = encode_png_gray16_frame(width, height, &be);
+            writer
+                .write_frame_precompressed(u64::from(frame) * 33_333, &png)
+                .unwrap();
+        }
+        writer.finish().unwrap();
+
+        let decoded = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args([
+                passthrough_frame_sync_arg(ffmpeg.as_os_str()),
+                "passthrough",
+            ])
+            .args(["-f", "rawvideo", "-pix_fmt", "gray16le", "-"])
+            .output()
+            .expect("spawn ffmpeg");
+        assert!(
+            decoded.status.success(),
+            "ffmpeg decode failed: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(decoded.stdout, expected_le);
     }
 }

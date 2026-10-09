@@ -88,6 +88,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install llvm
+          # The daemon statically links libjxl, which jpegxl-src builds with CMake.
+          command -v cmake >/dev/null || brew install cmake
           export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
           echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-deployment-target }}" >> "$GITHUB_ENV"

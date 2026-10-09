@@ -783,6 +783,7 @@ class NeuracoreDatasetImporter(ABC):
                     timestamp,
                     extrinsics=extrinsics,
                     intrinsics=intrinsics,
+                    depth_scale_m=format.depth_scale_m,
                 )
         except Exception as e:
             self.logger.error(
@@ -829,6 +830,7 @@ class NeuracoreDatasetImporter(ABC):
         *,
         extrinsics: np.ndarray | None = None,
         intrinsics: np.ndarray | None = None,
+        depth_scale_m: float | None = None,
     ) -> None:
         """Log transformed data to Neuracore.
 
@@ -839,6 +841,7 @@ class NeuracoreDatasetImporter(ABC):
             timestamp: The timestamp of the data.
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
+            depth_scale_m: Meters per unit of depth images.
         """
         timestamp = self._strictly_increasing_timestamp(
             data_type=data_type, name=name, timestamp=timestamp
@@ -856,9 +859,12 @@ class NeuracoreDatasetImporter(ABC):
                 dry_run=self.dry_run,
             )
         elif data_type == DataType.DEPTH_IMAGES:
+            if depth_scale_m is None:
+                raise ValueError("Depth images need format.depth_scale_m")
             nc.log_depth(
                 name=name,
                 depth=transformed_data,
+                depth_scale_m=depth_scale_m,
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
