@@ -72,8 +72,8 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 /// timestamp, is what the daemon uses for window membership, so a synthetic
 /// capture time can't shift the window or clip data. Separately, the recording's
 /// *capture* timestamp (`timestamp_ns` when supplied, else the publish time) is
-/// what the daemon stores as `start_timestamp_ns` and POSTs as the backend
-/// `start_time`. The capture timestamp is returned because it is what tells
+/// what the daemon stores in microseconds as the row's start and POSTs as the
+/// backend `start_time`. The capture timestamp is returned because it is what tells
 /// this recording apart from its predecessor before either has a cloud id.
 #[pyfunction]
 #[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None, timestamp_ns = None))]
@@ -345,9 +345,9 @@ fn log_json(
 /// (`publish_timestamp_ns`, always wall-clock now at the send), so the whole
 /// publish clock is owned by the producer (consistent with the data
 /// envelopes). The recording's *capture* stop time (`timestamp_ns` when
-/// supplied, else the publish time) is separate — it is stored as
-/// `stop_timestamp_ns` and POSTed as the backend `end_time`, never used for
-/// window membership.
+/// supplied, else the publish time) is separate: it is stored in
+/// microseconds as the row's stop and POSTed as the backend `end_time`, never
+/// used for window membership.
 #[pyfunction]
 #[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
 fn stop_recording(
@@ -433,8 +433,8 @@ fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult
 ///
 /// A cancel is a recording stop that discards data, so it carries the same
 /// capture `timestamp_ns` as `stop_recording` (the caller's value, else the
-/// publish clock); the daemon stores it as `stop_timestamp_ns` and POSTs it as
-/// the backend `end_time`.
+/// publish clock); the daemon stores it in microseconds as the row's stop and
+/// POSTs it as the backend `end_time`.
 #[pyfunction]
 #[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
 fn cancel_recording(

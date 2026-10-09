@@ -364,6 +364,7 @@ mod tests {
     use super::*;
     use crate::state::schema::TraceWriteStatus;
     use crate::state::store::NewRecording;
+    use crate::state::LifecycleStamp;
     use crate::state::StateStore;
     use tempfile::TempDir;
 
@@ -378,7 +379,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("r"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 1,
+                start: LifecycleStamp::observed_at(1),
                 ..Default::default()
             })
             .await
@@ -491,7 +492,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("r"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 1,
+                start: LifecycleStamp::observed_at(1),
                 ..Default::default()
             })
             .await
