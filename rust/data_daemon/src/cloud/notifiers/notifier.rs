@@ -177,8 +177,9 @@ async fn sweep<N: RecordingNotifier>(notifier: &N, ctx: &NotifierCtx) {
 
 /// Which `/recording/*` endpoint a lifecycle notify targets. The stop and
 /// cancel notifiers run the *same* guard chain (row fetch → already-notified
-/// guard → cloud-id guard → org guard → `stop_timestamp_ns` guard → POST →
-/// 404-as-success → mark-notified); only these per-kind bits differ.
+/// guard → has-happened guard → cloud-id guard → org guard →
+/// `stop_timestamp_ns` guard → POST → 404-as-success → mark-notified); only
+/// these per-kind bits differ.
 #[derive(Clone, Copy)]
 pub enum LifecycleKind {
     Stop,
@@ -191,6 +192,14 @@ impl LifecycleKind {
         match self {
             LifecycleKind::Stop => "stop",
             LifecycleKind::Cancel => "cancel",
+        }
+    }
+
+    /// Whether the event this notifier reports has happened to the recording.
+    fn has_happened(self, row: &RecordingRow) -> bool {
+        match self {
+            LifecycleKind::Stop => row.stopped_at.is_some(),
+            LifecycleKind::Cancel => row.cancelled_at.is_some(),
         }
     }
 
@@ -237,15 +246,16 @@ pub async fn notify_recording_lifecycle(
         // Another path (sweep or earlier event) already notified.
         return;
     }
-    // Stop is also triggered by `RecordingCloudIdAssigned`, which can fire for a
-    // still-running recording; hold the POST until it has actually stopped.
-    // (A cancel only ever reaches here once `cancelled_at` is stamped.)
-    if matches!(kind, LifecycleKind::Stop) && row.stopped_at.is_none() {
+    // Both notifiers are also triggered by `RecordingCloudIdAssigned`, which
+    // can fire for a still-running recording; hold the POST until the
+    // recording has actually stopped or been cancelled.
+    if !kind.has_happened(&row) {
         return;
     }
     let Some(recording_id) = row.recording_id else {
-        // No cloud id → nothing exists server-side to act on. The sweep
-        // re-fires once the start notifier mints the id.
+        // No cloud id → nothing exists server-side to act on. The
+        // `RecordingCloudIdAssigned` event re-fires this notify if the start
+        // notifier mints the id later.
         tracing::debug!(
             recording_index,
             "recording has no cloud id at {action} time; deferring backend notify"

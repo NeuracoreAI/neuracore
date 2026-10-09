@@ -13,3 +13,4 @@ Example: "This release adds support for multi-GPU training and improves streamin
 
 The data daemon no longer opens a second recording when the backend notification of a start arrives after that recording was stopped or cancelled.
 A recording that the backend announces late no longer takes the last frames of the recording before it.
+The data daemon no longer starts a backend recording for a recording that is already cancelled, and it cancels one whose start was already sent.

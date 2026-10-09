@@ -11,7 +11,9 @@
 //!
 //! Recordings cancelled before `/recording/start` was ever notified (i.e.
 //! `recording_id IS NULL`) have no cloud representation, so there is nothing
-//! to cancel server-side; the notifier silently skips them.
+//! to cancel server-side; the notifier silently skips them. A cancel can also
+//! land while the start POST is in flight. The notifier then fires on
+//! [`DaemonEvent::RecordingCloudIdAssigned`], when the id arrives.
 
 use std::sync::Arc;
 
@@ -42,7 +44,8 @@ impl RecordingNotifier for CancelNotifier {
 
     fn triggered_by(&self, event: &DaemonEvent) -> Option<i64> {
         match event {
-            DaemonEvent::RecordingCancelled { recording_index } => Some(*recording_index),
+            DaemonEvent::RecordingCancelled { recording_index }
+            | DaemonEvent::RecordingCloudIdAssigned { recording_index } => Some(*recording_index),
             _ => None,
         }
     }
@@ -293,6 +296,126 @@ mod tests {
         })
         .await
         .expect("a 404 must still stamp backend_cancel_notified_at within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn posts_backend_cancel_when_the_cloud_id_arrives_after_the_cancel() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/cancel"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-late" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let row = store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(0),
+                start_timestamp_ns: 0,
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        store
+            .cancel_recording(row.recording_index, 5_000_000_000)
+            .await
+            .unwrap();
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_cancel_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        // The startup sweep runs first and finds nothing to cancel.
+        sleep(Duration::from_millis(150)).await;
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+
+        // The start POST that was in flight at the cancel returns now.
+        store
+            .mark_recording_start_notified(row.recording_index, "rec-late")
+            .await
+            .unwrap();
+        bus.publish(DaemonEvent::RecordingCloudIdAssigned {
+            recording_index: row.recording_index,
+        });
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if !received.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("expected one POST within 3s");
+        let received = server.received_requests().await.unwrap_or_default();
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(body["recording_id"], "rec-late");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn leaves_a_running_recording_alone_when_its_cloud_id_arrives() {
+        let server = MockServer::start().await;
+        let (store, _dir) = open_store().await;
+        let row = store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(0),
+                start_timestamp_ns: 0,
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        store
+            .mark_recording_start_notified(row.recording_index, "rec-running")
+            .await
+            .unwrap();
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_cancel_notifier(
+            store,
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        bus.publish(DaemonEvent::RecordingCloudIdAssigned {
+            recording_index: row.recording_index,
+        });
+
+        sleep(Duration::from_millis(150)).await;
+        let received = server.received_requests().await.unwrap_or_default();
+        assert!(
+            received.is_empty(),
+            "no backend POST expected for a recording that is not cancelled"
+        );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
