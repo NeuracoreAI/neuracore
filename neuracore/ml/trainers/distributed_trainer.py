@@ -89,6 +89,7 @@ class DistributedTrainer:
         save_freq: int = 1,
         save_checkpoints: bool = True,
         keep_last_n_checkpoints: int = 5,
+        checkpoint_saving_frequency: int = 5,
         clip_grad_norm: float | None = None,
         rank: int = 0,
         world_size: int = 1,
@@ -117,7 +118,9 @@ class DistributedTrainer:
                 which use the inference pipeline rather than the training one.
             save_freq: Frequency to save checkpoints (in epochs)
             save_checkpoints: Whether to save checkpoints
-            keep_last_n_checkpoints: Number of checkpoints to keep
+            keep_last_n_checkpoints: Number of recent checkpoints to keep,
+            checkpoint_saving_frequency: Retain a checkpoint when its
+                epoch is divisible by this value.
             clip_grad_norm: Maximum norm for gradient clipping
             rank: Rank of this process
             world_size: Total number of processes/GPUs
@@ -125,6 +128,8 @@ class DistributedTrainer:
         """
         if keep_last_n_checkpoints <= 0:
             raise ValueError("keep_last_n_checkpoints must be greater than 0")
+        if checkpoint_saving_frequency <= 0:
+            raise ValueError("checkpoint_saving_frequency must be greater than 0")
 
         self.device = device or get_default_device(gpu_index=rank)
 
@@ -161,6 +166,7 @@ class DistributedTrainer:
         self.save_freq = save_freq
         self.save_checkpoints = save_checkpoints
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
+        self.checkpoint_saving_frequency = checkpoint_saving_frequency
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
@@ -510,7 +516,10 @@ class DistributedTrainer:
         checkpoint_path = self.checkpoint_dir / f"checkpoint_{epoch}.pt"
         self.storage_handler.save_checkpoint(checkpoint, checkpoint_path)
         checkpoint_epoch_to_remove = epoch - self.keep_last_n_checkpoints
-        if checkpoint_epoch_to_remove > 0:
+        if (
+            checkpoint_epoch_to_remove > 0
+            and checkpoint_epoch_to_remove % self.checkpoint_saving_frequency != 0
+        ):
             checkpoint_to_remove = (
                 self.checkpoint_dir / f"checkpoint_{checkpoint_epoch_to_remove}.pt"
             )

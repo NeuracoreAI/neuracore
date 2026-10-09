@@ -564,6 +564,7 @@ def run_training(
                 inference_output_preprocessing_config.split_by_stage()[1],
             ),
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
+            checkpoint_saving_frequency=cfg.checkpoint_saving_frequency,
             clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
             world_size=world_size,
