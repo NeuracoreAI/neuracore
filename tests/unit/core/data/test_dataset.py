@@ -25,6 +25,8 @@ from neuracore.core.exceptions import DatasetError
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
 
+pytestmark = pytest.mark.usefixtures("mock_login")
+
 
 def _indexed_names(*names: str) -> dict[int, str]:
     return dict(enumerate(names))
@@ -661,7 +663,6 @@ class TestDatasetCreation:
 
         assert dataset.is_shared is True
 
-    @pytest.mark.usefixtures("mock_login")
     @pytest.mark.parametrize(
         "shared,existing_is_shared,found,expect_create",
         [
@@ -735,7 +736,6 @@ class TestDatasetCreation:
                 assert dataset.id == existing.id
                 assert dataset.is_shared == existing_is_shared
 
-    @pytest.mark.usefixtures("mock_login")
     def test_create_dataset_unauthorized_error_detail(self, dataset_model):
         """Test dataset creation errors include backend details."""
         mocked_org_id = "test-org-id"
@@ -766,7 +766,6 @@ class TestDatasetCreation:
             ):
                 Dataset.create("unauthorized_shared_dataset", shared=True)
 
-    @pytest.mark.usefixtures("mock_login")
     def test_create_with_special_characters_in_name(self, dataset_model):
         """Test creating a dataset with special characters in name."""
 
@@ -834,6 +833,7 @@ class TestDatasetIndexingAndSlicing:
             json=dataset_response.model_dump(mode="json"),
         )
 
+        mock_data_requests.reset_mock()
         dataset.delete_recording(recording_id="rec1")
 
         assert mock_data_requests.request_history[0].url == endpoint
@@ -873,6 +873,7 @@ class TestDatasetIndexingAndSlicing:
             json=dataset_response.model_dump(mode="json"),
         )
 
+        mock_data_requests.reset_mock()
         dataset.delete_recording(recording_name="first episode")
 
         lookup_request = mock_data_requests.request_history[0]
@@ -1259,7 +1260,6 @@ class TestDatasetSynchronization:
             TEST_ROBOT_ID: cross_embodiment_union[TEST_ROBOT_ID]
         }
 
-    @pytest.mark.usefixtures("mock_login")
     def test_synchronize_polls_until_complete(
         self,
         mock_data_requests,
@@ -1310,7 +1310,6 @@ class TestDatasetSynchronization:
         # Initial read + at least two polls to advance 0 -> 1 -> total.
         assert progress_matcher.call_count >= 3
 
-    @pytest.mark.usefixtures("mock_login")
     def test_synchronize_surfaces_recording_name_on_failure(
         self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
@@ -1330,7 +1329,6 @@ class TestDatasetSynchronization:
         with pytest.raises(DatasetError, match="Calm Falcon"):
             dataset.synchronize(frequency=30)
 
-    @pytest.mark.usefixtures("mock_login")
     def test_get_synchronization_progress_surfaces_backend_detail_verbatim(
         self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
@@ -1512,7 +1510,6 @@ def deleted_dataset(dataset_dict, mock_data_requests, mock_login):
     return dataset
 
 
-@pytest.mark.usefixtures("mock_login")
 class TestDatasetDeletion:
     """Tests for delete invalidating the in-memory Dataset object."""
 
