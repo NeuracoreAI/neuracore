@@ -111,6 +111,10 @@ async fn notify_backend(
         // Already notified — another path handled it.
         return;
     }
+    if row.cancelled_at.is_some() {
+        // Cancelled before the POST was sent: no backend recording is opened.
+        return;
+    }
 
     let Some(org_id) = org_rx.borrow().clone() else {
         // No current org configured yet (not logged in / org not selected).
@@ -299,6 +303,45 @@ mod tests {
         })
         .await
         .expect("cloud recording_id must be persisted within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn skips_the_start_post_for_a_cancelled_recording() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-rec-1").mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store).await;
+        store
+            .cancel_recording(index, 1_700_000_000_000_000_001)
+            .await
+            .expect("cancel");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        bus.publish(DaemonEvent::RecordingStarted {
+            recording_index: index,
+        });
+
+        sleep(Duration::from_millis(150)).await;
+        let received = server.received_requests().await.unwrap_or_default();
+        assert!(
+            received.is_empty(),
+            "no backend POST expected for a cancelled recording"
+        );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
