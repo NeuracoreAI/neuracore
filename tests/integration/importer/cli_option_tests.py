@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import neuracore as nc
@@ -22,6 +23,8 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 
+logger = logging.getLogger(__name__)
+
 IMPORTER_DATASET_READY_TIMEOUT_S = 300.0
 
 
@@ -33,7 +36,9 @@ def _cleanup_importer_resources(
 ) -> None:
     dataset = Dataset.get_by_name(dataset_name, non_exist_ok=True)
     if dataset is not None:
+        dataset_id = dataset.id
         dataset.delete()
+        logger.info("Deleted dataset %s (id %s)", dataset_name, dataset_id)
     if robot_name is not None and not is_shared:
         delete_importer_test_robot(robot_name, is_shared=is_shared)
 

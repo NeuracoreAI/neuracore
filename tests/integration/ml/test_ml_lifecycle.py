@@ -317,11 +317,14 @@ class TestMLLifecycle:
         for dataset in (cls.merged_dataset, cls.collected_dataset):
             if dataset is None:
                 continue
+            dataset_name = dataset.name
+            dataset_id = dataset.id
             try:
                 dataset.delete()
+                logger.info(f"Deleted dataset {dataset_name} (id {dataset_id})")
             except Exception:
                 logger.warning(
-                    f"Failed to delete dataset {dataset.name}", exc_info=True
+                    f"Failed to delete dataset {dataset_name}", exc_info=True
                 )
         delete_cloud_robot(ROBOT_NAME)
         delete_cloud_robot(MUJOCO_ROBOT_NAME)

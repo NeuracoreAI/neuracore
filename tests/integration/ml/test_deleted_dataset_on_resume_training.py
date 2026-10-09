@@ -264,6 +264,7 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
         # Step 3: delete the dataset
         dataset_id = dataset.id
         dataset.delete()
+        logger.info("Deleted dataset %s (id %s)", dataset_name, dataset_id)
         dataset = None
 
         # Try accessing the dataset by name and ID to ensure it is fully deleted
@@ -293,8 +294,10 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
                     "Failed to delete training job %s", job_id, exc_info=True
                 )
         if dataset is not None:
+            dataset_id = dataset.id
             try:
                 dataset.delete()
+                logger.info("Deleted dataset %s (id %s)", dataset_name, dataset_id)
             except Exception:
                 logger.warning(
                     "Failed to delete dataset %s", dataset_name, exc_info=True

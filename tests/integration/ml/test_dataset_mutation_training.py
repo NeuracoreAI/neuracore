@@ -350,11 +350,14 @@ class TestDatasetMutationTraining:
         for dataset in (cls.dataset, cls.corrupt_dataset):
             if dataset is None:
                 continue
+            dataset_name = dataset.name
+            dataset_id = dataset.id
             try:
                 dataset.delete()
+                logger.info(f"Deleted dataset {dataset_name} (id {dataset_id})")
             except Exception:
                 logger.warning(
-                    f"Failed to delete dataset {dataset.name}", exc_info=True
+                    f"Failed to delete dataset {dataset_name}", exc_info=True
                 )
         delete_cloud_robot(ROBOT_NAME)
 

@@ -31,7 +31,10 @@ def dataset_cleanup() -> Generator[Callable[[str], None], None, None]:
     for dataset_name in dataset_names:
         try:
             nc.login()
-            nc.get_dataset(dataset_name).delete()
+            dataset = nc.get_dataset(dataset_name)
+            dataset_id = dataset.id
+            dataset.delete()
+            logger.info("Deleted dataset %s (id %s)", dataset_name, dataset_id)
         except Exception:  # noqa: BLE001
             logger.warning("Failed to delete test dataset: %s", dataset_name)
 
