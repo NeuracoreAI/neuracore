@@ -10,3 +10,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+The data daemon no longer opens a second recording when the backend notification of a start arrives after that recording was stopped or cancelled.
