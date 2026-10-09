@@ -3,6 +3,7 @@
   <img src="docs/assets/neuracore_readme_header.jpg" alt="Neuracore Logo" width="100%">
 </div>
 
+
 <br>
 
 <div align="center">
