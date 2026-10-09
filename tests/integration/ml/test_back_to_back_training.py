@@ -92,7 +92,7 @@ class TestBackToBackTraining:
                 nc.delete_training_job(job_id)
             except Exception:
                 logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
-        if cls.dataset:
+        if cls.dataset is not None:
             try:
                 cls.dataset.delete()
             except Exception:
