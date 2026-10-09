@@ -53,6 +53,7 @@ jobs:
             )
         )
 
+        # One matrix cell per training job; all nested evaluations run in-process.
         matrix = [
             {
                 "algorithm": algorithm["name"],

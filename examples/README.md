@@ -3,6 +3,7 @@
 This contains examples for using Neuracore with simulated robot environments. We provide [ALOHA](https://tonyzhaozh.github.io/aloha/) simulation environment as a manipulation focused scenario and [bigym](https://chernyadev.github.io/bigym/) environment as a humanoid focused scenario. You'll learn how to:
 - Collect and record robot demonstrations
 - Deploy trained models locally
+- Run realtime overlapping-chunk control (RTC / temporal ensemble)
 - Visualize robot behavior
 
 ## Installation
@@ -93,12 +94,30 @@ pip install "neuracore[ml]"
 
 Run the local model with ALOHA example:
 ```bash
-python example_local_endpoint.py
+python example_local_endpoint_vx300s.py
 ```
 or if your running the Bi Gym example:
 ```bash 
 python example_local_endpoint_bigym.py
 ```
+
+### Realtime overlapping-chunk execution (RTC / temporal ensemble)
+This example drives MuJoCo with :func:`neuracore.policy_realtime`: the next
+action chunk is generated in a background thread while the control loop
+consumes one action per tick. Choose ``--mode rtc`` (diffusion/flow guided
+sampling) or ``--mode temporal_ensemble`` (unguided predict + merge).
+
+**NOTE: Before running this example:**
+- Same prerequisites as [Local Model Deployment](#local-model-deployment)
+- Prefer a trained **DiffusionPolicy** for ``--mode rtc``
+
+```bash
+pip install "neuracore[ml,examples]"
+python example_realtime_chunking_vx300s.py --train-run-name MyTrainingJob --mode rtc
+python example_realtime_chunking_vx300s.py --model-file /path/to/model.nc.zip --mode temporal_ensemble
+```
+
+See also [docs/realtime_chunking.md](../docs/realtime_chunking.md).
 
 ### Server Model Deployment
 The server deployment example shows how to:
