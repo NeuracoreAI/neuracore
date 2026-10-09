@@ -21,6 +21,10 @@ from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 
 logger = logging.getLogger(__name__)
 
+# Must match TRAINING_PUBLISHING_SUFFIX in the backend training constants.
+# Fixed-name artifacts upload here first, then promote onto the final path.
+_PUBLISHING_SUFFIX = ".publishing"
+
 
 class TrainingStorageHandler(UploadStorageMixin):
     """Handles storage operations for both local and GCS."""
@@ -122,6 +126,58 @@ class TrainingStorageHandler(UploadStorageMixin):
             )
         return response.json()["url"]
 
+    def _promote_upload(self, filepath: str) -> None:
+        """Promote a staging upload onto its final cloud path.
+
+        Copies ``{filepath}.publishing`` onto ``filepath`` server-side.
+
+        Args:
+            filepath: Final relative path within the training job prefix.
+
+        Raises:
+            ValueError: If the promote request fails.
+        """
+        response = self._post_request(
+            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}"
+            f"/promote-upload",
+            params={"filepath": filepath},
+        )
+        if response.status_code != 200:
+            raise ValueError(
+                f"Failed to promote upload for {filepath}: {response.text}"
+            )
+
+    def _upload_file_replace(
+        self,
+        local_path: Path,
+        remote_filepath: str,
+        content_type: str,
+    ) -> bool:
+        """Upload to a staging object, then atomically replace the final path.
+
+        Args:
+            local_path: Local file to upload.
+            remote_filepath: Final destination path within cloud storage.
+            content_type: MIME type of the file being uploaded.
+
+        Returns:
+            True if the staging upload and promote both succeeded.
+        """
+        staging_filepath = f"{remote_filepath}{_PUBLISHING_SUFFIX}"
+        if not self.upload_file(local_path, staging_filepath, content_type):
+            return False
+        try:
+            self._promote_upload(remote_filepath)
+        except Exception:
+            logger.error(
+                "Failed to promote staging upload %s onto %s",
+                staging_filepath,
+                remote_filepath,
+                exc_info=True,
+            )
+            return False
+        return True
+
     def _get_checkpoint_download_url(self, checkpoint_name: str) -> str:
         """Get a signed download URL for a checkpoint file in cloud storage.
 
@@ -176,6 +232,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         remote_filepath: str,
         content_type: str,
         delete_on_success: bool,
+        replace_atomically: bool = False,
     ) -> None:
         """Upload ``local_path`` on the background worker.
 
@@ -185,11 +242,21 @@ class TrainingStorageHandler(UploadStorageMixin):
             content_type: MIME type of the file being uploaded.
             delete_on_success: Whether to unlink the local file once the
                 upload succeeds.
+            replace_atomically: When True, upload to a ``.publishing`` staging
+                object and promote onto ``remote_filepath`` so readers never
+                see a half-written object.
         """
 
         def _do_upload() -> None:
             try:
-                uploaded = self.upload_file(local_path, remote_filepath, content_type)
+                if replace_atomically:
+                    uploaded = self._upload_file_replace(
+                        local_path, remote_filepath, content_type
+                    )
+                else:
+                    uploaded = self.upload_file(
+                        local_path, remote_filepath, content_type
+                    )
             except Exception:
                 logger.error(
                     "Unexpected error uploading %s to cloud path %s",
@@ -383,6 +450,7 @@ class TrainingStorageHandler(UploadStorageMixin):
                     remote_filepath=str(file_path.name),
                     content_type="application/octet-stream",
                     delete_on_success=False,
+                    replace_atomically=True,
                 )
 
     def update_training_progress(self, progress: TrainingProgress) -> None:
@@ -517,6 +585,25 @@ class TrainingStorageHandler(UploadStorageMixin):
         headers = headers or get_auth().get_headers()
         session = thread_local_session(retry_transient=True)
         return session.put(url, headers=headers, json=json, data=data)
+
+    def _post_request(
+        self,
+        url: str,
+        json: dict | None = None,
+        params: dict | None = None,
+        headers: dict | None = None,
+    ) -> requests.Response:
+        """Helper method to send a POST request.
+
+        Args:
+            url: The URL to send the request to.
+            json: Optional JSON payload to include in the request.
+            params: Optional query parameters to include in the request.
+            headers: Optional headers to include in the request.
+        """
+        headers = headers or get_auth().get_headers()
+        session = thread_local_session(retry_transient=True)
+        return session.post(url, headers=headers, json=json, params=params)
 
     def _get_request(self, url: str, params: dict | None = None) -> requests.Response:
         """Helper method to send a GET request.
