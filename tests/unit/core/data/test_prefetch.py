@@ -1,17 +1,21 @@
 """Tests for the concurrent metadata and video prefetch."""
 
 import asyncio
+import re
 import threading
 import time
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 from neuracore_types import DataType, SynchronizationDetails
 
 import neuracore as nc
 import neuracore.core.data.frame_cache as frame_cache
+from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.data.prefetch import VideoPrefetcher
+from neuracore.core.data.frame_cache import DEPTH_FRAMES_FILENAME, read_depth_frame
+from neuracore.core.data.prefetch import CameraDataPrefetcher
 
 
 @pytest.fixture
@@ -30,9 +34,9 @@ def details() -> SynchronizationDetails:
     return SynchronizationDetails(frequency=30, cross_embodiment_union=None)
 
 
-def _prefetcher(dataset, details, **kwargs) -> VideoPrefetcher:
+def _prefetcher(dataset, details, **kwargs) -> CameraDataPrefetcher:
     recordings = [dataset[idx] for idx in range(len(dataset))]
-    return VideoPrefetcher(
+    return CameraDataPrefetcher(
         dataset=dataset,
         recordings=recordings,
         synchronization_details=details,
@@ -45,7 +49,7 @@ class TestMetadataStage:
 
     def test_fetches_metadata_for_every_recording(self, dataset_mock, details):
         """Every recording index should come back with its episode."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
         episodes = prefetcher.run()
 
         assert set(episodes) == set(range(len(dataset_mock)))
@@ -54,18 +58,20 @@ class TestMetadataStage:
 
     def test_metadata_failure_is_skipped_not_raised(self, dataset_mock, details):
         """A recording whose metadata fails is absent, and does not abort the run."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
         with patch.object(
-            VideoPrefetcher, "_get_synced_data", side_effect=RuntimeError("boom")
+            CameraDataPrefetcher, "_get_synced_data", side_effect=RuntimeError("boom")
         ):
             episodes = prefetcher.run()
 
         assert episodes == {}
 
-    def test_download_videos_false_skips_transfers(self, dataset_mock, details):
+    def test_download_camera_data_false_skips_transfers(self, dataset_mock, details):
         """Metadata-only runs must not touch the video stage."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
-        with patch.object(VideoPrefetcher, "_download_video") as mock_download:
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
+        with patch.object(
+            CameraDataPrefetcher, "_download_camera_data"
+        ) as mock_download:
             prefetcher.run()
 
         mock_download.assert_not_called()
@@ -76,9 +82,9 @@ class TestDownloadTargetCollection:
 
     def test_uncached_cameras_become_targets(self, dataset_mock, details):
         """With an empty cache, every camera in the sync point is a target."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
         prefetcher.run()
-        prefetcher.download_videos = True
+        prefetcher.download_camera_data = True
 
         targets = prefetcher._collect_download_targets()
 
@@ -93,9 +99,9 @@ class TestDownloadTargetCollection:
 
     def test_cached_cameras_are_skipped(self, dataset_mock, details):
         """A published frames directory means there is nothing to download."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
         prefetcher.run()
-        prefetcher.download_videos = True
+        prefetcher.download_camera_data = True
 
         # Publish every camera's frames, as a completed decode would.
         for target in prefetcher._collect_download_targets():
@@ -106,9 +112,9 @@ class TestDownloadTargetCollection:
 
     def test_camera_locked_by_another_worker_is_skipped(self, dataset_mock, details):
         """A held lock means another worker owns that camera."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
         prefetcher.run()
-        prefetcher.download_videos = True
+        prefetcher.download_camera_data = True
 
         first_pass = prefetcher._collect_download_targets()
         assert first_pass
@@ -117,9 +123,9 @@ class TestDownloadTargetCollection:
 
     def test_released_lock_can_be_reclaimed(self, dataset_mock, details):
         """Releasing a lock without publishing lets a later attempt retry."""
-        prefetcher = _prefetcher(dataset_mock, details, download_videos=False)
+        prefetcher = _prefetcher(dataset_mock, details, download_camera_data=False)
         prefetcher.run()
-        prefetcher.download_videos = True
+        prefetcher.download_camera_data = True
 
         for target in prefetcher._collect_download_targets():
             target.release()
@@ -133,7 +139,7 @@ class TestVideoStage:
     def test_prefetch_populates_frame_cache(self, dataset_mock, details):
         """A full run leaves decoded frames published for every camera."""
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=2
+            dataset_mock, details, download_camera_data=True, decode_workers=2
         )
         episodes = prefetcher.run()
 
@@ -143,10 +149,41 @@ class TestVideoStage:
             for camera_dir in rgb_root.iterdir():
                 assert (camera_dir / "0.png").exists()
 
+    def test_prefetch_caches_depth_frames_unchanged(
+        self, dataset_mock, details, mock_data_requests, depth_frames_fn
+    ):
+        """Depth cameras cache the frames file itself and serve its exact frames."""
+        frames = np.zeros((2, 6, 8), dtype=np.uint16)
+        frames[1, 2:, 3:] = 41234
+        payload, ranges = depth_frames_fn(frames)
+        mock_data_requests.get(
+            re.compile(
+                f"{API_URL}/org/{dataset_mock.org_id}/recording/.*/download_url"
+                r"\?filepath=DEPTH_IMAGES.*lossless\.bin"
+            ),
+            json={"url": "https://example.com/depth.bin"},
+        )
+        mock_data_requests.get("https://example.com/depth.bin", content=payload)
+        prefetcher = _prefetcher(
+            dataset_mock, details, download_camera_data=True, decode_workers=2
+        )
+        prefetcher.run()
+
+        cached = list(
+            dataset_mock.cache_dir.rglob(
+                f"{DataType.DEPTH_IMAGES.value}/*/{DEPTH_FRAMES_FILENAME}"
+            )
+        )
+        assert cached
+        for frames_file in cached:
+            assert frames_file.read_bytes() == payload
+            frame = read_depth_frame(frames_file.parent, *ranges[1])
+            np.testing.assert_array_equal(frame, frames[1])
+
     def test_no_locks_are_left_behind(self, dataset_mock, details):
         """Every lock taken must be released, whatever happened to its camera."""
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=2
+            dataset_mock, details, download_camera_data=True, decode_workers=2
         )
         prefetcher.run()
 
@@ -155,10 +192,12 @@ class TestVideoStage:
     def test_download_failure_releases_lock_and_is_counted(self, dataset_mock, details):
         """A failed transfer must not leave a lock stranding the camera."""
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=2
+            dataset_mock, details, download_camera_data=True, decode_workers=2
         )
         with patch.object(
-            VideoPrefetcher, "_download_video", side_effect=RuntimeError("boom")
+            CameraDataPrefetcher,
+            "_download_camera_data",
+            side_effect=RuntimeError("boom"),
         ):
             prefetcher.run()
 
@@ -172,7 +211,7 @@ class TestVideoStage:
         progress: list[tuple[int, int]] = []
         entered_decode = threading.Event()
         allow_decode = threading.Event()
-        original_decode = frame_cache.decode_video
+        original_decode = frame_cache.decode_rgb_video
 
         def gated_decode(video_location, video_frame_cache_path):
             entered_decode.set()
@@ -183,13 +222,13 @@ class TestVideoStage:
             prefetcher = _prefetcher(
                 dataset_mock,
                 details,
-                download_videos=True,
+                download_camera_data=True,
                 decode_workers=1,
                 download_progress_reporter=lambda done, total: progress.append(
                     (done, total)
                 ),
             )
-            with patch.object(frame_cache, "decode_video", gated_decode):
+            with patch.object(frame_cache, "decode_rgb_video", gated_decode):
                 prefetcher.run()
 
         thread = threading.Thread(target=run_prefetch)
@@ -211,10 +250,10 @@ class TestVideoStage:
     def test_decode_failure_leaves_no_partial_cache(self, dataset_mock, details):
         """A failed decode must publish nothing rather than a partial directory."""
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=2
+            dataset_mock, details, download_camera_data=True, decode_workers=2
         )
         with patch(
-            "neuracore.core.data.frame_cache.decode_video",
+            "neuracore.core.data.frame_cache.decode_rgb_video",
             side_effect=RuntimeError("boom"),
         ):
             prefetcher.run()
@@ -228,11 +267,11 @@ class TestVideoStage:
     ):
         """A camera published mid-flight is left exactly as the other worker left it."""
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=1
+            dataset_mock, details, download_camera_data=True, decode_workers=1
         )
-        prefetcher.download_videos = False
+        prefetcher.download_camera_data = False
         prefetcher.run()
-        prefetcher.download_videos = True
+        prefetcher.download_camera_data = True
 
         targets = prefetcher._collect_download_targets()
         target = targets[0]
@@ -266,10 +305,10 @@ class TestMetadataDownloadOverlap:
         out and its episode going missing.
         """
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=2
+            dataset_mock, details, download_camera_data=True, decode_workers=2
         )
-        original_metadata = VideoPrefetcher._get_synced_data
-        original_download = VideoPrefetcher._download_video
+        original_metadata = CameraDataPrefetcher._get_synced_data
+        original_download = CameraDataPrefetcher._download_camera_data
         download_started: list[asyncio.Event] = []
         seen = {"n": 0}
 
@@ -288,8 +327,10 @@ class TestMetadataDownloadOverlap:
             return await original_download(self, session, target)
 
         with (
-            patch.object(VideoPrefetcher, "_get_synced_data", gated_metadata),
-            patch.object(VideoPrefetcher, "_download_video", signalling_download),
+            patch.object(CameraDataPrefetcher, "_get_synced_data", gated_metadata),
+            patch.object(
+                CameraDataPrefetcher, "_download_camera_data", signalling_download
+            ),
         ):
             episodes = prefetcher.run()
 
@@ -300,9 +341,9 @@ class TestMetadataDownloadOverlap:
     ):
         """A metadata failure costs that recording only."""
         prefetcher = _prefetcher(
-            dataset_mock, details, download_videos=True, decode_workers=2
+            dataset_mock, details, download_camera_data=True, decode_workers=2
         )
-        original_metadata = VideoPrefetcher._get_synced_data
+        original_metadata = CameraDataPrefetcher._get_synced_data
         calls = {"n": 0}
 
         async def fail_first(self, session, recording_id):
@@ -311,7 +352,7 @@ class TestMetadataDownloadOverlap:
                 raise RuntimeError("boom")
             return await original_metadata(self, session, recording_id)
 
-        with patch.object(VideoPrefetcher, "_get_synced_data", fail_first):
+        with patch.object(CameraDataPrefetcher, "_get_synced_data", fail_first):
             episodes = prefetcher.run()
 
         assert len(episodes) == len(prefetcher.recordings) - 1

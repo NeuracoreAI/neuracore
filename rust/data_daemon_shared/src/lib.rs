@@ -603,10 +603,11 @@ pub enum Envelope {
         /// Length equals `frame_count`; values round-trip bit-exact through
         /// postcard for the metadata sidecar.
         frame_timestamps_s: Vec<f64>,
-        /// Original dtype of every frame in this chunk (never mixed — the
-        /// producer seals and reopens a chunk on a dtype change, mirroring a
-        /// geometry change). The daemon never decodes pixels; it threads this
-        /// straight into the trace's `trace.json` sidecar for depth frames.
+        /// Stored representation of every frame in this chunk (never mixed:
+        /// the producer seals and reopens a chunk on a dtype or depth scale
+        /// change, like a geometry change). Depth chunks carry
+        /// [`FrameDtype::DepthU16`] with their scale, which picks the depth
+        /// encode and lands in the trace's `trace.json` sidecar.
         dtype: FrameDtype,
         /// Per-frame publish time as µs after this chunk's own
         /// `publish_timestamp_ns`, in arrival order. What makes chunk membership
@@ -649,58 +650,67 @@ pub enum Envelope {
     },
 }
 
-/// Original pixel/sample representation of one video-family frame.
+/// Pixel or sample representation of one video-family frame.
 ///
-/// Carried on [`Envelope::VideoChunkReady`] so the daemon can record a depth
-/// frame's original dtype in its `trace.json` sidecar without ever seeing the
-/// pixels themselves — the daemon never decodes or converts frame data, it
-/// only threads this label through to metadata (see the crate-level docs on
-/// the thin-shipper model). The producer is the only side that interprets the
-/// raw bytes: RGB frames are already packed RGB24 for the NUT/PNG pipeline;
-/// depth frames are converted to RGB24 storage bytes by the producer before
-/// ever reaching the NUT writer.
+/// On the producer side it describes the buffer a caller logs. On
+/// [`Envelope::VideoChunkReady`] it describes what the chunk stores: packed
+/// RGB24 for RGB, and uint16 grey samples with their metres-per-unit scale for
+/// depth. The daemon reads only this label and never the pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameDtype {
-    /// Packed RGB24, one byte per channel — the existing RGB/NUT contract.
+    /// Packed RGB24, one byte per channel.
     Rgb8,
-    /// 2D depth frame, IEEE-754 binary16 (metres).
-    DepthF16,
-    /// 2D depth frame, IEEE-754 binary32 (metres).
-    DepthF32,
+    /// 2D depth frame, little-endian uint16 sensor units where 0 means no
+    /// return. `scale_bits` holds the metres per unit as `f64::to_bits`, so
+    /// the dtype stays `Eq` and a scale change seals a chunk like a dtype
+    /// change does.
+    DepthU16 {
+        /// Metres per unit as `f64::to_bits`.
+        scale_bits: u64,
+    },
 }
 
 impl FrameDtype {
-    /// Bytes occupied by one pixel/sample of this representation, before any
-    /// depth-to-RGB24 conversion.
+    /// uint16 depth at `depth_scale_m` metres per unit.
+    pub fn depth_u16(depth_scale_m: f64) -> Self {
+        FrameDtype::DepthU16 {
+            scale_bits: depth_scale_m.to_bits(),
+        }
+    }
+
+    /// Metres per unit of a uint16 depth frame, `None` for every other dtype.
+    pub fn depth_scale_m(self) -> Option<f64> {
+        match self {
+            FrameDtype::DepthU16 { scale_bits } => Some(f64::from_bits(scale_bits)),
+            FrameDtype::Rgb8 => None,
+        }
+    }
+
+    /// Whether this is a depth representation.
+    pub fn is_depth(self) -> bool {
+        !matches!(self, FrameDtype::Rgb8)
+    }
+
+    /// Bytes occupied by one pixel or sample of this representation.
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             FrameDtype::Rgb8 => 3,
-            FrameDtype::DepthF16 => 2,
-            FrameDtype::DepthF32 => 4,
+            FrameDtype::DepthU16 { .. } => 2,
         }
     }
 
-    /// Parse the Python-facing wire label — `numpy.dtype.name`, i.e.
-    /// `"uint8"` for RGB and `"float16"` / `"float32"` for depth. `None` for
-    /// anything else, so the native boundary rejects an unsupported dtype
-    /// with a clear error rather than silently misinterpreting the buffer.
-    pub fn from_wire_label(label: &str) -> Option<Self> {
+    /// Parse the Python-facing wire label, which is `numpy.dtype.name`:
+    /// `"uint8"` for RGB and `"uint16"` for depth in sensor units, which also
+    /// needs a positive finite `depth_scale_m`. `None` for anything else, so
+    /// the native boundary rejects an unsupported dtype instead of misreading
+    /// the buffer.
+    pub fn from_wire_label(label: &str, depth_scale_m: Option<f64>) -> Option<Self> {
         match label {
             "uint8" => Some(FrameDtype::Rgb8),
-            "float16" => Some(FrameDtype::DepthF16),
-            "float32" => Some(FrameDtype::DepthF32),
+            "uint16" => depth_scale_m
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .map(Self::depth_u16),
             _ => None,
-        }
-    }
-
-    /// The canonical `trace.json` dtype string for a depth frame — `None` for
-    /// RGB, which keeps the existing RGB `trace.json` schema untouched (no
-    /// consumer or established schema calls for an RGB dtype field).
-    pub fn depth_label(self) -> Option<&'static str> {
-        match self {
-            FrameDtype::Rgb8 => None,
-            FrameDtype::DepthF16 => Some("float16"),
-            FrameDtype::DepthF32 => Some("float32"),
         }
     }
 }
@@ -1183,8 +1193,7 @@ mod tests {
         // guard every variant, not just the RGB default above.
         for (data_type, dtype) in [
             ("RGB_IMAGES", FrameDtype::Rgb8),
-            ("DEPTH_IMAGES", FrameDtype::DepthF16),
-            ("DEPTH_IMAGES", FrameDtype::DepthF32),
+            ("DEPTH_IMAGES", FrameDtype::depth_u16(1e-4)),
         ] {
             let original = Envelope::VideoChunkReady {
                 robot_id: "robot-1".into(),
@@ -1211,32 +1220,46 @@ mod tests {
 
     #[test]
     fn frame_dtype_wire_labels_round_trip() {
-        assert_eq!(FrameDtype::from_wire_label("uint8"), Some(FrameDtype::Rgb8));
         assert_eq!(
-            FrameDtype::from_wire_label("float16"),
-            Some(FrameDtype::DepthF16)
+            FrameDtype::from_wire_label("uint8", None),
+            Some(FrameDtype::Rgb8)
         );
         assert_eq!(
-            FrameDtype::from_wire_label("float32"),
-            Some(FrameDtype::DepthF32)
+            FrameDtype::from_wire_label("uint16", Some(1e-4)),
+            Some(FrameDtype::depth_u16(1e-4))
         );
-        assert_eq!(FrameDtype::from_wire_label("int32"), None);
-        assert_eq!(FrameDtype::from_wire_label(""), None);
+        assert_eq!(FrameDtype::from_wire_label("float32", None), None);
+        assert_eq!(FrameDtype::from_wire_label("int32", None), None);
+        assert_eq!(FrameDtype::from_wire_label("", None), None);
     }
 
     #[test]
-    fn frame_dtype_depth_label_is_none_for_rgb() {
-        // RGB must not gain a `trace.json` dtype field — only depth does.
-        assert_eq!(FrameDtype::Rgb8.depth_label(), None);
-        assert_eq!(FrameDtype::DepthF16.depth_label(), Some("float16"));
-        assert_eq!(FrameDtype::DepthF32.depth_label(), Some("float32"));
+    fn uint16_wire_label_needs_a_positive_finite_scale() {
+        for scale in [
+            None,
+            Some(0.0),
+            Some(-1e-4),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            assert_eq!(
+                FrameDtype::from_wire_label("uint16", scale),
+                None,
+                "{scale:?}"
+            );
+        }
     }
 
     #[test]
     fn frame_dtype_bytes_per_pixel() {
         assert_eq!(FrameDtype::Rgb8.bytes_per_pixel(), 3);
-        assert_eq!(FrameDtype::DepthF16.bytes_per_pixel(), 2);
-        assert_eq!(FrameDtype::DepthF32.bytes_per_pixel(), 4);
+        assert_eq!(FrameDtype::depth_u16(1e-4).bytes_per_pixel(), 2);
+    }
+
+    #[test]
+    fn only_uint16_depth_has_a_scale() {
+        assert_eq!(FrameDtype::depth_u16(1e-4).depth_scale_m(), Some(1e-4));
+        assert_eq!(FrameDtype::Rgb8.depth_scale_m(), None);
     }
 
     #[test]

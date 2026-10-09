@@ -91,7 +91,7 @@ class ContextCaseSpec:
     recording_control: str
     joint_process_groups: int = 1
     depth_count: int = 0
-    depth_mode: DepthMode = "float32"
+    depth_mode: DepthMode = "uint16_mm"
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -185,7 +185,7 @@ class ContextResult:
     source: tuple[str, int] = ("", 0)
     depth_camera_names: list[str] = field(default_factory=list)
     depth_frame_count: int = 0
-    depth_mode: DepthMode = "float32"
+    depth_mode: DepthMode = "uint16_mm"
     has_depth: bool = False
 
 

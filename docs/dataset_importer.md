@@ -68,7 +68,8 @@ Each data type mapping supports:
   - `normalized_pixel_values`: `false` (default) | `true` - Whether pixels are normalized [0,1] or [0,255] (for RGB_IMAGES)
   - `angle_units`: `RADIANS` (default) | `DEGREES` - Angle unit conversion (for joint data, poses)
   - `torque_units`: `NM` (default) | `NCM` - Torque unit conversion (for JOINT_TORQUES)
-  - `distance_units`: `M` (default) | `MM` - Distance unit conversion (for DEPTH_IMAGES, POINT_CLOUDS)
+  - `distance_units`: `M` (default) | `MM` - Distance unit conversion (for POINT_CLOUDS)
+  - `depth_scale_m`: `float` - Meters per unit of the source depth images, for example `0.001` for millimeters or `0.0001` for an Intel RealSense D405 (required for DEPTH_IMAGES)
   - `pose_type`: `MATRIX` (default) | `POSITION_ORIENTATION` - Pose representation format (for POSES, END_EFFECTOR_POSES, JOINT_POSITIONS with end effector)
   - `orientation`: Configuration object (required when `pose_type: POSITION_ORIENTATION`):
     - `type`: `QUATERNION` (default) | `EULER` | `MATRIX` | `AXIS_ANGLE` - Orientation representation
@@ -152,20 +153,20 @@ The importer supports the following data types:
         source_name: wrist_image
   ```
 
-- **DEPTH_IMAGES**: Depth images with distance unit configuration (M | MM)
-  
+- **DEPTH_IMAGES**: Depth images as integer sensor units
+
   ```yaml
   DEPTH_IMAGES:
     source: observation
     format:
-      distance_units: M  # M | MM
+      depth_scale_m: 0.001  # meters per unit of the source image
     mapping:
       - name: depth_static
         source_name: depth_static
       - name: depth_gripper
         source_name: depth_gripper
   ```
-  Note: Automatically converts NaN, positive infinity, and negative infinity values to zero.
+  Every depth image holds integer units of `depth_scale_m` meters. The importer stores the values exactly as uint16 with that unit. Values must fit uint16, and 0 means no return.
 
 - **POINT_CLOUDS**: 3D point clouds (N×3 arrays) with distance unit configuration
   

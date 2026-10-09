@@ -6,6 +6,8 @@ import tempfile
 from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
+import imagecodecs
+import numpy as np
 import pytest
 import requests_mock
 
@@ -235,3 +237,18 @@ def mock_session():
     session.__enter__.return_value = session
     session.__exit__.return_value = None
     return session
+
+
+@pytest.fixture
+def depth_frames_fn():
+    """Return a builder of depth frames files holding JPEG-XL frames."""
+
+    def _depth_frames(frames: np.ndarray) -> tuple[bytes, list[tuple[int, int]]]:
+        payloads = [imagecodecs.jpegxl_encode(frame, lossless=True) for frame in frames]
+        ranges, offset = [], 0
+        for payload in payloads:
+            ranges.append((offset, len(payload)))
+            offset += len(payload)
+        return b"".join(payloads), ranges
+
+    return _depth_frames

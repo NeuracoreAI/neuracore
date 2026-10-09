@@ -23,7 +23,6 @@ clap = { version = "4", features = ["derive"] }
 crc32c = "0.6"
 dashmap = "6"
 dirs = "5"
-half = "2"
 iceoryx2 = "0.8"
 libc = "0.2"
 logroller = "=0.1.12"
