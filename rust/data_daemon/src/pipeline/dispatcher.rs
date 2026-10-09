@@ -809,33 +809,33 @@ impl Dispatcher {
         recording_id: &str,
         start_timestamp_ns: i64,
     ) -> bool {
-        match self.store.recording_index_for_cloud_id(recording_id).await {
-            Ok(Some(_)) => return true,
-            Ok(None) => {}
+        // A recording started here has no cloud id until its start POST
+        // returns, and the echo can arrive first. The row is read, not the
+        // announcement, because a stop or a cancel removes the announcement
+        // while the POST is still in flight.
+        match self
+            .store
+            .recording_index_for_known_recording(
+                recording_id,
+                &source.0,
+                source.1,
+                start_timestamp_ns,
+                ECHO_START_TOLERANCE_NS,
+            )
+            .await
+        {
+            Ok(index) => index.is_some(),
             Err(error) => {
+                // A failed read drops the echo: a missed duplicate check would
+                // open a second recording.
                 tracing::warn!(
                     %error,
                     recording_id,
                     robot_id = source.0,
-                    "failed to check for an existing recording; proceeding"
+                    "failed to check for an existing recording; ignoring the start"
                 );
+                true
             }
-        }
-        let opened_index = self
-            .announced
-            .0
-            .get(source)
-            .filter(|entry| {
-                entry.start_timestamp_ns.abs_diff(start_timestamp_ns) <= ECHO_START_TOLERANCE_NS
-            })
-            .and_then(|entry| entry.recording_index);
-        // A failed read counts as no id, which drops the echo: a missed
-        // duplicate check would open a second recording.
-        match opened_index {
-            Some(recording_index) => stored_recording_id(&self.store, recording_index)
-                .await
-                .is_none(),
-            None => false,
         }
     }
 
@@ -3208,6 +3208,70 @@ mod tests {
             recordings[0].recording_id, None,
             "only the start POST stores the cloud id"
         );
+    }
+
+    #[tokio::test]
+    async fn an_echo_of_a_cancelled_start_opens_no_recording() {
+        // The cancel removes the announcement while the start POST is still in
+        // flight. The echo must not open a recording for the tail data of the
+        // recording before it.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher.handle_inbound(start("robot-1", 100), now).await;
+        dispatcher.handle_inbound(stop("robot-1", 200), now).await;
+        dispatcher.handle_inbound(start("robot-1", 210), now).await;
+        dispatcher
+            .handle_inbound(
+                Envelope::CancelRecording {
+                    robot_id: "robot-1".into(),
+                    robot_instance: 0,
+                    timestamp_ns: 211,
+                },
+                now,
+            )
+            .await;
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-cancelled", 210), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 190, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2, "the echo opened a third recording");
+        assert!(recordings[1].cancelled_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_echo_of_a_stopped_start_opens_no_recording() {
+        // A short recording can stop before its start POST returns.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher.handle_inbound(start("robot-1", 100), now).await;
+        dispatcher.handle_inbound(stop("robot-1", 200), now).await;
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 190, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1, "the echo opened a second recording");
     }
 
     #[tokio::test]

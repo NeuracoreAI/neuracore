@@ -124,6 +124,19 @@ pub trait StateStore: Send + Sync {
         recording_id: &str,
     ) -> Result<Option<i64>, StateStoreError>;
 
+    /// Look up a recording that has `recording_id` as its cloud id, or that
+    /// has no cloud id yet and started within `tolerance_ns` of
+    /// `start_timestamp_ns` for this source. A stopped or cancelled recording
+    /// counts: its start POST can still be in flight.
+    async fn recording_index_for_known_recording(
+        &self,
+        recording_id: &str,
+        robot_id: &str,
+        robot_instance: i64,
+        start_timestamp_ns: i64,
+        tolerance_ns: u64,
+    ) -> Result<Option<i64>, StateStoreError>;
+
     /// List recordings whose `/recording/start` POST has not yet succeeded:
     /// `recording_id IS NULL`, `backend_start_notified_at IS NULL`, and the
     /// recording is not cancelled. The start notifier's startup sweep.
@@ -823,6 +836,32 @@ impl StateStore for SqliteStateStore {
             "SELECT recording_index FROM recordings WHERE recording_id = ?1 LIMIT 1",
         )
         .bind(recording_id)
+        .fetch_optional(&self.read_pool)
+        .await?;
+        Ok(recording_index)
+    }
+
+    async fn recording_index_for_known_recording(
+        &self,
+        recording_id: &str,
+        robot_id: &str,
+        robot_instance: i64,
+        start_timestamp_ns: i64,
+        tolerance_ns: u64,
+    ) -> Result<Option<i64>, StateStoreError> {
+        let recording_index = sqlx::query_scalar::<_, i64>(
+            "SELECT recording_index FROM recordings \
+              WHERE recording_id = ?1 \
+                 OR (recording_id IS NULL \
+                     AND robot_id = ?2 AND robot_instance = ?3 \
+                     AND ABS(start_timestamp_ns - ?4) <= ?5) \
+              LIMIT 1",
+        )
+        .bind(recording_id)
+        .bind(robot_id)
+        .bind(robot_instance)
+        .bind(start_timestamp_ns)
+        .bind(i64::try_from(tolerance_ns).unwrap_or(i64::MAX))
         .fetch_optional(&self.read_pool)
         .await?;
         Ok(recording_index)
@@ -1721,6 +1760,45 @@ mod tests {
         let rows = store.recordings_for_source("robot-1", 0).await.unwrap();
         let indices: Vec<i64> = rows.iter().map(|row| row.recording_index).collect();
         assert_eq!(indices, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn recording_for_start_matches_cloud_id_or_source_start_time_without_id() {
+        const START_NS: i64 = 1_700_000_000_000_000_000;
+        const TOLERANCE_NS: u64 = 1_000;
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        let lookup = |recording_id: &'static str, instance: i64, start_ns: i64| {
+            let store = store.clone();
+            async move {
+                store
+                    .recording_index_for_known_recording(
+                        recording_id,
+                        "robot-1",
+                        instance,
+                        start_ns,
+                        TOLERANCE_NS,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        assert_eq!(lookup("rec-a", 0, START_NS + 1_000).await, Some(index));
+        assert_eq!(lookup("rec-a", 0, START_NS + 1_001).await, None);
+        assert_eq!(lookup("rec-a", 9, START_NS).await, None);
+
+        // A cancelled recording still awaits the id of a POST in flight.
+        store.cancel_recording(index, START_NS + 1).await.unwrap();
+        assert_eq!(lookup("rec-a", 0, START_NS).await, Some(index));
+
+        // Once stamped, only its own cloud id matches, whatever the start time.
+        store
+            .mark_recording_start_notified(index, "rec-a")
+            .await
+            .unwrap();
+        assert_eq!(lookup("rec-b", 0, START_NS).await, None);
+        assert_eq!(lookup("rec-a", 9, START_NS + 1_000_000).await, Some(index));
     }
 
     #[tokio::test]
