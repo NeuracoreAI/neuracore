@@ -261,33 +261,111 @@ def test_second_recording_failure_retains_completed_file(dataset, recording, tmp
     assert not list(output.glob("*.partial"))
 
 
-@pytest.mark.parametrize("kind", [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES])
-def test_image_samples_are_readable_without_attachment_support(kind):
+def test_image_samples_are_readable_without_attachment_support():
     import logging
 
-    from neuracore.core.utils.depth_utils import (
-        depth_to_rgb_storage,
-        rgb_to_depth_storage,
-    )
     from neuracore.importer.mcap.utils import read_image_data
 
     pixels = np.full((16, 16, 3), 73, dtype=np.uint8)
-    if kind == DataType.DEPTH_IMAGES:
-        pixels = depth_to_rgb_storage(np.full((16, 16), 0.3, dtype=np.float32))
     trace = [{"timestamp": 1.25, "frame_idx": 0, "frame": None}]
     samples = list(
         McapExporter._samples(
-            trace, kind, ("video.mp4", "video/mp4", _video_bytes(pixels))
+            trace,
+            DataType.RGB_IMAGES,
+            ("video.mp4", "video/mp4", _video_bytes(pixels)),
         )
     )
     assert samples[0]["timestamp"] == 1.25
     assert samples[0]["frame_idx"] == 0
     assert trace[0]["frame"] is None
     decoded = read_image_data(
-        kind, samples[0], samples[0], logger=logging.getLogger(__name__)
+        DataType.RGB_IMAGES, samples[0], samples[0], logger=logging.getLogger(__name__)
     )
-    expected = rgb_to_depth_storage(pixels) if kind == DataType.DEPTH_IMAGES else pixels
-    np.testing.assert_array_equal(decoded, expected)
+    np.testing.assert_array_equal(decoded, pixels)
+
+
+def test_depth_frames_samples_are_float_metres(depth_frames_fn):
+    """Inline depth from a frames file is float TIFF in metres with holes at 0."""
+    import logging
+
+    from neuracore.importer.mcap.utils import read_image_data
+
+    frames = np.zeros((2, 4, 6), dtype=np.uint16)
+    frames[0, 1:, 2:] = 26000
+    frames[1, :, :3] = 65535
+    payload, ranges = depth_frames_fn(frames)
+    trace = [
+        {
+            "timestamp": float(index + 1),
+            "frame_idx": index,
+            "frame": None,
+            "depth_scale_m": 1e-4,
+            "offset": offset,
+            "length": length,
+        }
+        for index, (offset, length) in enumerate(ranges)
+    ]
+    media = ("depth/lossless.bin", "application/octet-stream", payload)
+
+    samples = list(McapExporter._samples(trace, DataType.DEPTH_IMAGES, media))
+
+    for sample, frame in zip(samples, frames, strict=True):
+        decoded = read_image_data(
+            DataType.DEPTH_IMAGES, sample, sample, logger=logging.getLogger(__name__)
+        )
+        assert decoded.dtype == np.float32
+        np.testing.assert_array_equal(
+            decoded, frame.astype(np.float32) * np.float32(1e-4)
+        )
+
+
+def test_depth_recording_with_frames_file_exports_float_metres(
+    dataset, recording, tmp_path, depth_frames_fn
+):
+    """Export a depth trace.json and its frames file as metres per frame."""
+    import logging
+
+    from neuracore.importer.mcap.utils import read_image_data
+
+    frames = np.zeros((2, 4, 6), dtype=np.uint16)
+    frames[0, 1:, 2:] = 26000
+    frames[1, :, :3] = 12000
+    payload, ranges = depth_frames_fn(frames)
+    files = {
+        "DEPTH_IMAGES/d405/trace.json": json.dumps([
+            {
+                "timestamp": 1.3 + 0.1 * index,
+                "frame_idx": index,
+                "depth_scale_m": 1e-4,
+                "offset": offset,
+                "length": length,
+            }
+            for index, (offset, length) in enumerate(ranges)
+        ]).encode(),
+        "DEPTH_IMAGES/d405/lossless.bin": payload,
+    }
+    recording.data_types = {DataType.DEPTH_IMAGES}
+    recording.sensor_manifest = {DataType.DEPTH_IMAGES: ["d405"]}
+    recording.download = Mock(side_effect=files.__getitem__)
+
+    manifest = export_recordings(
+        dataset, [recording], tmp_path / "export", McapExporter()
+    )
+
+    with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
+        payloads = [
+            json.loads(message.data)
+            for _, _, message in mcap_reader.make_reader(stream).iter_messages()
+        ]
+    assert [payload["frame_idx"] for payload in payloads] == [0, 1]
+    for payload, frame in zip(payloads, frames, strict=True):
+        assert payload["depth_scale_m"] == 1e-4
+        decoded = read_image_data(
+            DataType.DEPTH_IMAGES, payload, payload, logger=logging.getLogger(__name__)
+        )
+        np.testing.assert_array_equal(
+            decoded, frame.astype(np.float32) * np.float32(1e-4)
+        )
 
 
 def test_camera_frame_count_mismatch_fails():
