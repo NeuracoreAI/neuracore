@@ -45,8 +45,8 @@ def test_log_joints_and_cams(
     nc.log_rgb("front_camera", rgb_uint8)
 
     # Test depth logging
-    depth = np.ones((100, 100), dtype=np.float32) * 1.0  # meters
-    nc.log_depth("depth_camera", depth)
+    depth = np.full((100, 100), 1000, dtype=np.uint16)  # millimetres
+    nc.log_depth("depth_camera", depth, depth_scale_m=0.001)
 
 
 def test_log_with_extrinsics_intrinsics(
@@ -64,7 +64,7 @@ def test_log_with_extrinsics_intrinsics(
 
     # Create test data
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-    depth = np.ones((100, 100), dtype=np.float32) * 1.0  # meters
+    depth = np.full((100, 100), 1000, dtype=np.uint16)  # millimetres
 
     # Create extrinsics and intrinsics matrices
     extrinsics = np.eye(4, dtype=np.float32)
@@ -72,7 +72,13 @@ def test_log_with_extrinsics_intrinsics(
 
     # Log with extrinsics and intrinsics
     nc.log_rgb("front_camera", rgb_uint8, extrinsics=extrinsics, intrinsics=intrinsics)
-    nc.log_depth("depth_camera", depth, extrinsics=extrinsics, intrinsics=intrinsics)
+    nc.log_depth(
+        "depth_camera",
+        depth,
+        extrinsics=extrinsics,
+        intrinsics=intrinsics,
+        depth_scale_m=0.001,
+    )
 
 
 def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
@@ -122,6 +128,47 @@ def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
     robot.id = None
 
 
+def test_log_depth_keeps_uint16_and_its_scale_on_the_data_stream(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """Keep uint16 depth and its scale on the stream and send meters to the bridge."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    robot = _get_robot(None, 0)
+    monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: "rec-1")
+
+    depth = np.array([[0, 1000], [9999, 65535]], dtype=np.uint16)
+    nc.log_depth("depth_u16", depth, depth_scale_m=0.001)
+
+    call = native.log_frame.call_args
+    assert call.args[6] == "float32"
+    recorded = np.frombuffer(bytes(call.args[7]), dtype="<f4").reshape(2, 2)
+    np.testing.assert_array_equal(
+        recorded, depth.astype(np.float32) * np.float32(0.001)
+    )
+    latest = robot.get_data_stream(
+        f"{DataType.DEPTH_IMAGES.value}:depth_u16"
+    ).get_latest_data()
+    np.testing.assert_array_equal(latest.frame, depth)
+    assert latest.depth_scale_m == 0.001
+
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
 def test_log_frame_forwards_dtype_derived_from_the_array(
     temp_config_dir,
     mock_auth_requests,
@@ -132,9 +179,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
 ):
     """log_frame's native dtype must be derived from the array, per call.
 
-    RGB forwards "uint8"; depth forwards "float16" or "float32" depending on
-    the actual array passed to `nc.log_depth` — the public API takes no
-    dtype parameter, so this is the only place dtype can come from.
+    RGB forwards "uint8" and depth forwards "float32".
     """
     nc.login("test_api_key")
     mock_auth_requests.post(
@@ -151,26 +196,17 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
 
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
     nc.log_rgb("front_camera", rgb_uint8)
-    depth_f16 = np.ones((100, 100), dtype=np.float16)
-    nc.log_depth("depth_camera_16", depth_f16)
-    depth_f32 = np.ones((100, 100), dtype=np.float32)
-    nc.log_depth("depth_camera_32", depth_f32)
+    depth = np.ones((100, 100), dtype=np.uint16)
+    nc.log_depth("depth_camera", depth, depth_scale_m=0.001)
 
-    assert native.log_frame.call_count == 3
+    assert native.log_frame.call_count == 2
     calls_by_dtype = {
         call.args[2]: call.args[6] for call in native.log_frame.call_args_list
     }
-    assert calls_by_dtype[DataType.RGB_IMAGES.value] == "uint8"
-    assert calls_by_dtype[DataType.DEPTH_IMAGES.value] in ("float16", "float32")
-    # Both depth calls are distinguishable by dtype even though they share a
-    # data_type label, so inspect each call directly rather than the dict
-    # above (which the second depth call would overwrite).
-    depth_calls = [
-        call
-        for call in native.log_frame.call_args_list
-        if call.args[2] == DataType.DEPTH_IMAGES.value
-    ]
-    assert {call.args[6] for call in depth_calls} == {"float16", "float32"}
+    assert calls_by_dtype == {
+        DataType.RGB_IMAGES.value: "uint8",
+        DataType.DEPTH_IMAGES.value: "float32",
+    }
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None
@@ -406,14 +442,13 @@ def test_log_invalid_data_format(
         )  # Missing channel dimension
 
     # Test invalid depth format (wrong dtype)
-    with pytest.raises(ValueError, match="Depth image must be float16 or float32"):
-        nc.log_depth("camera", np.ones((100, 100), dtype=np.uint8))
+    with pytest.raises(ValueError, match="Depth image must be uint16"):
+        nc.log_depth("camera", np.ones((100, 100), dtype=np.uint8), depth_scale_m=0.001)
 
-    # Test depth values exceed max depth
-    with pytest.raises(ValueError, match="Depth image should be in meters"):
+    with pytest.raises(ValueError, match="Depth image must be uint16"):
         nc.log_depth(
-            "camera", np.ones((100, 100), dtype=np.float32) * 1000
-        )  # Too large
+            "camera", np.ones((100, 100), dtype=np.float32), depth_scale_m=0.001
+        )
 
     with pytest.raises(ValueError, match="End effector pose must be a numpy array"):
         nc.log_end_effector_pose(name="right_ee", pose="not_a_list")

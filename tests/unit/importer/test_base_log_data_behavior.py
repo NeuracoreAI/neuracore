@@ -71,6 +71,7 @@ def _make_format(
         ee_pose_input_type=ee_pose_input_type,
         action_type=action_type,
         action_space=action_space,
+        depth_scale_m=None,
     )
 
 
@@ -209,6 +210,7 @@ def test_log_data_relative_action_space_joint_adds_current_position():
         5.0,
         extrinsics=None,
         intrinsics=None,
+        depth_scale_m=None,
     )
 
 

@@ -35,7 +35,8 @@ def test_color_jitter_changes_pixels():
 
 def test_color_jitter_rejects_non_rgb():
     depth = BatchedDepthData(
-        frame=torch.ones((1, 1, 1, 16, 16), dtype=torch.float32),
+        frame=torch.ones((1, 1, 1, 16, 16), dtype=torch.uint16),
+        depth_scale=torch.full((1, 1), 1e-4, dtype=torch.float32),
         extrinsics=torch.zeros((1, 1, 4, 4), dtype=torch.float32),
         intrinsics=torch.zeros((1, 1, 3, 3), dtype=torch.float32),
     )
