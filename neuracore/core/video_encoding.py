@@ -11,8 +11,9 @@ measured on camera footage at 2.4-3x quicker to encode and 11-22% smaller, for
 roughly 2 dB less PSNR. Pick it when capture-to-cloud wall time matters more
 than the last of the fidelity.
 
-Depth cameras always keep their lossless storage: their lossy proxy is a
-visualisation, not precise depth, so it is never a valid training source.
+Depth cameras ignore the codec and always store lossless JPEG-XL frames
+(``lossless.bin``) for training and a log-curve greyscale viewer video
+(``lossy.mp4``), which is never a training source.
 """
 
 from __future__ import annotations

@@ -1,7 +1,11 @@
 """Tests for the depth viewer log curve."""
 
+import re
+from pathlib import Path
+
 import numpy as np
 
+from neuracore.core.utils import depth_utils
 from neuracore.core.utils.depth_utils import (
     DEPTH_PREVIEW_MAX_M,
     DEPTH_PREVIEW_MIN_M,
@@ -56,3 +60,32 @@ def test_log_gray_round_trips_within_half_a_level():
     log_error = np.abs(np.log(recovered + 1.0) - np.log(depth + 1.0))
     assert log_error.max() <= step / 254 / 2 + 1e-6
     assert log_gray_to_depth(np.array([0]))[0] == 0.0
+
+
+def test_log_curve_constants_match_the_daemon():
+    """Match the log curve constants of the data daemon's viewer video encoder."""
+    encoder_source = (
+        Path(__file__).resolve().parents[4]
+        / "rust"
+        / "data_daemon"
+        / "src"
+        / "encoding"
+        / "video_encoder.rs"
+    ).read_text(encoding="utf-8")
+    daemon_constants = {
+        name: float(value)
+        for name, value in re.findall(
+            r"pub const (DEPTH_PREVIEW_\w+): (?:f64|u32) = ([\d.]+);",
+            encoder_source,
+        )
+    }
+
+    assert daemon_constants == {
+        name: getattr(depth_utils, name)
+        for name in (
+            "DEPTH_PREVIEW_SHIFT_M",
+            "DEPTH_PREVIEW_MIN_M",
+            "DEPTH_PREVIEW_MAX_M",
+            "DEPTH_PREVIEW_LEVELS",
+        )
+    }
