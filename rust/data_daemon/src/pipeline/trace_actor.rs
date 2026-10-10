@@ -1093,9 +1093,8 @@ impl ActorState {
                 // Build the metadata accumulator in the same chunk-index
                 // order so per-frame entries appear in capture order. Each
                 // chunk applies its own stored dtype (not just the first
-                // chunk's) to its frame entries — a depth chunk's entries gain
-                // a `"dtype"` field carrying the canonical `trace.json` string
-                // ("float16" / "float32"); RGB chunks add nothing, keeping the
+                // chunk's) to its frame entries. A depth chunk's entries gain
+                // a `"depth_scale_m"` field; RGB chunks add nothing, keeping the
                 // existing RGB `trace.json` schema byte-for-byte unchanged.
                 let mut metadata = VideoMetadataAccumulator::new();
                 for chunk in completed_chunks.values() {
@@ -1104,8 +1103,8 @@ impl ActorState {
                         entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
                         entry.insert("width".to_string(), Value::from(width as u64));
                         entry.insert("height".to_string(), Value::from(height as u64));
-                        if let Some(dtype_label) = chunk.dtype.depth_label() {
-                            entry.insert("dtype".to_string(), Value::from(dtype_label));
+                        if let Some(depth_scale_m) = chunk.dtype.depth_scale_m() {
+                            entry.insert("depth_scale_m".to_string(), Value::from(depth_scale_m));
                         }
                         metadata.record_frame(entry);
                     }
@@ -1965,10 +1964,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn depth_chunks_record_their_own_dtype_in_metadata_sidecar() {
-        // Depth frame entries must carry "dtype": "float16" / "float32" per
-        // chunk — and a later chunk with a different depth dtype must apply
-        // its *own* dtype to its own entries, not the first chunk's.
+    async fn depth_chunks_record_their_own_scale_in_metadata_sidecar() {
+        // Depth frame entries carry "depth_scale_m" per chunk, and a later
+        // chunk with a different scale applies its own scale to its own
+        // entries, not the first chunk's.
         if !ffmpeg_available() {
             eprintln!("ffmpeg not on PATH — skipping depth metadata sidecar test.");
             return;
@@ -1989,7 +1988,7 @@ mod tests {
         let spool_dir = tempdir.path().join("spool");
         std::fs::create_dir_all(&spool_dir).unwrap();
 
-        let dtypes = [FrameDtype::DepthF16, FrameDtype::DepthF32];
+        let dtypes = [FrameDtype::depth_u16(1e-4), FrameDtype::depth_u16(1e-3)];
         for (chunk_index, dtype) in dtypes.into_iter().enumerate() {
             let chunk_index = chunk_index as u32;
             let spool_nut = spool_dir.join(format!("chunk_{chunk_index}.nut"));
@@ -2038,12 +2037,11 @@ mod tests {
         .unwrap();
         let entries = sidecar.as_array().unwrap();
         assert_eq!(entries.len(), 4, "two chunks of two frames each");
-        // First chunk's two entries carry float16; second chunk's carry float32.
         for entry in &entries[0..2] {
-            assert_eq!(entry["dtype"], json!("float16"));
+            assert_eq!(entry["depth_scale_m"], json!(1e-4));
         }
         for entry in &entries[2..4] {
-            assert_eq!(entry["dtype"], json!("float32"));
+            assert_eq!(entry["depth_scale_m"], json!(1e-3));
         }
         assert_eq!(entries[0]["width"], json!(16));
         assert_eq!(entries[0]["height"], json!(16));
@@ -2301,7 +2299,7 @@ mod tests {
         let mut queue: VecDeque<QueuedChunk> = [
             queued(0, FrameDtype::Rgb8),
             queued(1, FrameDtype::Rgb8),
-            queued(2, FrameDtype::DepthF16),
+            queued(2, FrameDtype::depth_u16(1e-4)),
             queued(3, FrameDtype::Rgb8),
         ]
         .into_iter()
