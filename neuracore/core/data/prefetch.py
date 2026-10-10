@@ -1,14 +1,15 @@
-"""Concurrent prefetch of synchronized metadata and recording videos.
+"""Concurrent prefetch of synchronized metadata and recording camera data.
 
 Every network request is issued from a single thread on one asyncio event loop,
-with ``inflight_requests`` outstanding at a time; decoding runs in a small thread
-pool. A bounded queue joins the two stages so videos awaiting decode cannot pile
-up on disk.
+with ``inflight_requests`` outstanding at a time; caching runs in a small thread
+pool. A bounded queue joins the two stages so camera data awaiting caching cannot
+pile up on disk.
 
-Each camera's frames are decoded into a staging directory and published with a
-single ``os.replace`` under a sibling lock file, so a frames directory that
+Each camera's frames are staged in a temporary directory and moved into the cache
+with a single ``os.replace`` under a sibling lock file, so a frames directory that
 exists is always complete. Whatever this prefetch skips or fails to fetch is
-downloaded lazily by ``SynchronizedRecording._get_frame_from_disk_cache``.
+downloaded lazily by ``SynchronizedRecording._get_rgb_frame_from_disk_cache``
+and ``SynchronizedRecording._get_depth_frame_from_disk_cache``.
 """
 
 import asyncio
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiohttp
-from neuracore_types import DataType, SynchronizationDetails
+from neuracore_types import DataType, DepthCameraData, SynchronizationDetails
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import (
     SynchronizeRecordingProgress,
@@ -36,13 +37,15 @@ from tqdm import tqdm
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.frame_cache import (
+    cache_camera_frames,
     check_stale_lock_file,
     clear_stale_lock,
     create_decoding_lock,
     delete_decoding_lock,
+    get_camera_data_filenames,
+    is_camera_cached,
     lock_file_for,
-    publish_decoded_frames,
-    video_filename_preference,
+    staged_camera_data_name,
 )
 from neuracore.core.data.serialized_synchronized_episode import (
     SerializedSynchronizedEpisode,
@@ -67,26 +70,29 @@ DEFAULT_CONCURRENT_PREFETCH_REQUESTS = 16
 _SOCKET_CONNECT_TIMEOUT_S = 15.0
 _SOCKET_READ_TIMEOUT_S = 120.0
 
-_VIDEO_DATA_TYPES = (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES)
+_CAMERA_DATA_TYPES = (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES)
 
 
 @dataclass
-class _PendingDecode:
-    """A downloaded video waiting to be decoded and published."""
+class _StagedCameraData:
+    """A downloaded camera data file waiting to be cached."""
 
     recording_id: str
     camera_id: str
-    video_path: Path
+    camera_data_path: Path
     staging_dir: Path
     frames_dir: Path
     lock_file: Path
     temp_dir: tempfile.TemporaryDirectory
-    # Set by the download stage; completed when decode finishes (success or fail).
+    data_type: DataType
+    # Set by the download stage; completed when caching finishes (success or fail).
     done: asyncio.Future[None] | None = None
+    num_frames: int | None = None
+    legacy_depth: bool = False
 
 
-class VideoPrefetcher:
-    """Fetches synchronized metadata and videos for a whole dataset at once.
+class CameraDataPrefetcher:
+    """Fetches synchronized metadata and camera data for a whole dataset at once.
 
     Attributes:
         episodes: Synchronized episode metadata by recording index, populated by
@@ -100,7 +106,7 @@ class VideoPrefetcher:
         synchronization_details: SynchronizationDetails,
         inflight_requests: int = DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
         decode_workers: int = 4,
-        download_videos: bool = True,
+        download_camera_data: bool = True,
         download_progress_reporter: Callable[[int, int], None] | None = None,
     ):
         """Initialize a prefetcher for one synchronized dataset.
@@ -110,19 +116,20 @@ class VideoPrefetcher:
             recordings: Recordings to prefetch, in dataset index order.
             synchronization_details: Parameters the data was synchronized with.
             inflight_requests: Network requests kept outstanding at once.
-            decode_workers: Threads used to run ffmpeg.
-            download_videos: Whether to download videos, or only fetch the
+            decode_workers: Threads that cache camera data, decoding RGB video
+                with ffmpeg.
+            download_camera_data: Whether to download camera data, or only fetch the
                 synchronized metadata.
             download_progress_reporter: Optional callback ``(done, total)`` when
-                a recording's videos have finished decoding (or it had nothing
-                to decode). ``total`` is the recording count.
+                a recording's camera data has finished caching (or it had
+                nothing to cache). ``total`` is the recording count.
         """
         self.dataset = dataset
         self.recordings = recordings
         self.synchronization_details = synchronization_details
         self.inflight_requests = max(1, inflight_requests)
         self.decode_workers = max(1, decode_workers)
-        self.download_videos = download_videos
+        self.download_camera_data = download_camera_data
         self.download_progress_reporter = download_progress_reporter
         self.episodes: dict[int, SerializedSynchronizedEpisode] = {}
         self._failures = 0
@@ -137,7 +144,7 @@ class VideoPrefetcher:
             self.download_progress_reporter(done, total)
 
     def run(self) -> dict[int, SerializedSynchronizedEpisode]:
-        """Fetch metadata and, if enabled, download and decode every video.
+        """Fetch metadata and, if enabled, download and cache all camera data.
 
         Failures for individual recordings or cameras are logged and skipped
         rather than raised, leaving them to the lazy download path.
@@ -149,14 +156,14 @@ class VideoPrefetcher:
         asyncio.run(self._run_async())
         if self._failures:
             logger.warning(
-                f"{self._failures} video(s) could not be prefetched and will be "
-                "downloaded on demand during training"
+                f"{self._failures} camera data file(s) could not be prefetched and "
+                "will be downloaded on demand during training"
             )
         return self.episodes
 
     async def _run_async(self) -> None:
-        """Run the metadata stage and then, if enabled, the video stages."""
-        # Metadata and signed-URL calls are short; a video transfer holds its
+        """Run the metadata stage and then, if enabled, the camera data stages."""
+        # Metadata and signed-URL calls are short; a camera data transfer holds its
         # connection for seconds. They get separate budgets so a burst of
         # transfers cannot starve the small requests that queue up the next
         # ones, and the connector has to allow for both at once.
@@ -175,7 +182,7 @@ class VideoPrefetcher:
             timeout=timeout,
             middlewares=(retry_connection_failures,),
         ) as session:
-            if self.download_videos:
+            if self.download_camera_data:
                 await self._fetch_and_download(session)
             else:
                 await self._fetch_all_metadata(session)
@@ -290,15 +297,15 @@ class VideoPrefetcher:
         )
 
     async def _fetch_and_download(self, session: aiohttp.ClientSession) -> None:
-        """Fetch metadata and download videos as one overlapped pipeline.
+        """Fetch metadata and download camera data as one overlapped pipeline.
 
         Each recording's downloads start as soon as its own metadata arrives, so
         bytes begin moving almost immediately instead of waiting for every
-        recording's metadata. Downloads run on this thread's event loop, ffmpeg
-        in a thread pool, joined by a bounded queue that caps how many videos
-        sit staged on disk awaiting decode.
+        recording's metadata. Downloads run on this thread's event loop, caching
+        in a thread pool, joined by a bounded queue that caps how many camera
+        data files sit staged on disk awaiting caching.
 
-        Cloud/log progress counts a recording only once its videos are decoded.
+        Cloud/log progress counts a recording only once its camera data is cached.
         """
         num_total_recordings = len(self.recordings)
         num_downloaded_recordings = 0
@@ -307,15 +314,17 @@ class VideoPrefetcher:
             desc=f"Fetching synced data ({self.inflight_requests} in flight)",
             unit="Recording",
         )
-        video_progress = tqdm(total=0, desc="Downloading videos", unit="Video")
-        logger.info("Downloading training data and videos…")
+        camera_data_progress = tqdm(
+            total=0, desc="Downloading camera data", unit="File"
+        )
+        logger.info("Downloading training data and camera data…")
         self._report_download_progress(0, num_total_recordings)
-        decode_progress = tqdm(total=0, desc="Decoding videos", unit="Video")
-        decoded_videos = 0
-        decoded_frames = 0
-        first_decode_start: float | None = None
-        last_decode_end: float | None = None
-        queue: asyncio.Queue[_PendingDecode | None] = asyncio.Queue(
+        cache_progress = tqdm(total=0, desc="Caching camera data", unit="File")
+        cached_files = 0
+        cached_frames = 0
+        first_cache_start: float | None = None
+        last_cache_end: float | None = None
+        queue: asyncio.Queue[_StagedCameraData | None] = asyncio.Queue(
             maxsize=2 * self.decode_workers
         )
         api_requests = self._api_requests
@@ -324,77 +333,77 @@ class VideoPrefetcher:
 
         with ThreadPoolExecutor(max_workers=self.decode_workers) as executor:
 
-            async def decode_consumer() -> None:
-                """Drain the queue, decoding each video off the event loop."""
-                nonlocal decoded_videos, decoded_frames
-                nonlocal first_decode_start, last_decode_end
+            async def cache_consumer() -> None:
+                """Drain the queue, caching each camera data file off the event loop."""
+                nonlocal cached_files, cached_frames
+                nonlocal first_cache_start, last_cache_end
                 while True:
-                    pending = await queue.get()
-                    if pending is None:  # shutdown sentinel
+                    staged = await queue.get()
+                    if staged is None:  # shutdown sentinel
                         queue.task_done()
                         return
                     started = time.perf_counter()
-                    if first_decode_start is None:
-                        first_decode_start = started
+                    if first_cache_start is None:
+                        first_cache_start = started
                     try:
                         num_frames = await loop.run_in_executor(
-                            executor, _decode_and_publish, pending
+                            executor, _cache_staged_camera_data, staged
                         )
                         elapsed = time.perf_counter() - started
-                        decoded_videos += 1
-                        decoded_frames += num_frames
+                        cached_files += 1
+                        cached_frames += num_frames
                         logger.debug(
-                            "Decoded %s of recording %s in %.1f s "
+                            "Cached %s of recording %s in %.1f s "
                             "(%d frames, %.0f frames/s)",
-                            pending.camera_id,
-                            pending.recording_id,
+                            staged.camera_id,
+                            staged.recording_id,
                             elapsed,
                             num_frames,
                             num_frames / elapsed if elapsed > 0 else 0.0,
                         )
                     except Exception as exc:
                         logger.warning(
-                            f"Could not decode video for camera "
-                            f"{pending.camera_id} of recording "
-                            f"{pending.recording_id}: {exc}"
+                            f"Could not cache frames for camera "
+                            f"{staged.camera_id} of recording "
+                            f"{staged.recording_id}: {exc}"
                         )
                         self._record_failure()
                     finally:
-                        if pending.done is not None and not pending.done.done():
-                            pending.done.set_result(None)
-                        last_decode_end = time.perf_counter()
-                        decode_progress.update(1)
+                        if staged.done is not None and not staged.done.done():
+                            staged.done.set_result(None)
+                        last_cache_end = time.perf_counter()
+                        cache_progress.update(1)
                         queue.task_done()
 
             async def download(
                 target: "_DownloadTarget",
             ) -> asyncio.Future[None] | None:
-                """Stage one camera's video, then hand it to the decoders."""
-                pending = None
+                """Stage one camera's data file, then hand it to the cache workers."""
+                staged = None
                 try:
-                    pending = await self._download_video(session, target)
+                    staged = await self._download_camera_data(session, target)
                 except Exception as exc:
                     logger.warning(
-                        f"Could not download video for camera "
+                        f"Could not download camera data for camera "
                         f"{target.camera_id} of recording "
                         f"{target.recording_id}: {exc}"
                     )
                     self._record_failure()
                     target.release()
                 finally:
-                    video_progress.update(1)
-                # Queued outside every budget: blocking here while the decoders
+                    camera_data_progress.update(1)
+                # Queued outside every budget: blocking here while the cache workers
                 # are saturated must not hold a request slot.
-                if pending is None:
+                if staged is None:
                     return None
-                pending.done = loop.create_future()
-                decode_progress.total += 1
-                decode_progress.refresh()
-                await queue.put(pending)
-                return pending.done
+                staged.done = loop.create_future()
+                cache_progress.total += 1
+                cache_progress.refresh()
+                await queue.put(staged)
+                return staged.done
 
             async def process_recording(index: int, recording: "Recording") -> None:
-                """Fetch one recording's metadata, then download its videos."""
+                """Fetch one recording's metadata, then download its camera data."""
                 nonlocal num_downloaded_recordings
                 try:
                     async with api_requests:
@@ -422,11 +431,13 @@ class VideoPrefetcher:
                         ready = []
                         for target in targets:
                             try:
-                                target.url = await self._get_video_url(session, target)
+                                target.url = await self._get_camera_data_url(
+                                    session, target
+                                )
                                 ready.append(target)
                             except Exception as exc:
                                 logger.warning(
-                                    f"Could not resolve video for camera "
+                                    f"Could not resolve camera data for camera "
                                     f"{target.camera_id} of recording "
                                     f"{target.recording_id}: {exc}"
                                 )
@@ -435,15 +446,15 @@ class VideoPrefetcher:
 
                     if not ready:
                         return
-                    video_progress.total += len(ready)
-                    video_progress.refresh()
-                    decode_futures = await asyncio.gather(
+                    camera_data_progress.total += len(ready)
+                    camera_data_progress.refresh()
+                    cache_futures = await asyncio.gather(
                         *[download(target) for target in ready]
                     )
-                    # Count the recording only once every staged video is decoded
-                    # (or failed), so cloud progress does not hit N/N early.
+                    # Count the recording only once every staged camera data file is
+                    # cached (or failed), so cloud progress does not hit N/N early.
                     await asyncio.gather(
-                        *(future for future in decode_futures if future is not None)
+                        *(future for future in cache_futures if future is not None)
                     )
                 finally:
                     num_downloaded_recordings += 1
@@ -452,7 +463,7 @@ class VideoPrefetcher:
                     )
 
             consumers = [
-                asyncio.create_task(decode_consumer())
+                asyncio.create_task(cache_consumer())
                 for _ in range(self.decode_workers)
             ]
             try:
@@ -466,18 +477,18 @@ class VideoPrefetcher:
                     await queue.put(None)
                 await asyncio.gather(*consumers, return_exceptions=True)
                 metadata_progress.close()
-                video_progress.close()
-                decode_progress.close()
-                if first_decode_start is not None and last_decode_end is not None:
-                    elapsed = last_decode_end - first_decode_start
-                    decode_fps = decoded_frames / elapsed if elapsed > 0 else 0.0
+                camera_data_progress.close()
+                cache_progress.close()
+                if first_cache_start is not None and last_cache_end is not None:
+                    elapsed = last_cache_end - first_cache_start
+                    cache_fps = cached_frames / elapsed if elapsed > 0 else 0.0
                     logger.info(
-                        "Decoded %d videos (%d frames) in %.1f min "
-                        "(%.0f frames/s) with %d decode workers",
-                        decoded_videos,
-                        decoded_frames,
+                        "Cached %d camera data files (%d frames) in %.1f min "
+                        "(%.0f frames/s) with %d workers",
+                        cached_files,
+                        cached_frames,
                         elapsed / 60,
-                        decode_fps,
+                        cache_fps,
                         self.decode_workers,
                     )
                 self._report_download_progress(
@@ -519,8 +530,11 @@ class VideoPrefetcher:
 
         targets: list[_DownloadTarget] = []
         observation = episode.observations[0]
-        for data_type in _VIDEO_DATA_TYPES:
-            for camera_id in observation.data.get(data_type, {}):
+        for data_type in _CAMERA_DATA_TYPES:
+            for camera_id, entry in observation.data.get(data_type, {}).items():
+                legacy_depth = (
+                    isinstance(entry, DepthCameraData) and entry.offset is None
+                )
                 frames_dir = (
                     self.dataset.cache_dir / recording.id / data_type.value / camera_id
                 )
@@ -536,13 +550,21 @@ class VideoPrefetcher:
                 elif lock_file.exists():
                     continue
 
-                if frames_dir.exists():
+                if is_camera_cached(data_type, frames_dir, legacy_depth):
                     continue
                 frames_dir.parent.mkdir(parents=True, exist_ok=True)
                 if not create_decoding_lock(lock_file):
                     # Another process got there first; leave it to them and let
                     # the lazy path pick up anything they miss.
                     continue
+                num_frames = None
+                if data_type == DataType.DEPTH_IMAGES and not legacy_depth:
+                    num_frames = len({
+                        entry.frame_idx
+                        for obs in episode.observations
+                        if (entry := obs.data.get(data_type, {}).get(camera_id))
+                        is not None
+                    })
                 targets.append(
                     _DownloadTarget(
                         recording_id=recording.id,
@@ -550,55 +572,60 @@ class VideoPrefetcher:
                         camera_id=camera_id,
                         frames_dir=frames_dir,
                         lock_file=lock_file,
+                        num_frames=num_frames,
+                        legacy_depth=legacy_depth,
                     )
                 )
         return targets
 
-    async def _download_video(
+    async def _download_camera_data(
         self, session: aiohttp.ClientSession, target: "_DownloadTarget"
-    ) -> _PendingDecode:
-        """Mint a signed URL for one camera's video and stream it to disk.
+    ) -> _StagedCameraData:
+        """Mint a signed URL for one camera's data file and stream it to disk.
 
         Args:
             session: Shared client session.
             target: Camera to download, with its lock already held.
 
         Returns:
-            The staged video, ready to decode.
+            The staged camera data, ready to cache.
         """
         transfers = self._transfers
         assert transfers is not None
 
         # Stage on the same filesystem as the cache so the frames directory can
-        # be published with os.replace once decoding finishes.
+        # be moved into the cache with os.replace once it is complete.
         temp_dir = tempfile.TemporaryDirectory(dir=target.frames_dir.parent)
         try:
             staging_dir = Path(temp_dir.name) / "frames"
             staging_dir.mkdir()
-            video_path = (
-                Path(temp_dir.name) / f"{target.camera_id}{target.data_type.value}.mp4"
+            camera_data_path = Path(temp_dir.name) / staged_camera_data_name(
+                target.data_type, target.camera_id, target.legacy_depth
             )
             async with transfers:
-                url = target.url or await self._get_video_url(session, target)
-                await self._stream_video(session, url, video_path)
+                url = target.url or await self._get_camera_data_url(session, target)
+                await self._stream_to_file(session, url, camera_data_path)
         except BaseException:
             temp_dir.cleanup()
             raise
 
-        return _PendingDecode(
+        return _StagedCameraData(
             recording_id=target.recording_id,
             camera_id=target.camera_id,
-            video_path=video_path,
+            camera_data_path=camera_data_path,
             staging_dir=staging_dir,
             frames_dir=target.frames_dir,
             lock_file=target.lock_file,
             temp_dir=temp_dir,
+            data_type=target.data_type,
+            num_frames=target.num_frames,
+            legacy_depth=target.legacy_depth,
         )
 
-    async def _stream_video(
+    async def _stream_to_file(
         self, session: aiohttp.ClientSession, url: str, destination: Path
     ) -> None:
-        """Stream a video's bytes to a file.
+        """Stream a response body to a file.
 
         Args:
             session: Shared client session.
@@ -611,10 +638,10 @@ class VideoPrefetcher:
                 async for chunk in response.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
                     handle.write(chunk)
 
-    async def _get_video_url(
+    async def _get_camera_data_url(
         self, session: aiohttp.ClientSession, target: "_DownloadTarget"
     ) -> str:
-        """Get a signed URL for a camera's video, trying each candidate name.
+        """Get a signed URL for a camera's data file, trying each candidate name.
 
         Args:
             session: Shared client session.
@@ -626,8 +653,10 @@ class VideoPrefetcher:
         Raises:
             FileNotFoundError: If no candidate filename exists.
         """
-        preference = video_filename_preference(target.data_type)
-        for filename in preference:
+        preferred_filenames = get_camera_data_filenames(
+            target.data_type, target.legacy_depth
+        )
+        for filename in preferred_filenames:
             filepath = f"{target.data_type.value}/{target.camera_id}/{filename}"
             url = (
                 f"{API_URL}/org/{self.dataset.org_id}"
@@ -647,7 +676,7 @@ class VideoPrefetcher:
         raise FileNotFoundError(
             f"No candidate filename found for recording {target.recording_id} "
             f"(camera {target.data_type.value}/{target.camera_id}); "
-            f"tried: {preference}"
+            f"tried: {preferred_filenames}"
         )
 
     def _record_failure(self) -> None:
@@ -666,29 +695,37 @@ class _DownloadTarget:
     frames_dir: Path
     lock_file: Path
     url: str | None = None
+    num_frames: int | None = None
+    legacy_depth: bool = False
 
     def release(self) -> None:
-        """Drop the decoding lock without publishing anything."""
+        """Drop the decoding lock without caching anything."""
         delete_decoding_lock(self.lock_file)
 
 
-def _decode_and_publish(pending: _PendingDecode) -> int:
-    """Decode a staged video and publish its frames atomically.
+def _cache_staged_camera_data(staged: _StagedCameraData) -> int:
+    """Cache the frames of a staged camera data file.
 
     Runs in a worker thread. Always releases the lock and the staging directory,
     so a failure leaves the cache untouched rather than half-populated.
 
     Args:
-        pending: The staged video to decode.
+        staged: The staged camera data to cache.
 
     Returns:
-        Number of frames in the published frames directory.
+        Number of frames cached for the camera.
     """
     try:
-        publish_decoded_frames(
-            pending.video_path, pending.staging_dir, pending.frames_dir
+        cache_camera_frames(
+            staged.data_type,
+            staged.camera_data_path,
+            staged.staging_dir,
+            staged.frames_dir,
+            staged.legacy_depth,
         )
-        return sum(1 for _ in pending.frames_dir.iterdir())
+        if staged.num_frames is not None:
+            return staged.num_frames
+        return sum(1 for _ in staged.frames_dir.iterdir())
     finally:
-        delete_decoding_lock(pending.lock_file)
-        pending.temp_dir.cleanup()
+        delete_decoding_lock(staged.lock_file)
+        staged.temp_dir.cleanup()

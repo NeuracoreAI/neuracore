@@ -1,5 +1,6 @@
 """Depth image utility functions for encoding and decoding depth images."""
 
+import imagecodecs
 import numpy as np
 
 from neuracore.core.utils.cmaps import INFERNO_CMAP
@@ -79,6 +80,25 @@ def rgb_to_depth_storage(rgb_img: np.ndarray) -> np.ndarray:
     return depth_img
 
 
+def legacy_rgb_to_depth_units(rgb_img: np.ndarray) -> np.ndarray:
+    """Convert packed 24-bit RGB depth to uint16 units of LEGACY_DEPTH_SCALE_M.
+
+    Args:
+        rgb_img: uint8 RGB image of shape (H, W, 3) with depth packed across
+            the channels as written by depth_to_rgb_storage.
+
+    Returns:
+        The uint16 depth image of shape (H, W).
+    """
+    packed = (
+        (rgb_img[..., 0].astype(np.uint32) << 16)
+        | (rgb_img[..., 1].astype(np.uint32) << 8)
+        | rgb_img[..., 2].astype(np.uint32)
+    )
+    units = np.round(packed * (np.iinfo(np.uint16).max / (2**24 - 1)))
+    return units.astype(np.uint16)
+
+
 def depth_to_rgb_visualization(
     depth_img: np.ndarray, max_depth: float = MAX_DEPTH
 ) -> np.ndarray:
@@ -114,6 +134,24 @@ def depth_to_rgb_visualization(
     rgb_img[zero_mask] = 0
 
     return rgb_img
+
+
+def decode_depth_frame(payload: bytes) -> np.ndarray:
+    """Decode one JPEG-XL depth frame.
+
+    Args:
+        payload: JPEG-XL codestream of the frame.
+
+    Returns:
+        The uint16 frame of sensor units.
+
+    Raises:
+        ValueError: If the frame decodes to another dtype.
+    """
+    frame = np.asarray(imagecodecs.jpegxl_decode(payload))
+    if frame.dtype != np.uint16:
+        raise ValueError(f"Depth frame decodes as {frame.dtype}, expected uint16")
+    return frame
 
 
 def depth_to_log_gray(
