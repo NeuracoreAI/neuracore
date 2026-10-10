@@ -55,7 +55,7 @@ def _plans(**overrides):
         "joint_names": ["waist", "elbow"],
         "camera_name_list": [CAMERA_0],
         "depth_camera_name_list": [DEPTH_CAMERA_0],
-        "depth_mode": "float32",
+        "depth_mode": "uint16_mm",
         "joint_fps": 10,
         "video_fps": 10,
     }

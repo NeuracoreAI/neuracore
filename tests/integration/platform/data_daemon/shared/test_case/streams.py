@@ -36,6 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     trace_key_for,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    depth_scale_for_mode,
     encode_depth_frame,
     frame_code_base,
     make_camera_feed,
@@ -78,7 +79,7 @@ class StreamPlan:
     camera_indexes: tuple[int, ...] = ()
     group_name: str | None = None
     # Sample dtype for depth streams; ignored by every other kind.
-    depth_mode: DepthMode = "float32"
+    depth_mode: DepthMode = "uint16_mm"
 
     @property
     def is_rgb(self) -> bool:
@@ -133,7 +134,7 @@ def _per_camera_plans(
     camera_name_list: list[str],
     video_fps: int,
     *,
-    depth_mode: DepthMode = "float32",
+    depth_mode: DepthMode = "uint16_mm",
 ) -> list[StreamPlan]:
     """One stream per camera of *kind*, each carrying its own marker.
 
@@ -158,7 +159,7 @@ def _bundled_camera_plan(
     camera_name_list: list[str],
     video_fps: int,
     *,
-    depth_mode: DepthMode = "float32",
+    depth_mode: DepthMode = "uint16_mm",
 ) -> StreamPlan | None:
     """One stream covering every camera of *kind*, or ``None`` if there are none.
 
@@ -425,6 +426,7 @@ class StreamEmitter:
                     depth_image,
                     robot_name=self.robot_name,
                     timestamp=timestamp,
+                    depth_scale_m=depth_scale_for_mode(self.plan.depth_mode),
                 ),
             )
 

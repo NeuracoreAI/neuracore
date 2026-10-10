@@ -3,7 +3,7 @@
 RGB frames use realistic, textured content rather than a flat fill, so they
 exercise the daemon's video pipeline the way a real camera would; depth
 frames use a cheap analytic pattern instead, since they only need to check
-the depth-to-RGB round trip. Both build their content once into a bank and
+the depth storage round trip. Both build their content once into a bank and
 paint a per-frame identity from :func:`frame_code_base`.
 """
 
@@ -13,13 +13,15 @@ import threading
 
 import numpy as np
 
-from neuracore.core.utils.depth_utils import MAX_DEPTH
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DEPTH_FRAME_BASE_FRACTION,
     DEPTH_FRAME_BASE_MODULUS,
     DEPTH_FRAME_COL_FRACTION,
     DEPTH_FRAME_FLOOR_FRACTION,
     DEPTH_FRAME_ROW_FRACTION,
+    DEPTH_HOLE_SIZE,
+    DEPTH_SATURATED_VALUE,
+    DEPTH_SCALE_M_BY_MODE,
     DETAIL_FLAT,
     FRAME_BYTE_LENGTH,
     FRAME_COLOR_CHANNELS,
@@ -309,6 +311,11 @@ def make_camera_feed(
     return SyntheticCameraFeed(image_width, image_height, detail)
 
 
+def depth_scale_for_mode(mode: DepthMode) -> float:
+    """Return the meters per unit a depth mode logs with."""
+    return DEPTH_SCALE_M_BY_MODE[mode]
+
+
 def encode_depth_frame(
     frame_num: int,
     width: int,
@@ -316,36 +323,46 @@ def encode_depth_frame(
     mode: DepthMode,
     out: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Build a deterministic, non-zero, spatially non-uniform depth frame.
+    """Build a deterministic, spatially non-uniform uint16 depth frame.
+
+    Every frame has a DEPTH_HOLE_SIZE square of zeros in its bottom right
+    corner and DEPTH_SATURATED_VALUE in its bottom left pixel. Every other
+    pixel is above zero.
 
     Args:
         frame_num: Only ``frame_num % DEPTH_FRAME_BASE_MODULUS`` affects the
             output.
-        out: Preallocated buffer already of *mode*'s dtype; callers passing
-            it must not retain the returned array past the next overwrite.
+        out: Preallocated uint16 buffer; callers passing it must not retain
+            the returned array past the next overwrite.
 
     Returns:
-        A ``(height, width)`` array of *mode*'s dtype.
+        A ``(height, width)`` uint16 array.
     """
-    dtype = np.float16 if mode == "float16" else np.float32
     base = (
         (frame_num % DEPTH_FRAME_BASE_MODULUS)
         / DEPTH_FRAME_BASE_MODULUS
-        * (MAX_DEPTH * DEPTH_FRAME_BASE_FRACTION)
+        * DEPTH_FRAME_BASE_FRACTION
     )
-    row_gradient = (np.arange(height, dtype=np.float32) / max(height - 1, 1)) * (
-        MAX_DEPTH * DEPTH_FRAME_ROW_FRACTION
-    )
-    col_gradient = (np.arange(width, dtype=np.float32) / max(width - 1, 1)) * (
-        MAX_DEPTH * DEPTH_FRAME_COL_FRACTION
-    )
-    floor = MAX_DEPTH * DEPTH_FRAME_FLOOR_FRACTION
+    row_gradient = (
+        np.arange(height, dtype=np.float32) / max(height - 1, 1)
+    ) * DEPTH_FRAME_ROW_FRACTION
+    col_gradient = (
+        np.arange(width, dtype=np.float32) / max(width - 1, 1)
+    ) * DEPTH_FRAME_COL_FRACTION
 
-    pattern = floor + base + row_gradient[:, None] + col_gradient[None, :]
+    pattern = (
+        DEPTH_FRAME_FLOOR_FRACTION
+        + base
+        + row_gradient[:, None]
+        + col_gradient[None, :]
+    )
+    frame = np.rint(pattern * DEPTH_SATURATED_VALUE).astype(np.uint16)
+    frame[height - 1, 0] = DEPTH_SATURATED_VALUE
+    frame[height - DEPTH_HOLE_SIZE :, width - DEPTH_HOLE_SIZE :] = 0
 
     if out is None:
-        return pattern.astype(dtype)
-    out[:] = pattern.astype(dtype)
+        return frame
+    out[:] = frame
     return out
 
 
@@ -358,10 +375,9 @@ def preallocate_depth_buffer(
     """Preallocate a reusable depth frame buffer, or return ``None``.
 
     Returns:
-        A ``(image_height, image_width)`` array of *mode*'s dtype, or ``None``
+        A ``(image_height, image_width)`` uint16 array, or ``None``
         when this caller logs no depth or the case has no video.
     """
     if not should_allocate or image_width is None or image_height is None:
         return None
-    dtype = np.float16 if mode == "float16" else np.float32
-    return np.empty((image_height, image_width), dtype=dtype)
+    return np.empty((image_height, image_width), dtype=np.uint16)
