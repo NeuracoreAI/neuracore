@@ -22,7 +22,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.prefetch import (
     DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
-    VideoPrefetcher,
+    CameraDataPrefetcher,
 )
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
@@ -68,8 +68,8 @@ class SynchronizedDataset:
             dataset: Dataset object containing recordings.
             frequency: Frequency of the dataset in Hz.
             cross_embodiment_union: Cross-embodiment union for synchronization.
-            prefetch_videos: Whether to prefetch video data to cache on initialization.
-            max_prefetch_decode_workers: Threads used to decode prefetched videos.
+            prefetch_videos: Whether to prefetch camera data to cache on initialization.
+            max_prefetch_decode_workers: Threads used to cache prefetched camera data.
                 Downloading does not use these threads.
             num_concurrent_prefetch_requests: Network requests the prefetch keeps
                 outstanding at once, from a single thread.
@@ -85,7 +85,7 @@ class SynchronizedDataset:
                 index, used when slicing to avoid re-fetching data the parent
                 dataset already loaded.
             download_progress_reporter: Optional callback forwarded only to the
-                initial ``VideoPrefetcher`` run. Not retained on this instance.
+                initial ``CameraDataPrefetcher`` run. Not retained on this instance.
         """
         self.id = id
         self.dataset = dataset
@@ -122,16 +122,16 @@ class SynchronizedDataset:
         self,
         download_progress_reporter: Callable[[int, int], None] | None = None,
     ) -> None:
-        """Fetch synced metadata, and optionally videos, for every recording.
+        """Fetch synced metadata, and optionally camera data, for every recording.
 
-        ``VideoPrefetcher`` issues the requests concurrently from one thread and
-        decodes videos in a thread pool. The metadata it returns is handed to
+        ``CameraDataPrefetcher`` issues the requests concurrently from one thread and
+        caches camera frames in a thread pool. The metadata it returns is handed to
         each ``SynchronizedRecording`` so none of them requests it again.
 
         Args:
             download_progress_reporter: Optional callback ``(done, total)`` while
                 prefetching recordings onto the machine. Not stored on this
-                dataset — only forwarded to ``VideoPrefetcher``.
+                dataset — only forwarded to ``CameraDataPrefetcher``.
         """
         # Indexing the last recording pages in all metadata up front, so the
         # prefetch below reads cache instead of paging concurrently.
@@ -143,13 +143,13 @@ class SynchronizedDataset:
         recordings = [
             cast(Recording, self.dataset[idx]) for idx in range(num_recordings)
         ]
-        prefetcher = VideoPrefetcher(
+        prefetcher = CameraDataPrefetcher(
             dataset=self.dataset,
             recordings=recordings,
             synchronization_details=self.synchronization_details,
             inflight_requests=self._num_concurrent_prefetch_requests,
             decode_workers=self._max_prefetch_decode_workers,
-            download_videos=self._prefetch_videos,
+            download_camera_data=self._prefetch_videos,
             download_progress_reporter=download_progress_reporter,
         )
         episodes = prefetcher.run()
