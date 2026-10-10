@@ -3,10 +3,7 @@
 import imagecodecs
 import numpy as np
 
-from neuracore.core.utils.cmaps import INFERNO_CMAP
-
 MAX_DEPTH = 10.0
-MAX_DEPTH_VISUALIZATION_MULTIPLIER = 1.5
 DEPTH_PREVIEW_SHIFT_M = 1.0
 DEPTH_PREVIEW_MIN_M = 0.05
 DEPTH_PREVIEW_MAX_M = 6.55
@@ -97,43 +94,6 @@ def legacy_rgb_to_depth_units(rgb_img: np.ndarray) -> np.ndarray:
     )
     units = np.round(packed * (np.iinfo(np.uint16).max / (2**24 - 1)))
     return units.astype(np.uint16)
-
-
-def depth_to_rgb_visualization(
-    depth_img: np.ndarray, max_depth: float = MAX_DEPTH
-) -> np.ndarray:
-    """Convert a depth image (in meters) to an RGB image (uint8) for visualization.
-
-    This encodes depth values across all three channels using the inferno colormap.
-
-    Args:
-        depth_img: Depth image in meters as float32 with shape (H, W)
-
-    Returns:
-        rgb_img: uint8 RGB image with depth encoded across all channels
-    """
-    if len(depth_img.shape) != 2:
-        raise ValueError("depth_img must be a 2D array with shape (H, W)")
-
-    # Increase the max depth to accommodate scene changes
-    max_depth = MAX_DEPTH_VISUALIZATION_MULTIPLIER * max_depth
-
-    # Clip depths to the maximum range
-    clipped_depth = np.clip(depth_img, 0, max_depth)
-
-    # Mask for zero (invalid/missing) depth values
-    zero_mask = depth_img == 0
-
-    # Normalize to 0-1 range, invert so that closer depths are brighter
-    normalized_depth = 1 - (clipped_depth / max_depth)
-
-    # Apply inferno colormap
-    indices = np.clip((normalized_depth * 255).astype(np.int32), 0, 255)
-    rgb_img = (INFERNO_CMAP[indices] * 255).astype(np.uint8)
-
-    rgb_img[zero_mask] = 0
-
-    return rgb_img
 
 
 def decode_depth_frame(payload: bytes) -> np.ndarray:
