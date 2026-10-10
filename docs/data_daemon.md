@@ -327,9 +327,22 @@ By default every RGB camera is uploaded as a single full-resolution
 training, trading a little image fidelity for much smaller uploads. Select the
 `h264_lossless` codec to also upload a lossless archive (`lossless.mp4`) for
 training plus a small lossy preview. For long recordings the lossless archive
-substantially increases upload size, disk use, and CPU. Depth cameras always
-keep their lossless storage (their lossy proxy is a visualisation, not precise
-depth).
+substantially increases upload size, disk use, and CPU.
+
+Depth cameras ignore the codec selection and always upload two files:
+
+- `lossless.bin`, the training copy: one lossless JPEG-XL codestream per depth
+  image, back to back. Every uint16 sensor value comes back exactly, with 0
+  meaning no return.
+- `lossy.mp4`, the viewer video: depth mapped along a log curve
+  (`log(depth + 1 m)` over 0.05 to 6.55 m) to 8-bit grey, H.264 CRF 23 at up to
+  480 lines, with 0 still meaning no return.
+
+Every entry of a depth `trace.json` carries `depth_scale_m` and the `offset`
+and `length` in bytes of its frame inside `lossless.bin`.
+
+`nc.log_depth` takes uint16 depth with its `depth_scale_m` in metres per unit,
+and the archive keeps those sensor units unchanged.
 
 `h264_fast` is that same single lossy video at the `veryfast` libx264 preset
 instead of `medium`. Pick it when getting data to the cloud quickly matters more

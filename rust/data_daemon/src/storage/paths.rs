@@ -15,8 +15,13 @@ pub const TRACE_JSON_FILENAME: &str = "trace.json";
 /// Filename for the H.264 lossy MP4. Matches `video_trace.py::LOSSY_VIDEO_NAME`.
 pub const LOSSY_VIDEO_FILENAME: &str = "lossy.mp4";
 
-/// Filename for the FFV1 lossless MP4. Matches `video_trace.py::LOSSLESS_VIDEO_NAME`.
+/// Filename for the lossless RGB MP4. Matches `video_trace.py::LOSSLESS_VIDEO_NAME`.
 pub const LOSSLESS_VIDEO_FILENAME: &str = "lossless.mp4";
+
+/// Filename for the lossless depth frames: one lossless JPEG-XL codestream
+/// per frame, back to back, located by the `offset` and `length` of each
+/// `trace.json` entry.
+pub const LOSSLESS_DEPTH_FILENAME: &str = "lossless.bin";
 
 /// Directory name (inside a video trace's directory) that holds the
 /// producer-spooled NUT chunks awaiting daemon-side encoding.
@@ -116,6 +121,12 @@ pub fn chunk_lossy_filename(chunk_index: u32) -> String {
 /// batch's first chunk index, like the lossy segment.
 pub fn chunk_lossless_filename(chunk_index: u32) -> String {
     format!("chunk_{chunk_index:04}_lossless.mp4")
+}
+
+/// Build the filename for an encoded lossless depth frames segment. Named
+/// after the batch's first chunk index, like the lossy segment.
+pub fn chunk_lossless_depth_filename(chunk_index: u32) -> String {
+    format!("chunk_{chunk_index:04}_lossless.bin")
 }
 
 /// Resolve a recording's top-level directory: `{recordings_root}/{recording}`.
@@ -238,6 +249,7 @@ mod tests {
         assert_eq!(chunk_filename(1234), "chunk_1234.nut");
         assert_eq!(chunk_lossy_filename(5), "chunk_0005_lossy.mp4");
         assert_eq!(chunk_lossless_filename(5), "chunk_0005_lossless.mp4");
+        assert_eq!(chunk_lossless_depth_filename(5), "chunk_0005_lossless.bin");
     }
 
     #[test]

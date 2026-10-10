@@ -3,8 +3,9 @@
 //! - [`json_trace`], an incremental JSON-array writer used by scalar / sensor
 //!   traces and the video sidecar.
 //! - [`video_encoder`], a supervised `ffmpeg` subprocess that turns one or
-//!   more NUT chunks into one MP4 pair per batch, and stitches the segments
-//!   into the final `lossy.mp4` / `lossless.mp4` on `EndTrace`.
+//!   more NUT chunks into one lossy MP4 and one lossless archive per batch
+//!   (an MP4 for RGB, back-to-back JPEG-XL frames for depth), and stitches the segments into
+//!   the final `lossy.mp4` and `lossless.mp4` or `lossless.bin` on `EndTrace`.
 //! - [`metadata`], an accumulator that flushes the video-trace sidecar
 //!   `trace.json` alongside the mp4 outputs.
 //!
