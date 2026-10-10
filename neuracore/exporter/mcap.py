@@ -17,7 +17,7 @@ from PIL import Image
 
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.data.frame_cache import video_filename_preference
+from neuracore.core.data.frame_cache import get_camera_data_filenames
 from neuracore.core.data.recording import Recording
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
@@ -47,7 +47,7 @@ class McapExporter(DatasetExporter):
             return path, "application/octet-stream", recording.download(path)
         if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
             return None
-        for filename in video_filename_preference(data_type):
+        for filename in get_camera_data_filenames(data_type):
             path = f"{prefix}/{filename}"
             try:
                 return path, "video/mp4", recording.download(path)

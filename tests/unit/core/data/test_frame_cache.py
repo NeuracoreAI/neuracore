@@ -1,41 +1,61 @@
 """Tests for the frame cache's lock protocol and decoding step."""
 
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import imagecodecs
+import numpy as np
 import pytest
 from neuracore_types import DataType
 
 from neuracore.core.data.frame_cache import (
+    DEPTH_FRAMES_FILENAME,
     STALE_LOCK_TIMEOUT_S,
     acquire_decoding_lock,
+    cache_camera_frames,
+    cache_depth_frames,
     check_stale_lock_file,
     clear_stale_lock,
     create_decoding_lock,
-    decode_video,
+    decode_rgb_video,
     delete_decoding_lock,
+    get_camera_data_filenames,
     lock_file_for,
-    video_filename_preference,
+    read_depth_frame,
     wait_for_lock_release,
 )
 
 MODULE = "neuracore.core.data.frame_cache"
 
 
-class TestVideoFilenamePreference:
+def _depth_frames() -> np.ndarray:
+    rng = np.random.default_rng(7)
+    frames = rng.integers(1, 65535, size=(3, 6, 8), dtype=np.uint16)
+    frames[:, 0, :] = 0
+    frames[1, 2:4, 3:5] = 65535
+    return frames
+
+
+class TestCameraDataFilenames:
     """Which candidate filenames each camera type offers."""
 
     def test_rgb_prefers_lossless_then_lossy(self):
         """RGB falls back to the lossy encode when no lossless one exists."""
-        assert video_filename_preference(DataType.RGB_IMAGES) == (
+        assert get_camera_data_filenames(DataType.RGB_IMAGES) == (
             "lossless.mp4",
             "lossy.mp4",
         )
 
     def test_depth_is_lossless_only(self):
-        """Depth has no lossy fallback: a lossy encode would corrupt depth."""
-        assert video_filename_preference(DataType.DEPTH_IMAGES) == ("lossless.mp4",)
+        """Depth reads only the frames file, never lossy."""
+        assert get_camera_data_filenames(DataType.DEPTH_IMAGES) == ("lossless.bin",)
+
+    def test_other_data_types_raise(self):
+        """A non-camera data type has no camera data files."""
+        with pytest.raises(ValueError, match="No camera data files"):
+            get_camera_data_filenames(DataType.JOINT_POSITIONS)
 
 
 class TestLockFileNaming:
@@ -72,20 +92,40 @@ class TestDecodingLock:
         """Acquiring succeeds silently when no lock is held."""
         lock_file = tmp_path / "cam1.recording.lock"
 
-        acquire_decoding_lock(lock_file, "cam1")
+        acquire_decoding_lock(lock_file, DataType.RGB_IMAGES, "cam1")
 
         assert lock_file.exists()
 
-    def test_acquire_lock_raises_when_held(self, tmp_path):
-        """Acquiring a held lock is an error naming the camera."""
+    @pytest.mark.parametrize(
+        ("data_type", "message"),
+        [
+            (
+                DataType.RGB_IMAGES,
+                "already decoding and caching RGB frames for camera cam1",
+            ),
+            (
+                DataType.POINT_CLOUDS,
+                "already decoding and caching point cloud frames for sensor cam1",
+            ),
+            (DataType.DEPTH_IMAGES, "already caching depth frames for camera cam1"),
+        ],
+    )
+    def test_acquire_lock_raises_when_held(self, tmp_path, data_type, message):
+        """Acquiring a held lock is an error naming the sensor and its work."""
         lock_file = tmp_path / "cam1.recording.lock"
         lock_file.touch()
 
-        with pytest.raises(
-            RuntimeError,
-            match="Another process is already decoding video for camera cam1",
-        ):
-            acquire_decoding_lock(lock_file, "cam1")
+        with pytest.raises(RuntimeError, match=message):
+            acquire_decoding_lock(lock_file, data_type, "cam1")
+
+    def test_acquire_lock_rejects_other_data_types(self, tmp_path):
+        """A data type without cached frames has no decoding lock."""
+        lock_file = tmp_path / "cam1.recording.lock"
+
+        with pytest.raises(ValueError, match="No decoding lock"):
+            acquire_decoding_lock(lock_file, DataType.JOINT_POSITIONS, "cam1")
+
+        assert not lock_file.exists()
 
     def test_delete_lock_removes_file(self, tmp_path):
         """Releasing removes the lock."""
@@ -180,7 +220,7 @@ class TestDecodeVideo:
             patch(f"{MODULE}._resolve_frame_sync_arg", return_value="-fps_mode"),
             patch(f"{MODULE}.subprocess.run") as mock_run,
         ):
-            decode_video(video_location, frames_dir)
+            decode_rgb_video(video_location, frames_dir)
 
         ffmpeg_args = mock_run.call_args[0][0]
         assert "-fps_mode" in ffmpeg_args
@@ -241,3 +281,51 @@ class TestResolveFrameSyncArg:
             assert _resolve_frame_sync_arg() == "-fps_mode"
 
         mock_run.assert_called_once()
+
+
+class TestDepthFrames:
+    """Caching JPEG-XL depth frames files and reading frames out of them."""
+
+    def test_published_frames_file_serves_frames_by_byte_range(
+        self, tmp_path: Path, depth_frames_fn
+    ):
+        """A published frames file keeps its bytes and serves any frame exactly."""
+        frames = _depth_frames()
+        payload, ranges = depth_frames_fn(frames)
+        media = tmp_path / "depth.mp4"
+        media.write_bytes(payload)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        frames_dir = tmp_path / "cam"
+
+        cache_depth_frames(media, staging, frames_dir)
+
+        assert (frames_dir / DEPTH_FRAMES_FILENAME).read_bytes() == payload
+        for frame_idx in (2, 0, 1):
+            frame = read_depth_frame(frames_dir, *ranges[frame_idx])
+            assert frame.dtype == np.uint16
+            np.testing.assert_array_equal(frame, frames[frame_idx])
+
+    def test_truncated_frames_file_raises(self, tmp_path: Path, depth_frames_fn):
+        """A byte range past the end of the file fails."""
+        payload, ranges = depth_frames_fn(_depth_frames())
+        (tmp_path / DEPTH_FRAMES_FILENAME).write_bytes(payload[:-1])
+
+        with pytest.raises(ValueError, match="ends inside"):
+            read_depth_frame(tmp_path, *ranges[-1])
+
+    def test_frame_of_another_dtype_raises(self, tmp_path: Path):
+        """A frame that decodes to another dtype fails."""
+        payload = imagecodecs.jpegxl_encode(np.ones((2, 2), np.uint8), lossless=True)
+        (tmp_path / DEPTH_FRAMES_FILENAME).write_bytes(payload)
+
+        with pytest.raises(ValueError, match="decodes as"):
+            read_depth_frame(tmp_path, 0, len(payload))
+
+
+def test_cache_camera_frames_rejects_other_data_types(tmp_path: Path):
+    """Caching frames for a non-camera data type fails."""
+    with pytest.raises(ValueError, match="Cannot cache frames"):
+        cache_camera_frames(
+            DataType.JOINT_POSITIONS, tmp_path / "media", tmp_path, tmp_path / "cam"
+        )

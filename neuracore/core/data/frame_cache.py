@@ -1,7 +1,9 @@
-"""On-disk video frame cache: its lock protocol and its decoding step.
+"""On-disk camera frame cache: its lock protocol and its caching step.
 
 Frames live at ``<cache_dir>/<recording_id>/<data_type>/<sensor_id>/<idx>.png``.
-A directory is published with a single ``os.replace`` once decoding finishes, so
+A depth camera with JPEG-XL frames keeps them at <sensor_id>/lossless.bin,
+where the trace entry of each frame holds its byte range.
+A directory moves into the cache with a single ``os.replace`` once it is complete, so
 one that exists is always complete; while it is being produced, a sibling
 ``<sensor_id>.recording.lock`` marks it as owned.
 """
@@ -13,8 +15,11 @@ import subprocess
 import time
 from pathlib import Path
 
+import numpy as np
 from neuracore_types import DataType
 from PIL import Image
+
+from neuracore.core.utils.depth_utils import decode_depth_frame
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +29,14 @@ STALE_LOCK_TIMEOUT_S = 300
 PNG_COMPRESSION_LEVEL = 3
 """zlib level used when writing cached frames."""
 
-_RGB_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
-_DEPTH_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4",)
+LOSSLESS_RGB_VIDEO_FILENAME = "lossless.mp4"
+"""Name of the lossless RGB video inside its camera directory."""
+
+LOSSY_RGB_VIDEO_FILENAME = "lossy.mp4"
+"""Name of the lossy RGB video inside its camera directory."""
+
+DEPTH_FRAMES_FILENAME = "lossless.bin"
+"""Name of the JPEG-XL depth frames bin file inside its camera directory."""
 
 _FFMPEG_AVAILABLE: bool | None = None
 
@@ -37,28 +48,35 @@ _VSYNC_ARG = "-vsync"
 _FFMPEG_FRAME_SYNC_ARG: str | None = None
 
 
-def video_filename_preference(camera_type: DataType) -> tuple[str, ...]:
-    """Return the video filenames to try for a camera type, most preferred first.
+def get_camera_data_filenames(camera_type: DataType) -> tuple[str, ...]:
+    """Return the camera data filenames to try, most preferred first.
 
     Args:
-        camera_type: Type of camera (e.g. rgb_images, depth_images).
+        camera_type: Data type of the camera.
 
     Returns:
         Candidate filenames in preference order.
+
+    Raises:
+        ValueError: If the camera type is neither RGB nor depth images.
     """
-    if camera_type == DataType.DEPTH_IMAGES:
-        return _DEPTH_VIDEO_FILENAME_PREFERENCE
-    return _RGB_VIDEO_FILENAME_PREFERENCE
+    match camera_type:
+        case DataType.RGB_IMAGES:
+            return (LOSSLESS_RGB_VIDEO_FILENAME, LOSSY_RGB_VIDEO_FILENAME)
+        case DataType.DEPTH_IMAGES:
+            return (DEPTH_FRAMES_FILENAME,)
+        case _:
+            raise ValueError(f"No camera data files for camera type {camera_type}")
 
 
 def lock_file_for(frames_dir: Path) -> Path:
     """Return the lock guarding a frames directory.
 
     The lock is a sibling of the directory, not inside it, so the directory can
-    be published atomically.
+    be moved into the cache atomically.
 
     Args:
-        frames_dir: Directory the frames are published to.
+        frames_dir: Directory the frames are cached in.
 
     Returns:
         Path of the guarding lock file.
@@ -69,8 +87,8 @@ def lock_file_for(frames_dir: Path) -> Path:
 def point_cloud_lock_file_for(sensor_root: Path) -> Path:
     """Return the lock guarding a point cloud sensor's cached frames.
 
-    Unlike video frames, point cloud frames are written individually into
-    ``sensor_root`` rather than published by renaming it, so the lock lives
+    Unlike camera frames, point cloud frames are written individually into
+    ``sensor_root`` rather than moved into the cache by renaming it, so the lock lives
     inside that directory.
 
     Args:
@@ -99,20 +117,30 @@ def create_decoding_lock(lock_file: Path) -> bool:
     return True
 
 
-def acquire_decoding_lock(lock_file: Path, sensor_id: str) -> None:
+def acquire_decoding_lock(lock_file: Path, data_type: DataType, sensor_id: str) -> None:
     """Take a decoding lock, refusing to proceed if another worker holds it.
 
     Args:
         lock_file: Path of the lock to create.
+        data_type: Data type of the sensor, used in the error message.
         sensor_id: Sensor the lock guards, used in the error message.
 
     Raises:
+        ValueError: If the data type is not RGB images, depth images or point
+            clouds.
         RuntimeError: If another process already holds the lock.
     """
+    match data_type:
+        case DataType.RGB_IMAGES:
+            activity = f"decoding and caching RGB frames for camera {sensor_id}"
+        case DataType.POINT_CLOUDS:
+            activity = f"decoding and caching point cloud frames for sensor {sensor_id}"
+        case DataType.DEPTH_IMAGES:
+            activity = f"caching depth frames for camera {sensor_id}"
+        case _:
+            raise ValueError(f"No decoding lock for data type {data_type}")
     if not create_decoding_lock(lock_file):
-        raise RuntimeError(
-            f"Another process is already decoding video for camera {sensor_id}"
-        )
+        raise RuntimeError(f"Another process is already {activity}")
 
 
 def delete_decoding_lock(lock_file: Path) -> None:
@@ -216,7 +244,7 @@ def _resolve_frame_sync_arg() -> str:
     return _FFMPEG_FRAME_SYNC_ARG
 
 
-def decode_video(video_location: Path, video_frame_cache_path: Path) -> None:
+def decode_rgb_video(video_location: Path, video_frame_cache_path: Path) -> None:
     """Extract every frame from a video and write them as PNGs.
 
     Args:
@@ -282,20 +310,106 @@ def decode_video(video_location: Path, video_frame_cache_path: Path) -> None:
             frame_image.save(frame_file, compress_level=PNG_COMPRESSION_LEVEL)
 
 
-def publish_decoded_frames(
+def decode_and_cache_rgb_frames(
     video_path: Path, staging_dir: Path, frames_dir: Path
 ) -> None:
-    """Decode a video into a staging directory and publish it atomically.
+    """Decode an RGB video into a staging directory and move it into the cache.
 
-    Does nothing if the frames were published in the meantime, so a reader only
+    Does nothing if the frames were cached in the meantime, so a reader only
     ever sees a complete directory.
 
     Args:
-        video_path: Video to decode.
+        video_path: RGB video to decode.
         staging_dir: Empty directory on the same filesystem to decode into.
-        frames_dir: Final location to publish the frames to.
+        frames_dir: Cache directory to move the frames to.
     """
     if frames_dir.exists():
         return
-    decode_video(video_path, staging_dir)
+    decode_rgb_video(video_path, staging_dir)
     os.replace(staging_dir, frames_dir)
+
+
+def cache_depth_frames(
+    camera_data_path: Path, staging_dir: Path, frames_dir: Path
+) -> None:
+    """Move a downloaded depth frames file into the cache.
+
+    The frames file moves into the staging directory unchanged.
+    Does nothing if the frames were cached in the meantime, so a reader only
+    ever sees a complete directory.
+
+    Args:
+        camera_data_path: Downloaded depth frames file, on the same filesystem
+            as the staging directory.
+        staging_dir: Empty directory on the same filesystem to stage into.
+        frames_dir: Cache directory to move the frames to.
+    """
+    if frames_dir.exists():
+        return
+    os.replace(camera_data_path, staging_dir / DEPTH_FRAMES_FILENAME)
+    os.replace(staging_dir, frames_dir)
+
+
+def cache_camera_frames(
+    camera_type: DataType,
+    camera_data_path: Path,
+    staging_dir: Path,
+    frames_dir: Path,
+) -> None:
+    """Move a downloaded RGB video or depth frames file into the cache.
+
+    Args:
+        camera_type: Data type of the camera.
+        camera_data_path: Downloaded RGB video or depth frames file, on the same
+            filesystem as the staging directory.
+        staging_dir: Empty directory on the same filesystem to stage into.
+        frames_dir: Cache directory to move the frames to.
+
+    Raises:
+        ValueError: If the camera type is neither RGB nor depth images.
+    """
+    match camera_type:
+        case DataType.RGB_IMAGES:
+            decode_and_cache_rgb_frames(camera_data_path, staging_dir, frames_dir)
+        case DataType.DEPTH_IMAGES:
+            cache_depth_frames(camera_data_path, staging_dir, frames_dir)
+        case _:
+            raise ValueError(f"Cannot cache frames for camera type {camera_type}")
+
+
+def read_rgb_frame(frames_dir: Path, frame_idx: int) -> Image.Image:
+    """Read one RGB frame from a cached directory.
+
+    Args:
+        frames_dir: Cached RGB camera directory holding one PNG per frame.
+        frame_idx: Index of the frame.
+
+    Returns:
+        The frame as a PIL image.
+    """
+    return Image.open(frames_dir / f"{frame_idx}.png")
+
+
+def read_depth_frame(frames_dir: Path, offset: int, length: int) -> np.ndarray:
+    """Read one JPEG-XL depth frame from a cached directory.
+
+    Args:
+        frames_dir: Cached depth camera directory holding lossless.bin.
+        offset: Byte offset of the frame in lossless.bin.
+        length: Length in bytes of the frame.
+
+    Returns:
+        The uint16 frame of shape (height, width) in sensor units.
+
+    Raises:
+        ValueError: If the file ends inside the frame.
+    """
+    frames_path = frames_dir / DEPTH_FRAMES_FILENAME
+    with open(frames_path, "rb") as frames:
+        frames.seek(offset)
+        payload = frames.read(length)
+    if len(payload) != length:
+        raise ValueError(
+            f"Depth frames file {frames_path} ends inside the frame at byte {offset}"
+        )
+    return decode_depth_frame(payload)
