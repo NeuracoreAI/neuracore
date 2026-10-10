@@ -1,8 +1,7 @@
-"""Depth image utility functions for encoding and decoding depth images."""
+"""Depth frame decoding and the depth viewer log curve."""
 
 import numpy as np
 
-MAX_DEPTH = 10.0
 DEPTH_PREVIEW_SHIFT_M = 1.0
 DEPTH_PREVIEW_MIN_M = 0.05
 DEPTH_PREVIEW_MAX_M = 6.55
