@@ -524,8 +524,8 @@ def test_read_image_data_decodes_bigendian_mono16():
         logger=logging.getLogger(__name__),
     )
 
-    assert result.dtype == np.float32
-    np.testing.assert_array_equal(result, np.array([[1000, 2000]], dtype=np.float32))
+    assert result.dtype == np.uint16
+    np.testing.assert_array_equal(result, np.array([[1000, 2000]], dtype=np.uint16))
 
 
 def test_read_image_data_raises_on_unsupported_encoding():
@@ -540,6 +540,25 @@ def test_read_image_data_raises_on_unsupported_encoding():
     with pytest.raises(ImportError, match="Unsupported image encoding"):
         read_image_data(
             DataType.RGB_IMAGES,
+            message.data,
+            message,
+            logger=logging.getLogger(__name__),
+        )
+
+
+@pytest.mark.parametrize("encoding", ["32FC1", "64FC1"])
+def test_read_image_data_rejects_float_depth_encodings(encoding):
+    message = SimpleNamespace(
+        height=1,
+        width=1,
+        encoding=encoding,
+        step=8,
+        is_bigendian=False,
+        data=b"\x00" * 8,
+    )
+    with pytest.raises(ImportError, match="Unsupported image encoding"):
+        read_image_data(
+            DataType.DEPTH_IMAGES,
             message.data,
             message,
             logger=logging.getLogger(__name__),

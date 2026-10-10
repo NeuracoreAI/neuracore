@@ -15,7 +15,8 @@ def _rgb(height: int, width: int) -> BatchedRGBData:
 
 def _depth(height: int, width: int) -> BatchedDepthData:
     return BatchedDepthData(
-        frame=torch.ones((2, 3, 1, height, width), dtype=torch.float32),
+        frame=torch.ones((2, 3, 1, height, width), dtype=torch.uint16),
+        depth_scale=torch.full((2, 3), 1e-4, dtype=torch.float32),
         extrinsics=torch.zeros((2, 3, 4, 4), dtype=torch.float32),
         intrinsics=torch.zeros((2, 3, 3, 3), dtype=torch.float32),
     )
@@ -64,3 +65,21 @@ def test_resize_pad_rejects_unsupported_batched_type():
 
     with pytest.raises(TypeError, match="Unsupported batched data type"):
         ResizePad(size=[32, 32])(DummyBatched())  # type: ignore[arg-type]
+
+
+def test_resize_pad_keeps_uint16_depth_values_and_holes():
+    """uint16 depth stays uint16, nearest keeps values, and padding is no return."""
+    frame = torch.tensor([[0, 40000], [65535, 7]], dtype=torch.uint16)
+    data = BatchedDepthData(
+        frame=frame.reshape(1, 1, 1, 2, 2),
+        depth_scale=torch.full((1, 1), 1e-4, dtype=torch.float32),
+        extrinsics=torch.zeros((1, 1, 4, 4), dtype=torch.float32),
+        intrinsics=torch.zeros((1, 1, 3, 3), dtype=torch.float32),
+    )
+
+    out = ResizePad(size=(4, 8))(data)
+
+    assert out.frame.dtype == torch.uint16
+    expected = torch.zeros((4, 8), dtype=torch.uint16)
+    expected[:, 2:6] = frame.repeat_interleave(2, 0).repeat_interleave(2, 1)
+    assert torch.equal(out.frame.reshape(4, 8), expected)

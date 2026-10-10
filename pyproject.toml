@@ -50,6 +50,7 @@ dependencies = [
     "psutil",
     "typer>=0.20.0",
     "neuracore_types>=11.14.0,<12.0.0",
+    "imagecodecs>=2025.3.30",
     "ordered_set",
     "aiohttp>=3.12.0",
     "pyee==13.0.0",

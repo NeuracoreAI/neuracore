@@ -18,6 +18,10 @@ from neuracore_types.importer.config import (
 )
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.importer.transform import ExtrinsicsToMatrix, IntrinsicsToMatrix
+from neuracore_types.nc_data.camera_data import (
+    DepthCameraDataImportConfig,
+    DepthCameraDataMappingItem,
+)
 from neuracore_types.nc_data.nc_data import MappingItem
 
 from neuracore.core.robot import JointInfo, JointLimits
@@ -155,14 +159,14 @@ class TestValidateInputData:
     def test_validate_depth_images_valid(self, importer):
         """Test depth image validation with valid 2D data."""
         format = DataFormat()
-        data = np.zeros((100, 100), dtype=np.float32)
+        data = np.zeros((100, 100), dtype=np.uint16)
 
         importer._validate_input_data(DataType.DEPTH_IMAGES, data, format)
 
     def test_validate_depth_images_wrong_dimensions(self, importer):
         """Test depth image validation with wrong dimensions."""
         format = DataFormat()
-        data = np.zeros((100, 100, 3), dtype=np.float32)  # 3D instead of 2D
+        data = np.zeros((100, 100, 3), dtype=np.uint16)  # 3D instead of 2D
 
         with pytest.raises(DataValidationError):
             importer._validate_input_data(DataType.DEPTH_IMAGES, data, format)
@@ -474,9 +478,12 @@ class TestLogData:
     @patch("neuracore.importer.core.base.nc")
     def test_log_data_logging_exception(self, mock_nc, importer, mock_mapping_item):
         """Test data logging when _log_transformed_data raises an exception."""
-        format = DataFormat()
-        source_data = np.zeros((100, 100), dtype=np.float32)
+        format = DataFormat(depth_scale_m=0.001)
+        source_data = np.zeros((100, 100), dtype=np.uint16)
         timestamp = 1234567890.0
+        mock_mapping_item.transforms.return_value = np.zeros(
+            (100, 100), dtype=np.uint16
+        )
         mock_nc.log_depth.side_effect = RuntimeError("Logging error")
 
         with pytest.raises(RuntimeError):
@@ -542,11 +549,14 @@ class TestLogData:
         self, mock_nc, importer, mock_mapping_item
     ):
         """Test if extrinsics and intrinsics are passed to nc.log_depth."""
-        format = DataFormat()
-        source_data = np.zeros((100, 100), dtype=np.float32)
+        format = DataFormat(depth_scale_m=0.001)
+        source_data = np.zeros((100, 100), dtype=np.uint16)
         timestamp = 1234567890.0
         extrinsics = np.eye(4, dtype=np.float32)
         intrinsics = np.eye(3, dtype=np.float32)
+        mock_mapping_item.transforms.return_value = np.zeros(
+            (100, 100), dtype=np.uint16
+        )
 
         importer._log_data(
             DataType.DEPTH_IMAGES,
@@ -562,6 +572,69 @@ class TestLogData:
         call_kwargs = mock_nc.log_depth.call_args.kwargs
         np.testing.assert_array_equal(call_kwargs["extrinsics"], extrinsics)
         np.testing.assert_array_equal(call_kwargs["intrinsics"], intrinsics)
+
+    @staticmethod
+    def _depth_item(format: DataFormat) -> DepthCameraDataMappingItem:
+        config = DepthCameraDataImportConfig(
+            source="observation",
+            format=format,
+            mapping=[DepthCameraDataMappingItem(name="depth", source_name="depth")],
+        )
+        return config.mapping[0]
+
+    @pytest.mark.parametrize(
+        ("format", "source", "expected_frame", "expected_scale"),
+        [
+            (
+                DataFormat(depth_scale_m=0.001),
+                np.array([[0, 1500], [65535, 7]], dtype=np.uint16),
+                np.array([[0, 1500], [65535, 7]], dtype=np.uint16),
+                0.001,
+            ),
+            (
+                DataFormat(depth_scale_m=0.0001),
+                np.array([[0, 2600], [65535, 1]], dtype=np.uint16),
+                np.array([[0, 2600], [65535, 1]], dtype=np.uint16),
+                0.0001,
+            ),
+        ],
+        ids=["uint16_mm_with_saturation", "uint16_d405_units"],
+    )
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_depth_keeps_sensor_units(
+        self, mock_nc, importer, format, source, expected_frame, expected_scale
+    ):
+        """Log integer depth as uint16 with its unit."""
+        importer._log_data(
+            DataType.DEPTH_IMAGES, source, self._depth_item(format), format, 1.0
+        )
+
+        call_kwargs = mock_nc.log_depth.call_args.kwargs
+        assert call_kwargs["depth"].dtype == np.uint16
+        np.testing.assert_array_equal(call_kwargs["depth"], expected_frame)
+        assert call_kwargs["depth_scale_m"] == pytest.approx(expected_scale)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            np.zeros((4, 4, 3), dtype=np.uint16),
+            np.zeros((4, 4), dtype=bool),
+            np.full((4, 4), 70000, dtype=np.int32),
+            np.ones((4, 4), dtype=np.float32),
+        ],
+        ids=["three_channels", "bool", "int32_beyond_uint16", "float"],
+    )
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_depth_rejects_unusable_sources(self, mock_nc, importer, source):
+        """Reject depth sources that cannot be stored as uint16 sensor units."""
+        format = DataFormat(depth_scale_m=0.001)
+
+        with pytest.raises(DataValidationError):
+            importer._log_data(
+                DataType.DEPTH_IMAGES, source, self._depth_item(format), format, 1.0
+            )
+
+        mock_nc.log_depth.assert_not_called()
 
     @patch("neuracore.importer.core.base.nc")
     def test_log_data_point_cloud_with_extrinsics_and_intrinsics(
