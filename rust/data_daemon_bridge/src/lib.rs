@@ -191,12 +191,12 @@ pyo3::create_exception!(
 /// published.
 ///
 /// `dtype` is the Python-facing wire label (`image.dtype.name`): `"uint8"`
-/// for RGB24 frames, `"float16"` / `"float32"` for 2D depth frames (metres).
-/// It is parsed once, here, at the native boundary — every internal Rust
-/// component downstream (the writer, the daemon) works with the strongly
-/// typed [`FrameDtype`] rather than re-validating a string.
+/// for RGB24 frames and `"uint16"` for 2D depth frames in sensor units, which
+/// also take `depth_scale_m` (metres per unit). It is parsed once, here, at the native
+/// boundary; every internal Rust component downstream works with the strongly
+/// typed [`FrameDtype`].
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None, depth_scale_m = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
@@ -210,13 +210,15 @@ fn log_frame(
     payload: PyBuffer<u8>,
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
+    depth_scale_m: Option<f64>,
 ) -> PyResult<()> {
     if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
             "robot_id, data_type and name must not be empty",
         ));
     }
-    let frame_dtype = parse_frame_dtype(data_type, dtype).map_err(PyValueError::new_err)?;
+    let frame_dtype =
+        parse_frame_dtype(data_type, dtype, depth_scale_m).map_err(PyValueError::new_err)?;
     let actual_bytes = payload.item_count();
     validate_frame_payload(frame_dtype, width, height, actual_bytes)
         .map_err(PyValueError::new_err)?;
@@ -475,28 +477,37 @@ fn cancel_recording(
 
 /// Parse a NumPy dtype label and validate it against the declared video type.
 ///
-/// RGB frames must use `uint8`; depth frames must use `float16` or `float32`.
-/// Validating the pair at the native boundary prevents incorrectly typed frames
-/// from entering the writer and being stored under the wrong trace type.
-fn parse_frame_dtype(data_type: &str, dtype: &str) -> Result<FrameDtype, String> {
-    let frame_dtype = FrameDtype::from_wire_label(dtype).ok_or_else(|| {
-        format!(
-            "unsupported video frame dtype {dtype:?}; expected one of: \
-             uint8, float16, float32"
-        )
+/// RGB frames must use `uint8`; depth frames must use `uint16` with a positive
+/// `depth_scale_m`. Validating the pair at the native
+/// boundary prevents incorrectly typed frames from entering the writer and
+/// being stored under the wrong trace type.
+fn parse_frame_dtype(
+    data_type: &str,
+    dtype: &str,
+    depth_scale_m: Option<f64>,
+) -> Result<FrameDtype, String> {
+    let frame_dtype = FrameDtype::from_wire_label(dtype, depth_scale_m).ok_or_else(|| {
+        if dtype == "uint16" {
+            format!(
+                "uint16 depth frames need a positive finite depth_scale_m, got {depth_scale_m:?}"
+            )
+        } else {
+            format!(
+                "unsupported video frame dtype {dtype:?}; expected one of: \
+                 uint8, uint16"
+            )
+        }
     })?;
 
     let valid_pair = matches!(
         (data_type, frame_dtype),
-        ("RGB_IMAGES", FrameDtype::Rgb8)
-            | ("DEPTH_IMAGES", FrameDtype::DepthF16)
-            | ("DEPTH_IMAGES", FrameDtype::DepthF32)
+        ("RGB_IMAGES", FrameDtype::Rgb8) | ("DEPTH_IMAGES", FrameDtype::DepthU16 { .. })
     );
 
     if !valid_pair {
         return Err(format!(
             "video data type {data_type:?} is incompatible with dtype {dtype:?}; \
-             expected RGB_IMAGES + uint8 or DEPTH_IMAGES + float16/float32"
+             expected RGB_IMAGES + uint8 or DEPTH_IMAGES + uint16"
         ));
     }
 
@@ -661,18 +672,13 @@ mod tests {
     }
 
     #[test]
-    fn valid_depth_f16_frame_is_accepted() {
-        assert!(validate_frame_payload(FrameDtype::DepthF16, 4, 4, 4 * 4 * 2).is_ok());
-    }
-
-    #[test]
-    fn valid_depth_f32_frame_is_accepted() {
-        assert!(validate_frame_payload(FrameDtype::DepthF32, 4, 4, 4 * 4 * 4).is_ok());
+    fn valid_depth_u16_frame_is_accepted() {
+        assert!(validate_frame_payload(FrameDtype::depth_u16(1e-4), 4, 4, 4 * 4 * 2).is_ok());
     }
 
     #[test]
     fn rgb_frame_with_depth_sized_payload_is_rejected() {
-        // Same byte count as a valid 4x4 f32 depth frame, but declared RGB —
+        // Same byte count as a 4x4 four-byte frame, but declared RGB —
         // must be rejected, not silently accepted because the lengths differ
         // from *some* valid combination.
         let err = validate_frame_payload(FrameDtype::Rgb8, 4, 4, 4 * 4 * 4).unwrap_err();
@@ -681,13 +687,13 @@ mod tests {
 
     #[test]
     fn depth_frame_with_rgb_sized_payload_is_rejected() {
-        let err = validate_frame_payload(FrameDtype::DepthF16, 4, 4, 4 * 4 * 3).unwrap_err();
+        let err = validate_frame_payload(FrameDtype::depth_u16(1e-4), 4, 4, 4 * 4 * 3).unwrap_err();
         assert!(err.contains("expected width*height*2"), "got: {err}");
     }
 
     #[test]
     fn zero_dimensions_are_rejected_for_every_dtype() {
-        for dtype in [FrameDtype::Rgb8, FrameDtype::DepthF16, FrameDtype::DepthF32] {
+        for dtype in [FrameDtype::Rgb8, FrameDtype::depth_u16(1e-4)] {
             assert!(validate_frame_payload(dtype, 0, 4, 0).is_err());
             assert!(validate_frame_payload(dtype, 4, 0, 0).is_err());
         }
@@ -699,7 +705,7 @@ mod tests {
         // wrap silently under an unchecked multiply; on 64-bit it still
         // overflows once cubed against bytes_per_pixel for a large enough
         // combination. Either way this must error, never panic or wrap.
-        let result = validate_frame_payload(FrameDtype::DepthF32, u32::MAX, u32::MAX, 0);
+        let result = validate_frame_payload(FrameDtype::depth_u16(1e-4), u32::MAX, u32::MAX, 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("overflows"));
     }
@@ -715,34 +721,34 @@ mod tests {
 
     #[test]
     fn unsupported_dtype_label_is_rejected() {
-        assert_eq!(FrameDtype::from_wire_label("int32"), None);
-        assert_eq!(FrameDtype::from_wire_label("float64"), None);
+        assert_eq!(FrameDtype::from_wire_label("int32", None), None);
+        assert_eq!(FrameDtype::from_wire_label("float64", None), None);
+        let error = parse_frame_dtype("DEPTH_IMAGES", "float32", None).unwrap_err();
+        assert!(error.contains("unsupported"), "unexpected error: {error}");
     }
 
     #[test]
     fn valid_data_type_dtype_pairs_are_accepted() {
         assert_eq!(
-            parse_frame_dtype("RGB_IMAGES", "uint8"),
+            parse_frame_dtype("RGB_IMAGES", "uint8", None),
             Ok(FrameDtype::Rgb8)
         );
         assert_eq!(
-            parse_frame_dtype("DEPTH_IMAGES", "float16"),
-            Ok(FrameDtype::DepthF16)
-        );
-        assert_eq!(
-            parse_frame_dtype("DEPTH_IMAGES", "float32"),
-            Ok(FrameDtype::DepthF32)
+            parse_frame_dtype("DEPTH_IMAGES", "uint16", Some(1e-4)),
+            Ok(FrameDtype::depth_u16(1e-4))
         );
     }
 
     #[test]
+    fn uint16_depth_without_a_scale_is_rejected() {
+        let error = parse_frame_dtype("DEPTH_IMAGES", "uint16", None).unwrap_err();
+        assert!(error.contains("depth_scale_m"), "unexpected error: {error}");
+    }
+
+    #[test]
     fn invalid_data_type_dtype_pairs_are_rejected() {
-        for (data_type, dtype) in [
-            ("RGB_IMAGES", "float16"),
-            ("RGB_IMAGES", "float32"),
-            ("DEPTH_IMAGES", "uint8"),
-        ] {
-            let error = parse_frame_dtype(data_type, dtype).unwrap_err();
+        for (data_type, dtype) in [("DEPTH_IMAGES", "uint8"), ("RGB_IMAGES", "uint16")] {
+            let error = parse_frame_dtype(data_type, dtype, Some(1e-3)).unwrap_err();
             assert!(error.contains("incompatible"), "unexpected error: {error}");
         }
     }

@@ -462,8 +462,6 @@ def _log_camera_data(
         recording_epoch=robot._recording_epoch(),
     )
 
-    if depth_scale_m is not None:
-        image = image.astype(np.float32) * np.float32(depth_scale_m)
     contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
     robot._get_daemon_recording_context().log_frame(
         camera_type.value,
@@ -473,8 +471,11 @@ def _log_camera_data(
         image.dtype.name,
         memoryview(contiguous).cast("B"),
         camera_data_without_frame.timestamp,
+        depth_scale_m,
     )
 
+    if depth_scale_m is not None:
+        image = image.astype(np.float32) * np.float32(depth_scale_m)
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
 
 

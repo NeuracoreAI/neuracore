@@ -235,6 +235,7 @@ class RecordingContext:
         dtype: str,
         payload: bytes | memoryview,
         timestamp: float,
+        depth_scale_m: float | None = None,
     ) -> None:
         """Forward one video frame to the daemon.
 
@@ -244,11 +245,12 @@ class RecordingContext:
             width: Video frame width.
             height: Video frame height.
             dtype: The frame's original numpy dtype name (``image.dtype.name``),
-                e.g. ``"uint8"`` for RGB or ``"float16"`` / ``"float32"`` for
-                depth. Parsed once at the native boundary so every internal
-                Rust component works with a strongly typed representation.
+                ``"uint8"`` for RGB or ``"uint16"`` for depth in sensor units.
+                Parsed once at the native boundary so every internal Rust
+                component works with a strongly typed representation.
             payload: Raw video frame bytes.
             timestamp: the Unix timestamp of the sample.
+            depth_scale_m: Meters per sensor unit, required for uint16 depth.
         """
         robot_id = self._require_source("log_frame")
         timestamp_ns = int(timestamp * 1_000_000_000)
@@ -265,6 +267,7 @@ class RecordingContext:
                 payload,
                 timestamp_ns,
                 timestamp,
+                depth_scale_m,
             )
         except native.LoggingStalledError as error:
             raise LoggingStalledError(str(error)) from error
