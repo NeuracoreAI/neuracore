@@ -116,6 +116,26 @@ def depth_to_rgb_visualization(
     return rgb_img
 
 
+def decode_depth_frame(payload: bytes) -> np.ndarray:
+    """Decode one JPEG-XL depth frame.
+
+    Args:
+        payload: JPEG-XL codestream of the frame.
+
+    Returns:
+        The uint16 frame of sensor units.
+
+    Raises:
+        ValueError: If the frame decodes to another dtype.
+    """
+    import imagecodecs
+
+    frame = np.asarray(imagecodecs.jpegxl_decode(payload))
+    if frame.dtype != np.uint16:
+        raise ValueError(f"Depth frame decodes as {frame.dtype}, expected uint16")
+    return frame
+
+
 def depth_to_log_gray(
     depth_m: np.ndarray,
     shift: float = DEPTH_PREVIEW_SHIFT_M,

@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import requests
 from neuracore_types import (
-    CameraData,
     DataType,
+    DepthCameraData,
     JointData,
     SynchronizationDetails,
     SynchronizedPoint,
@@ -280,13 +280,13 @@ class TestSynchronizedRecording:
         synced_recording._sync_points = SerializedSynchronizedPoints(points)
 
         with patch.object(
-            synced_recording, "_get_frame_from_disk_cache", side_effect=lambda _, d: d
+            synced_recording, "_get_rgb_frame_from_disk_cache", side_effect=lambda d: d
         ) as mock_get_frame:
             points = synced_recording.get_sync_points(
                 0, 2, {DataType.RGB_IMAGES: {0: "cam1"}}
             )
 
-        assert [set(call.args[1]) for call in mock_get_frame.call_args_list] == [
+        assert [set(call.args[0]) for call in mock_get_frame.call_args_list] == [
             {"cam1"},
             {"cam1"},
         ]
@@ -445,53 +445,37 @@ class TestSynchronizedRecording:
             # No download should be attempted since the cache exists
             mock_download.assert_not_called()
 
-    def test_depth_image_processing(self, synced_recording: SynchronizedRecording):
-        """Test that depth images are processed correctly."""
-        sync_point = cast(SynchronizedPoint, synced_recording[0])
+    def test_depth_frames_serve_uint16_with_scale(
+        self, synced_recording: SynchronizedRecording, depth_frames_file
+    ):
+        """Serve each depth frame from its lossless.bin byte range with its scale."""
+        frames, _, _ = depth_frames_file
 
-        for cam_id, cam_data in sync_point.data[DataType.DEPTH_IMAGES].items():
-            cam_data = cast(CameraData, cam_data)
-            assert cam_data.frame is not None
-            assert isinstance(cam_data.frame, Image.Image)
+        for index in range(len(synced_recording)):
+            point = cast(SynchronizedPoint, synced_recording[index])
+            depth = cast(DepthCameraData, point.data[DataType.DEPTH_IMAGES]["cam2"])
+            assert depth.frame.dtype == np.uint16
+            np.testing.assert_array_equal(depth.frame, frames[depth.frame_idx])
+            assert depth.depth_scale_m == 1e-4
 
-    def test_rgb_to_depth_storage_called_when_retrieving_frame(
+    def test_depth_frame_without_byte_range_raises(
         self,
         dataset_mock,
         mock_data_requests,
-        tmp_path,
+        synced_data,
+        synced_episode_download_url,
     ):
-        """Test that rgb_to_depth_storage is called when retrieving a frame
-        with depth images."""
-        rgb_cache = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
-        depth_cache = (
-            dataset_mock.cache_dir / "rec1" / DataType.DEPTH_IMAGES.value / "cam2"
-        )
-        rgb_cache.mkdir(parents=True, exist_ok=True)
-        depth_cache.mkdir(parents=True, exist_ok=True)
-        fake_image = Image.fromarray(np.ones((224, 224, 3), dtype=np.uint8) * 128)
-        fake_image.save(rgb_cache / "0.png")
-        fake_image.save(depth_cache / "0.png")
-
-        synced = SynchronizedRecording(
-            dataset=dataset_mock,
-            recording_id="rec1",
-            recording_name="recording1",
-            robot_id="robot1",
-            instance=1,
-            synchronization_details=SynchronizationDetails(
-                frequency=30,
-                cross_embodiment_union=None,
-            ),
+        """Refuse a depth frame whose trace entry has no lossless.bin byte range."""
+        for point in synced_data.observations:
+            camera = point.data[DataType.DEPTH_IMAGES]["cam2"]
+            camera.offset = None
+            camera.length = None
+        mock_data_requests.get(
+            synced_episode_download_url, json=synced_data.model_dump(mode="json")
         )
 
-        with patch(
-            "neuracore.core.data.synced_recording.rgb_to_depth_storage"
-        ) as mock_rgb_to_depth_storage:
-            mock_rgb_to_depth_storage.return_value = np.zeros(
-                (224, 224), dtype=np.uint8
-            )
-            _ = synced[0]
-            mock_rgb_to_depth_storage.assert_called()
+        with pytest.raises(ValueError, match="offset and length"):
+            build_recording(dataset_mock)[0]
 
     def test_camera_data_copy_independence(
         self, synced_recording: SynchronizedRecording
@@ -571,12 +555,12 @@ class TestSynchronizedRecording:
             raise RuntimeError("decode crashed")
 
         with patch(
-            "neuracore.core.data.frame_cache.decode_video",
+            "neuracore.core.data.frame_cache.decode_rgb_video",
             side_effect=partial_then_fail,
         ):
             with pytest.raises(RuntimeError, match="decode crashed"):
-                synced_recording._download_video_and_cache_frames_to_disk(
-                    DataType.RGB_IMAGES, "cam1", final_dir
+                synced_recording._download_rgb_video_and_cache_frames_to_disk(
+                    "cam1", final_dir
                 )
 
         assert not final_dir.exists()  # nothing published on failure
@@ -590,9 +574,7 @@ class TestSynchronizedRecording:
         """
         final_dir = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
 
-        synced_recording._download_video_and_cache_frames_to_disk(
-            DataType.RGB_IMAGES, "cam1", final_dir
-        )
+        synced_recording._download_rgb_video_and_cache_frames_to_disk("cam1", final_dir)
 
         assert final_dir.exists()
         assert len(list(final_dir.glob("*.png"))) == 10  # mock video has 10 frames
