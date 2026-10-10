@@ -474,8 +474,6 @@ def _log_camera_data(
         depth_scale_m,
     )
 
-    if depth_scale_m is not None:
-        image = image.astype(np.float32) * np.float32(depth_scale_m)
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
 
 
