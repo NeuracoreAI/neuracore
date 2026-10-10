@@ -2,7 +2,7 @@
 
 This module provides video source management and streaming capabilities using
 aiortc and av libraries. It supports both regular RGB video streams and depth
-video streams with automatic normalization.
+video streams rendered along the depth viewer log curve.
 
 Constants:
     STREAMING_FPS: Target frames per second for video streaming.
@@ -20,10 +20,10 @@ from uuid import uuid4
 import av
 import numpy as np
 from aiortc import MediaStreamTrack
-from neuracore_types import CameraData
+from neuracore_types import CameraData, DepthCameraData
 
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
-from neuracore.core.utils.depth_utils import MAX_DEPTH, depth_to_rgb_visualization
+from neuracore.core.utils.depth_utils import depth_to_log_gray
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 from ..enabled_manager import EnabledManager
@@ -68,10 +68,21 @@ class VideoSource:
         self._last_frame = frame
         self._last_camera_data = camera_data
         if self.custom_data_source:
-            self.custom_data_source.publish({
-                **camera_data.model_dump(mode="json"),
-                "frame": ImageStringEncoder.encode_image(frame, cap_size=True),
-            })
+            self.custom_data_source.publish(self._custom_message(camera_data))
+
+    def _custom_message(self, camera_data: CameraData) -> dict:
+        """Build the data channel message for the last frame.
+
+        Args:
+            camera_data: Metadata of the last frame.
+
+        Returns:
+            The JSON message with the frame as a data URI.
+        """
+        return {
+            **camera_data.model_dump(mode="json"),
+            "frame": ImageStringEncoder.encode_image(self._last_frame, cap_size=True),
+        }
 
     def get_last_frame(self) -> av.VideoFrame:
         """Get the most recent video frame.
@@ -116,45 +127,58 @@ class VideoSource:
                 mid=self.mid, stream_enabled=self.stream_enabled, loop=loop
             )
             if self._last_frame is not None and self._last_camera_data is not None:
-                self.custom_data_source.publish({
-                    **self._last_camera_data.model_dump(mode="json"),
-                    "frame": ImageStringEncoder.encode_image(
-                        self._last_frame, cap_size=True
-                    ),
-                })
+                self.custom_data_source.publish(
+                    self._custom_message(self._last_camera_data)
+                )
 
         return self.custom_data_source
 
 
 @dataclass
 class DepthVideoSource(VideoSource):
-    """A specialized video source for streaming depth video data.
+    """A video source for streaming depth frames in uint16 sensor units.
 
-    This class extends VideoSource to handle depth data by automatically
-    normalizing depth values to the max depth value extracted from the first frame
-    and converting them to RGB images for streaming.
-
-    Attributes:
-        _depth_max: The maximum depth value extracted from the first frame.
+    The video track carries depth as grey levels along the depth viewer log
+    curve, the same levels as the recorded viewer video. The data channel sends
+    each frame as DepthCameraData JSON, which keeps every sensor value.
     """
 
-    _depth_max: float | None = field(default=None, init=False)
+    _last_frame: np.ndarray = field(
+        default_factory=lambda: np.zeros((480, 640), dtype=np.uint16)
+    )
+
+    def _depth_scale_m(self) -> float:
+        """Return the meters per unit of the last frame, 0 before any depth frame."""
+        if isinstance(self._last_camera_data, DepthCameraData):
+            return self._last_camera_data.depth_scale_m
+        return 0.0
+
+    def _custom_message(self, camera_data: CameraData) -> dict:
+        """Build the DepthCameraData data channel message for the last frame.
+
+        Args:
+            camera_data: Metadata of the last frame.
+
+        Returns:
+            The DepthCameraData JSON message holding the frame.
+        """
+        return camera_data.model_copy(update={"frame": self._last_frame}).model_dump(
+            mode="json"
+        )
 
     def get_last_frame(self) -> av.VideoFrame:
-        """Get the most recent depth frame as RGB.
+        """Get the most recent depth frame as log-curve grey levels.
 
-        On the first frame, the maximum depth value is saved and used to
-        normalize all frames before converting to RGB.
+        Returns:
+            av.VideoFrame: The last frame's grey levels in rgb24.
         """
-        depth = np.asarray(self._last_frame, dtype=np.float64)
-        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-        depth = np.clip(depth, 0, MAX_DEPTH)
-
-        if self._depth_max is None:
-            self._depth_max = float(np.max(depth))
-
-        rgb_frame = depth_to_rgb_visualization(depth, max_depth=self._depth_max)
-        return av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
+        depth_m = self._last_frame.astype(np.float32) * np.float32(
+            self._depth_scale_m()
+        )
+        level = depth_to_log_gray(depth_m)
+        return av.VideoFrame.from_ndarray(
+            np.repeat(level[:, :, None], 3, axis=2), format="rgb24"
+        )
 
 
 class VideoTrack(MediaStreamTrack):
