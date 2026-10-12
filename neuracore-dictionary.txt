@@ -228,7 +228,9 @@ iceoryx
 idat
 iend
 ihdr
+iinfo
 iiwa
+imagecodecs
 imageio
 imagenet
 imgmsg
@@ -245,6 +247,7 @@ ipython
 iquat
 Irqfx
 isatty
+issubdtype
 itemsize
 jaco
 jdata

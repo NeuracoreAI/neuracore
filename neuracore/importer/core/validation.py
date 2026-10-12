@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import numpy as np
 from neuracore_types import JointData
 from neuracore_types.importer.config import (
     ActionSpaceConfig,
@@ -84,6 +85,17 @@ def validate_depth_images(data: Any) -> None:
     Raises:
         DataValidationError: If the data does not match the expected format.
     """
+    array = np.asarray(data)
+    if not np.issubdtype(array.dtype, np.integer):
+        raise DataValidationError(
+            f"Depth image data must be integer sensor units, got {array.dtype}. "
+            "Convert it to uint16 units of depth_scale_m meters."
+        )
+    if array.size and (array.min() < 0 or array.max() > 65535):
+        raise DataValidationError(
+            "Depth image values must fit uint16, got range "
+            f"{array.min()} to {array.max()}."
+        )
     if len(data.shape) == 2:
         pass
     elif len(data.shape) == 3:
