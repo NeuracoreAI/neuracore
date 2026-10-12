@@ -10,16 +10,17 @@ from pathlib import Path
 from urllib.parse import quote
 
 import av
+import imagecodecs
 import requests
 from neuracore_types import DataType
 from neuracore_types.utils.name_utils import to_safe_name
-from PIL import Image
 
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.frame_cache import video_filename_preference
 from neuracore.core.data.recording import Recording
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
+from neuracore.core.utils.image_string_encoder import PNG_COMPRESSION_LEVEL
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
 
@@ -113,16 +114,13 @@ class McapExporter(DatasetExporter):
                 if frame is None:
                     raise ValueError(f"Missing video frame {index} in {media[0]}.")
                 pixels = frame.to_ndarray(format="rgb24")
-                image_format = "PNG"
                 if data_type == DataType.DEPTH_IMAGES:
-                    pixels = rgb_to_depth_storage(pixels)
-                    image_format = "TIFF"
-                with io.BytesIO() as encoded:
-                    Image.fromarray(pixels).save(encoded, format=image_format)
-                    yield {
-                        **item,
-                        "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
-                    }
+                    encoded = imagecodecs.tiff_encode(rgb_to_depth_storage(pixels))
+                else:
+                    encoded = imagecodecs.png_encode(
+                        pixels, level=PNG_COMPRESSION_LEVEL
+                    )
+                yield {**item, "data": base64.b64encode(encoded).decode("ascii")}
             if next(frames, None) is not None:
                 raise ValueError(f"Unreferenced video frames in {media[0]}.")
 
