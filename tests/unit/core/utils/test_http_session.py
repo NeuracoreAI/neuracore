@@ -172,15 +172,16 @@ def _fake_request() -> MagicMock:
 @pytest.mark.asyncio
 async def test_middleware_retries_stale_connection():
     attempts = []
+    response = MagicMock(status=200)
 
     async def handler(request):
         attempts.append(request)
         if len(attempts) < 3:
             raise ServerDisconnectedError()
-        return "response"
+        return response
 
     result = await retry_connection_failures(_fake_request(), handler)
-    assert result == "response"
+    assert result is response
     assert len(attempts) == 3
 
 

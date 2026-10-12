@@ -88,3 +88,25 @@ class RobotMismatchError(ValueError):
     """Raised when inference robot_id is not in the model's training spec."""
 
     pass
+
+
+class BackendMaintenanceError(SystemExit):
+    """Raised when the backend answers 599 because it is down for maintenance.
+
+    Subclasses ``SystemExit`` so the backend's message replaces whatever error
+    the caller would have reported: ``except Exception`` handlers do not catch
+    it, and the interpreter exits without a traceback.
+    """
+
+    def __init__(self, message: str):
+        """Create a maintenance error.
+
+        Args:
+            message: The maintenance message sent by the backend.
+        """
+        super().__init__(1)
+        self.message = message
+
+    def __str__(self) -> str:
+        """Return the backend's maintenance message."""
+        return self.message

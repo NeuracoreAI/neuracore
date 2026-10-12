@@ -24,9 +24,11 @@ policy as a client middleware: pass it via
 """
 
 import asyncio
+import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -44,6 +46,8 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from urllib3.connection import HTTPConnection
 from urllib3.exceptions import ProtocolError
+
+from neuracore.core.exceptions import BackendMaintenanceError
 
 # cspell:ignore IPPROTO KEEPCNT KEEPIDLE KEEPINTVL poolmanager
 
@@ -81,6 +85,40 @@ _USER_TIMEOUT_MS = 30_000
 
 _thread_local = threading.local()
 """Per-thread, per-process session cache and HTTP-time accounting."""
+
+MAINTENANCE_STATUS_CODE = 599
+"""Status the backend returns for every request while down for maintenance."""
+
+
+def _raise_maintenance_error(body: str) -> None:
+    """Print the backend's maintenance message and exit.
+
+    Args:
+        body: The 599 response body, expected to be JSON with a ``detail`` or
+            ``message`` field; plain text is shown as is.
+
+    Raises:
+        BackendMaintenanceError: Always.
+    """
+    message = body.strip()
+    try:
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            detail = payload.get("detail", payload.get("message"))
+            if isinstance(detail, dict):
+                detail = detail.get("message", detail)
+            if detail:
+                message = str(detail)
+    except ValueError:
+        pass
+    message = message or "The Neuracore backend is down for maintenance."
+    print(
+        f"\n\033[1;33m⚠  Neuracore is down for maintenance\033[0m\n{message}\n",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise BackendMaintenanceError(message)
+
 
 _DROPPED_CONNECTION_ERRORS = (
     ConnectionResetError,
@@ -197,7 +235,7 @@ class _DefaultTimeoutAdapter(HTTPAdapter):
             timeout = DEFAULT_TIMEOUT
         started = time.perf_counter()
         try:
-            return super().send(
+            response = super().send(
                 request,
                 stream=stream,
                 timeout=timeout,
@@ -207,6 +245,9 @@ class _DefaultTimeoutAdapter(HTTPAdapter):
             )
         finally:
             _record_request_duration(time.perf_counter() - started)
+        if response.status_code == MAINTENANCE_STATUS_CODE:
+            _raise_maintenance_error(response.text)
+        return response
 
 
 def _record_request_duration(seconds: float) -> None:
@@ -324,7 +365,7 @@ async def retry_connection_failures(
     """
     for attempt in range(_STALE_CONNECTION_ATTEMPTS):
         try:
-            return await handler(request)
+            response = await handler(request)
         except (ServerDisconnectedError, ClientOSError) as e:
             if attempt == _STALE_CONNECTION_ATTEMPTS - 1:
                 raise
@@ -337,4 +378,8 @@ async def retry_connection_failures(
                 e,
             )
             await asyncio.sleep(0.1 * 2**attempt)
+            continue
+        if response.status == MAINTENANCE_STATUS_CODE:
+            _raise_maintenance_error(await response.text())
+        return response
     raise AssertionError("unreachable")
