@@ -6,12 +6,12 @@ This is useful for transmitting image data over networks with other data.
 """
 
 import base64
-from io import BytesIO
 
+import imagecodecs
 import numpy as np
-from PIL import Image
 
 DATA_URI_PREFIX = "data:image/png;base64,"
+PNG_COMPRESSION_LEVEL = 6
 
 
 class ImageStringEncoder:
@@ -37,10 +37,10 @@ class ImageStringEncoder:
         """
         if isinstance(image, str):
             return image
-        pil_image = Image.fromarray(image)
-        buffer = BytesIO()
-        pil_image.save(buffer, format="PNG")
-        return DATA_URI_PREFIX + base64.b64encode(buffer.getvalue()).decode("utf-8")
+        png_bytes = imagecodecs.png_encode(
+            np.ascontiguousarray(image), level=PNG_COMPRESSION_LEVEL
+        )
+        return DATA_URI_PREFIX + base64.b64encode(png_bytes).decode("utf-8")
 
     @staticmethod
     def decode_image(encoded_image: str | np.ndarray) -> np.ndarray:
@@ -56,6 +56,4 @@ class ImageStringEncoder:
             return encoded_image
 
         img_bytes = base64.b64decode(encoded_image.removeprefix(DATA_URI_PREFIX))
-        buffer = BytesIO(img_bytes)
-        pil_image = Image.open(buffer)
-        return np.array(pil_image)
+        return imagecodecs.png_decode(img_bytes)
