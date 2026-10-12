@@ -14,7 +14,9 @@ on:
         type: choice
         options:
           - all
+          - tests/integration/ml/test_algorithm_performance.py
           - tests/integration/ml/test_algorithm_validation.py
+          - tests/integration/ml/test_auto_batch_size.py
           - tests/integration/ml/test_back_to_back_training.py
           - tests/integration/ml/test_dataset_datatype_validation.py
           - tests/integration/ml/test_dataset_mutation_training.py
@@ -22,16 +24,21 @@ on:
           - tests/integration/ml/test_failure_reporting.py
           - tests/integration/ml/test_ml_lifecycle.py
           - tests/integration/ml/test_multi_node_policy_inference.py
+          - tests/integration/ml/test_training_sync_failure.py
 
 jobs:
   plan:
     runs-on: ubuntu-24.04
     outputs:
       test-paths: ${{ steps.plan.outputs.test-paths }}
+      training-cases: ${{ steps.training-cases.outputs.training-cases || '[]' }}
     steps:
       - id: plan
         env:
           TEST_PATH: ${{ inputs.test-path }}
+        # "all" deliberately leaves out algorithm performance, auto batch size
+        # and training sync failure so it never claims more of staging's
+        # limited GPUs than it did before they were added here.
         run: |
           all='[
             "tests/integration/ml/test_algorithm_validation.py",
@@ -43,15 +50,61 @@ jobs:
             "tests/integration/ml/test_ml_lifecycle.py",
             "tests/integration/ml/test_multi_node_policy_inference.py"
           ]'
-          if [ "$TEST_PATH" = "all" ]; then
-            test_paths="$(echo "$all" | jq -c .)"
-          else
-            test_paths="$(jq -cn --arg p "$TEST_PATH" '[$p]')"
-          fi
+          case "$TEST_PATH" in
+            all)
+              test_paths="$(echo "$all" | jq -c .)"
+              ;;
+            tests/integration/ml/test_algorithm_performance.py|tests/integration/ml/test_auto_batch_size.py)
+              test_paths='[]'
+              ;;
+            *)
+              test_paths="$(jq -cn --arg p "$TEST_PATH" '[$p]')"
+              ;;
+          esac
           echo "test-paths=$test_paths" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.plan.outputs.test-paths == '[]'
+      - id: training-cases
+        if: steps.plan.outputs.test-paths == '[]'
+        env:
+          TEST_PATH: ${{ inputs.test-path }}
+        run: |
+          pip install pyyaml -q
+          python3 << 'EOF' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          import yaml
+
+          test_path = os.environ["TEST_PATH"]
+          if test_path.endswith("test_auto_batch_size.py"):
+              with open("tests/integration/ml/auto_batch_size_cases.yaml") as f:
+                  cases = yaml.safe_load(f)["cases"]
+              case_ids = [f"{case['algorithm']}_{case['gpu_type']}" for case in cases]
+              test_class = "TestAutoBatchSize"
+              verify_test = "test_wait_for_training_terminal_status"
+          else:
+              with open("tests/integration/ml/algorithm_configs.yaml") as f:
+                  algorithms = yaml.safe_load(f)["algorithms"]
+              case_ids = [algorithm["name"] for algorithm in algorithms]
+              test_class = "TestAlgorithmPerformance"
+              verify_test = "test_evaluate"
+
+          training_cases = [
+              {
+                  "case": case_id,
+                  "start": f"{test_path}::{test_class}::test_start_training[{case_id}]",
+                  "verify": f"{test_path}::{test_class}::{verify_test}[{case_id}]",
+              }
+              for case_id in case_ids
+          ]
+          print("training-cases=" + json.dumps(training_cases))
+          EOF
 
   test:
     needs: plan
+    if: needs.plan.outputs.test-paths != '[]'
     strategy:
       fail-fast: false
       matrix:
@@ -61,3 +114,95 @@ jobs:
       environment: staging
       test-path: ${{ matrix.test-path }}
     secrets: inherit
+
+  # These suites start a training job in one pytest run and verify it in a
+  # second run given TRAINING_JOB_ID, which the shared workflow can't pass.
+  train-and-verify:
+    needs: plan
+    if: needs.plan.outputs.training-cases != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    name: train-and-verify (${{ matrix.case }})
+    strategy:
+      fail-fast: false
+      # Staging has two V100 nodes, and every algorithm performance case
+      # trains and then serves its endpoint on one.
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.training-cases) }}
+    env:
+      NEURACORE_API_URL: https://staging.api.neuracore.com/api
+      NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+      NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+    steps:
+      - name: Show disk space
+        run: df -h /
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Pull LFS objects
+        run: git lfs pull
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up neuracore with Rust data daemon
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
+        with:
+          checkout: "false"
+          path: "."
+          extras: dev,ml,examples
+
+      - name: Start training
+        id: start
+        env:
+          START_TEST: ${{ matrix.start }}
+        run: pytest -o log_cli=true --log-cli-level=INFO -v "$START_TEST"
+
+      # The nightly evaluate run starts four hours after training does; wait
+      # as long here, since test_evaluate only allows an hour on its own.
+      - name: Wait for training
+        if: inputs.test-path == 'tests/integration/ml/test_algorithm_performance.py'
+        env:
+          TRAINING_JOB_ID: ${{ steps.start.outputs.training_job_id }}
+        # -P keeps the source checkout off sys.path so neuracore is imported
+        # from the installed package, as tests/integration/ml/conftest.py does.
+        run: |
+          python -P - << 'EOF'
+          import logging
+          import os
+          import sys
+
+          import neuracore as nc
+
+          sys.path.append(os.getcwd())
+          from tests.integration.ml.shared.training import wait_for_training
+
+          logging.basicConfig(level=logging.INFO)
+          nc.login()
+          wait_for_training(
+              job_id=os.environ["TRAINING_JOB_ID"],
+              timeout_minutes=240,
+              poll_seconds=60,
+          )
+          EOF
+
+      - name: Verify training
+        env:
+          TRAINING_JOB_ID: ${{ steps.start.outputs.training_job_id }}
+          VERIFY_TEST: ${{ matrix.verify }}
+          NEURACORE_ENDPOINT_TIMEOUT: 30
+          DISPLAY: :0
+        run: |
+          Xvfb "$DISPLAY" -screen 0 1280x1024x24 &
+          pytest -o log_cli=true --log-cli-level=INFO -v "$VERIFY_TEST"
+
+      - name: Show disk space after tests
+        if: always()
+        run: df -h /
