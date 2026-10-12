@@ -94,6 +94,7 @@ jobs:
 
     - name: Run Data Daemon Functional Tests
       env:
+        RUST_LOG: warn,data_daemon=debug
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
@@ -227,6 +228,7 @@ jobs:
 
     - name: Run Data Daemon Performance Tests
       env:
+        RUST_LOG: warn,data_daemon=debug
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
