@@ -36,6 +36,7 @@ dependencies = [
     "numpy>=2.0.0",
     "requests>=2.31.0",
     "pillow>=10.0.0",
+    "imagecodecs>=2025.3.30",
     "pyyaml>=6.0.1",
     "tqdm>=4.66.0",
     "requests-oauthlib==2.0.0",

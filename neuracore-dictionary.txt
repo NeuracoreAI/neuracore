@@ -225,6 +225,7 @@ idat
 iend
 ihdr
 iiwa
+imagecodecs
 imageio
 imagenet
 imgmsg

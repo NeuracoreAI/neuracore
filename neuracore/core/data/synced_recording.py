@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import imagecodecs
 import numpy as np
 import requests
 from neuracore_types import (
@@ -29,7 +30,6 @@ from neuracore_types import (
     SynchronizeRecordingStatus,
 )
 from neuracore_types.nc_data.point_cloud_data import decode_point_cloud_frame
-from PIL import Image
 from pydantic import ValidationError as PydanticValidationError
 
 from neuracore.core.data.cache_manager import CacheManager
@@ -476,10 +476,9 @@ class SynchronizedRecording:
                 )
 
             frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
-            frame = Image.open(frame_file)
-
+            frame = imagecodecs.png_decode(frame_file.read_bytes())
             if transform_fn:
-                frame = Image.fromarray(transform_fn(np.array(frame)))
+                frame = transform_fn(frame)
 
             result[cam_id] = cam_data.model_copy(update={"frame": frame})
 

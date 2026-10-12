@@ -406,6 +406,36 @@ class TestSynchronizedRecording:
         assert DataType.RGB_IMAGES in sync_point.data
         assert "cam1" in sync_point.data[DataType.RGB_IMAGES]
 
+    def test_cached_rgb_frame_is_uint8_array_with_source_pixels(
+        self, dataset_mock, mock_data_requests
+    ):
+        """An RGB frame read from the cache is a uint8 array equal to the PNG."""
+        cache_path = (
+            dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
+        )
+        cache_path.mkdir(parents=True, exist_ok=True)
+        pixels = np.random.default_rng(0).integers(0, 256, (24, 32, 3), dtype=np.uint8)
+        Image.fromarray(pixels).save(cache_path / "0.png")
+
+        synced = SynchronizedRecording(
+            dataset=dataset_mock,
+            recording_id="rec1",
+            recording_name="recording1",
+            robot_id="robot1",
+            instance=1,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
+        )
+
+        sync_point = cast(SynchronizedPoint, synced[0])
+        camera_data = cast(CameraData, sync_point.data[DataType.RGB_IMAGES]["cam1"])
+
+        assert isinstance(camera_data.frame, np.ndarray)
+        assert camera_data.frame.dtype == np.uint8
+        np.testing.assert_array_equal(camera_data.frame, pixels)
+
     def test_prefetch_videos_skip_if_cached(self, dataset_mock, mock_data_requests):
         """Test that prefetch_videos parameter triggers video download on init."""
         synced = SynchronizedRecording(
@@ -452,7 +482,7 @@ class TestSynchronizedRecording:
         for cam_id, cam_data in sync_point.data[DataType.DEPTH_IMAGES].items():
             cam_data = cast(CameraData, cam_data)
             assert cam_data.frame is not None
-            assert isinstance(cam_data.frame, Image.Image)
+            assert isinstance(cam_data.frame, np.ndarray)
 
     def test_rgb_to_depth_storage_called_when_retrieving_frame(
         self,
