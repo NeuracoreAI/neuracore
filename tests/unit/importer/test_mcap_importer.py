@@ -193,6 +193,27 @@ def test_image_decoder_handles_base64_compressed_payload():
     assert image_data.shape == (1, 2)
 
 
+def test_image_decoder_decodes_png_and_jpeg_without_pillow():
+    import imagecodecs
+
+    from neuracore.importer.mcap import utils
+
+    decode = getattr(utils, "__decode_compressed_image_bytes")
+    pixels = np.random.default_rng(0).integers(0, 255, (8, 10, 3), dtype=np.uint8)
+    logger = logging.getLogger(__name__)
+
+    png = imagecodecs.png_encode(pixels)
+    decoded = decode(DataType.RGB_IMAGES, png, logger=logger, has_pil=False)
+    np.testing.assert_array_equal(decoded, pixels)
+
+    jpeg = imagecodecs.jpeg_encode(pixels, level=95)
+    decoded = decode(DataType.RGB_IMAGES, jpeg, logger=logger, has_pil=False)
+    assert decoded.shape == pixels.shape
+
+    with pytest.raises(ImportError):
+        decode(DataType.RGB_IMAGES, b"BM-not-png-or-jpeg", logger=logger, has_pil=False)
+
+
 def _make_importer(
     monkeypatch,
     tmp_path: Path,

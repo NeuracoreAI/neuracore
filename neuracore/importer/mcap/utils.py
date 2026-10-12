@@ -21,6 +21,7 @@ from copy import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+import imagecodecs
 import numpy as np
 from mcap.decoder import DecoderFactory
 from mcap.reader import McapReader
@@ -417,6 +418,9 @@ except Exception:  # noqa: BLE001
     HAS_AV = False
 
 _DISCOVERED_DECODER_FACTORY_CLASSES: list[type[DecoderFactory]] | None = None
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_JPEG_SIGNATURE = b"\xff\xd8\xff"
 
 
 def _to_bytes(data: Any) -> bytes:
@@ -1122,22 +1126,49 @@ def __decode_compressed_image_bytes(
     image_module: Any = Image,
 ) -> np.ndarray:
     """Decode compressed image bytes into a numpy array."""
-    if not has_pil or image_module is None:
-        raise ImportError(
-            "Compressed image decoding requires pillow. "
-            "Install with `pip install neuracore[import]`."
-        )
-
     buffer = _read_bytes(data)
-    try:
-        with image_module.open(io.BytesIO(buffer)) as image:
-            if data_type == DataType.RGB_IMAGES and image.mode != "RGB":
-                image = image.convert("RGB")
-            array = np.array(image)
-    except Exception as exc:  # noqa: BLE001
-        raise ImportError(f"Failed decoding compressed image: {exc}") from exc
+    array = _decode_with_imagecodecs(data_type, buffer)
+    if array is None:
+        if not has_pil or image_module is None:
+            raise ImportError(
+                "Compressed image decoding requires pillow. "
+                "Install with `pip install neuracore[import]`."
+            )
+        try:
+            with image_module.open(io.BytesIO(buffer)) as image:
+                if data_type == DataType.RGB_IMAGES and image.mode != "RGB":
+                    image = image.convert("RGB")
+                array = np.array(image)
+        except Exception as exc:  # noqa: BLE001
+            raise ImportError(f"Failed decoding compressed image: {exc}") from exc
 
     return _drop_alpha_channel(data_type, array, logger=logger)
+
+
+def _decode_with_imagecodecs(data_type: DataType, buffer: bytes) -> np.ndarray | None:
+    """Decode a PNG or JPEG payload, or return None when pillow must decode it."""
+    color_channels: tuple[int, ...]
+    if buffer.startswith(_PNG_SIGNATURE):
+        decode = imagecodecs.png_decode
+        color_channels = (3, 4)
+    elif buffer.startswith(_JPEG_SIGNATURE):
+        decode = imagecodecs.jpeg_decode
+        color_channels = (3,)
+    else:
+        return None
+    try:
+        array = decode(buffer)
+    except Exception:  # noqa: BLE001
+        return None
+    if data_type != DataType.RGB_IMAGES:
+        return array if array.dtype == np.uint16 and array.ndim == 2 else None
+    if array.dtype != np.uint8:
+        return None
+    if array.ndim == 2:
+        return np.stack([array] * 3, axis=-1)
+    if array.ndim == 3 and array.shape[2] in color_channels:
+        return array
+    return None
 
 
 def _read_bytes(data: Any) -> bytes:
