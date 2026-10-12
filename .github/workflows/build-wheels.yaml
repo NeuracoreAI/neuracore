@@ -1,8 +1,8 @@
 name: Build Wheels
 
 # Builds the merged `neuracore` wheels (SDK + Rust `_data_bridge` extension +
-# bundled `data-daemon` binary) for Linux x86_64, Linux aarch64, macOS arm64 and
-# macOS x86_64, one per Python minor (cp310-cp314) — no sdist, no pure wheel.
+# bundled `data-daemon` binary) for Linux x86_64, Linux aarch64 and macOS arm64,
+# one per Python minor (cp310-cp314) — no sdist, no pure wheel.
 # maturin owns the build; the daemon binary is a separate crate compiled into the
 # package tree first by rust/scripts/build_wheel_artefacts.sh. A separate
 # smoke-test job installs and launches the wheels on a different machine than
