@@ -15,6 +15,7 @@ import asyncio
 import logging
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -309,6 +310,11 @@ class VideoPrefetcher:
         video_progress = tqdm(total=0, desc="Downloading videos", unit="Video")
         logger.info("Downloading training data and videos…")
         self._report_download_progress(0, num_total_recordings)
+        decode_progress = tqdm(total=0, desc="Decoding videos", unit="Video")
+        decoded_videos = 0
+        decoded_frames = 0
+        first_decode_start: float | None = None
+        last_decode_end: float | None = None
         queue: asyncio.Queue[_PendingDecode | None] = asyncio.Queue(
             maxsize=2 * self.decode_workers
         )
@@ -320,14 +326,31 @@ class VideoPrefetcher:
 
             async def decode_consumer() -> None:
                 """Drain the queue, decoding each video off the event loop."""
+                nonlocal decoded_videos, decoded_frames
+                nonlocal first_decode_start, last_decode_end
                 while True:
                     pending = await queue.get()
                     if pending is None:  # shutdown sentinel
                         queue.task_done()
                         return
+                    started = time.perf_counter()
+                    if first_decode_start is None:
+                        first_decode_start = started
                     try:
-                        await loop.run_in_executor(
+                        num_frames = await loop.run_in_executor(
                             executor, _decode_and_publish, pending
+                        )
+                        elapsed = time.perf_counter() - started
+                        decoded_videos += 1
+                        decoded_frames += num_frames
+                        logger.debug(
+                            "Decoded %s of recording %s in %.1f s "
+                            "(%d frames, %.0f frames/s)",
+                            pending.camera_id,
+                            pending.recording_id,
+                            elapsed,
+                            num_frames,
+                            num_frames / elapsed if elapsed > 0 else 0.0,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -339,6 +362,8 @@ class VideoPrefetcher:
                     finally:
                         if pending.done is not None and not pending.done.done():
                             pending.done.set_result(None)
+                        last_decode_end = time.perf_counter()
+                        decode_progress.update(1)
                         queue.task_done()
 
             async def download(
@@ -363,6 +388,8 @@ class VideoPrefetcher:
                 if pending is None:
                     return None
                 pending.done = loop.create_future()
+                decode_progress.total += 1
+                decode_progress.refresh()
                 await queue.put(pending)
                 return pending.done
 
@@ -440,6 +467,19 @@ class VideoPrefetcher:
                 await asyncio.gather(*consumers, return_exceptions=True)
                 metadata_progress.close()
                 video_progress.close()
+                decode_progress.close()
+                if first_decode_start is not None and last_decode_end is not None:
+                    elapsed = last_decode_end - first_decode_start
+                    decode_fps = decoded_frames / elapsed if elapsed > 0 else 0.0
+                    logger.info(
+                        "Decoded %d videos (%d frames) in %.1f min "
+                        "(%.0f frames/s) with %d decode workers",
+                        decoded_videos,
+                        decoded_frames,
+                        elapsed / 60,
+                        decode_fps,
+                        self.decode_workers,
+                    )
                 self._report_download_progress(
                     num_downloaded_recordings, num_total_recordings
                 )
@@ -632,7 +672,7 @@ class _DownloadTarget:
         delete_decoding_lock(self.lock_file)
 
 
-def _decode_and_publish(pending: _PendingDecode) -> None:
+def _decode_and_publish(pending: _PendingDecode) -> int:
     """Decode a staged video and publish its frames atomically.
 
     Runs in a worker thread. Always releases the lock and the staging directory,
@@ -640,11 +680,15 @@ def _decode_and_publish(pending: _PendingDecode) -> None:
 
     Args:
         pending: The staged video to decode.
+
+    Returns:
+        Number of frames in the published frames directory.
     """
     try:
         publish_decoded_frames(
             pending.video_path, pending.staging_dir, pending.frames_dir
         )
+        return sum(1 for _ in pending.frames_dir.iterdir())
     finally:
         delete_decoding_lock(pending.lock_file)
         pending.temp_dir.cleanup()
