@@ -13,8 +13,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import imagecodecs
 from neuracore_types import DataType
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -277,9 +277,12 @@ def decode_video(video_location: Path, video_frame_cache_path: Path) -> None:
 
     with av.open(str(video_location)) as container:
         for i, frame in enumerate(container.decode(video=0)):
-            frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
             frame_file = video_frame_cache_path / f"{i}.png"
-            frame_image.save(frame_file, compress_level=PNG_COMPRESSION_LEVEL)
+            frame_file.write_bytes(
+                imagecodecs.png_encode(
+                    frame.to_rgb().to_ndarray(), level=PNG_COMPRESSION_LEVEL
+                )
+            )
 
 
 def publish_decoded_frames(

@@ -4,8 +4,11 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import av
+import numpy as np
 import pytest
 from neuracore_types import DataType
+from PIL import Image
 
 from neuracore.core.data.frame_cache import (
     STALE_LOCK_TIMEOUT_S,
@@ -187,6 +190,41 @@ class TestDecodeVideo:
         flag_index = ffmpeg_args.index("-fps_mode")
         assert ffmpeg_args[flag_index + 1] == "passthrough"
         assert "-vsync" not in ffmpeg_args
+
+
+class TestPyAVFallbackDecode:
+    """Frames written when ffmpeg is unavailable."""
+
+    def test_writes_every_frame_as_a_png_with_source_pixels(self, tmp_path):
+        """Each video frame lands in `<index>.png` and reads back pixel exact."""
+        rng = np.random.default_rng(1)
+        source_frames = [
+            rng.integers(0, 256, (24, 32, 3), dtype=np.uint8) for _ in range(4)
+        ]
+        video_location = tmp_path / "video.mp4"
+        with av.open(str(video_location), mode="w", format="mp4") as container:
+            stream = container.add_stream("libx264rgb", rate=10)
+            stream.width, stream.height = 32, 24
+            stream.pix_fmt = "rgb24"
+            stream.options = {"crf": "0"}
+            for pixels in source_frames:
+                frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        frames_dir = tmp_path / "frames"
+        frames_dir.mkdir()
+
+        with patch(f"{MODULE}._FFMPEG_AVAILABLE", False):
+            decode_video(video_location, frames_dir)
+
+        assert sorted(p.name for p in frames_dir.iterdir()) == sorted(
+            f"{i}.png" for i in range(len(source_frames))
+        )
+        for index, pixels in enumerate(source_frames):
+            with Image.open(frames_dir / f"{index}.png") as image:
+                np.testing.assert_array_equal(np.array(image), pixels)
 
 
 class TestResolveFrameSyncArg:
