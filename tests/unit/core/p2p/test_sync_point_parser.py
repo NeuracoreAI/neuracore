@@ -109,10 +109,11 @@ class TestParseSyncPointCameraData:
         np.testing.assert_array_equal(parsed_rgb.frame, test_image)
 
     def test_parse_depth_camera_data(self):
-        """Test parsing depth camera data with image decoding."""
-        # Depth is encoded as an RGB PNG and decoded back to a 2D depth map.
-        test_depth = np.arange(64, dtype=np.float32).reshape(8, 8) / 10.0
-        depth_data = DepthCameraData(timestamp=3.5, frame_idx=10, frame=test_depth)
+        """Parse uint16 depth with its scale, keeping every value and hole."""
+        test_depth = np.arange(64, dtype=np.uint16).reshape(8, 8) * 1000
+        depth_data = DepthCameraData(
+            timestamp=3.5, frame_idx=10, frame=test_depth, depth_scale_m=1e-4
+        )
         message_data = depth_data.model_dump_json()
         track = _create_track(DataType.DEPTH_IMAGES, label="depth_sensor")
 
@@ -125,10 +126,11 @@ class TestParseSyncPointCameraData:
         parsed_depth = result.data[DataType.DEPTH_IMAGES]["depth_sensor"]
         assert isinstance(parsed_depth, DepthCameraData)
         assert parsed_depth.frame_idx == 10
+        assert parsed_depth.depth_scale_m == 1e-4
         frame = parsed_depth.frame
         assert isinstance(frame, np.ndarray)
-        assert frame.shape == (8, 8)
-        assert np.allclose(frame, test_depth, atol=1e-5)
+        assert frame.dtype == np.uint16
+        np.testing.assert_array_equal(frame, test_depth)
 
 
 class TestParseSyncPointEndEffectorPose:
