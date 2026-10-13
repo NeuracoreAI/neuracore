@@ -814,3 +814,150 @@ def test_start_training_run_defaults_to_no_resume(
 
     post_request = _training_job_post_requests(mock_auth_requests)[0]
     assert post_request.json()["resume_from_job_id"] is None
+
+
+CHECKPOINTS_RESPONSE = [
+    {"job_id": "train_job_123", "name": "checkpoint_5.pt", "epoch": 5},
+    {"job_id": "train_job_123", "name": "checkpoint_10.pt", "epoch": 10},
+]
+SIGNED_CHECKPOINT_URL = "https://storage.example.com/checkpoint"
+
+
+def _mock_checkpoint_download(mock_auth_requests, org_id: str, name: str) -> None:
+    mock_auth_requests.get(
+        f"{API_URL}/org/{org_id}/training/jobs/train_job_123/checkpoint_url/{name}",
+        json={"url": SIGNED_CHECKPOINT_URL},
+    )
+    mock_auth_requests.get(SIGNED_CHECKPOINT_URL, content=b"weights")
+
+
+def test_list_training_checkpoints(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=CHECKPOINTS_RESPONSE,
+    )
+
+    checkpoints = nc.list_training_checkpoints("train_job_123")
+
+    assert [(c.name, c.epoch) for c in checkpoints] == [
+        ("checkpoint_5.pt", 5),
+        ("checkpoint_10.pt", 10),
+    ]
+    assert checkpoints[0].size_bytes is None
+
+
+def test_list_training_checkpoints_job_not_found(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/missing/list_checkpoints",
+        status_code=404,
+        json={"detail": {"error": "Training job not found", "status": 404}},
+    )
+
+    with pytest.raises(ValueError, match="Job not found"):
+        nc.list_training_checkpoints("missing")
+
+
+def test_download_training_checkpoint_defaults_to_latest(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, tmp_path
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=CHECKPOINTS_RESPONSE,
+    )
+    _mock_checkpoint_download(mock_auth_requests, mocked_org_id, "checkpoint_10.pt")
+
+    path = nc.download_training_checkpoint("train_job_123", output_dir=tmp_path / "out")
+
+    assert path == tmp_path / "out" / "checkpoint_10.pt"
+    assert path.read_bytes() == b"weights"
+
+
+def test_download_training_checkpoint_by_epoch(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, tmp_path
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=CHECKPOINTS_RESPONSE,
+    )
+    _mock_checkpoint_download(mock_auth_requests, mocked_org_id, "checkpoint_5.pt")
+
+    path = nc.download_training_checkpoint(
+        "train_job_123", epoch=5, output_dir=tmp_path
+    )
+
+    assert path == tmp_path / "checkpoint_5.pt"
+
+
+def test_download_training_checkpoint_unknown_epoch_lists_available(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, tmp_path
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=CHECKPOINTS_RESPONSE,
+    )
+
+    with pytest.raises(ValueError, match="Available epochs: 5, 10"):
+        nc.download_training_checkpoint("train_job_123", epoch=7, output_dir=tmp_path)
+
+
+def test_download_training_checkpoint_without_checkpoints(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, tmp_path
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=[],
+    )
+
+    with pytest.raises(ValueError, match="no checkpoints"):
+        nc.download_training_checkpoint("train_job_123", output_dir=tmp_path)
+
+
+def test_download_training_checkpoint_does_not_overwrite_by_default(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, tmp_path
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=CHECKPOINTS_RESPONSE,
+    )
+    _mock_checkpoint_download(mock_auth_requests, mocked_org_id, "checkpoint_10.pt")
+    existing = tmp_path / "checkpoint_10.pt"
+    existing.write_bytes(b"old")
+
+    with pytest.raises(FileExistsError):
+        nc.download_training_checkpoint("train_job_123", output_dir=tmp_path)
+    assert existing.read_bytes() == b"old"
+
+    nc.download_training_checkpoint(
+        "train_job_123", output_dir=tmp_path, overwrite=True
+    )
+    assert existing.read_bytes() == b"weights"
+
+
+def test_download_training_checkpoint_rolled_off(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, tmp_path
+):
+    """A checkpoint deleted between listing and download is reported clearly."""
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/list_checkpoints",
+        json=CHECKPOINTS_RESPONSE,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/checkpoint_url/"
+        "checkpoint_10.pt",
+        status_code=404,
+    )
+
+    with pytest.raises(ValueError, match="no longer available"):
+        nc.download_training_checkpoint("train_job_123", output_dir=tmp_path)
