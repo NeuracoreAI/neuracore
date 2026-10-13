@@ -539,6 +539,7 @@ def mock_cfg_training(temp_output_dir) -> DictConfig:
         "epochs": 1,
         "logging_frequency": 10,
         "keep_last_n_checkpoints": 3,
+        "checkpoint_saving_frequency": 5,
         "training_id": None,
         "resume_checkpoint_path": None,
         "max_prefetch_decode_workers": 4,

@@ -38,6 +38,8 @@ logging_frequency: 50
 # nothing. 0 disables it.
 system_logging_frequency: 200
 keep_last_n_checkpoints: 2
+# Retain checkpoints whose epoch is divisible by this.
+checkpoint_saving_frequency: 5
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
 input_data_types:
