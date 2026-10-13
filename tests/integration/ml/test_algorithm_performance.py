@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from typing import cast
 
 import pytest
@@ -212,7 +213,11 @@ class TestAlgorithmPerformance:
             with open(github_output, "a") as f:
                 f.write(f"training_job_id={training_job_id}\n")
 
-    def test_evaluate(self, algorithm_config_entry: dict) -> None:
+    def test_evaluate(
+        self,
+        algorithm_config_entry: dict,
+        training_job_cleanup: Callable[[str], None],
+    ) -> None:
         """Phase 2: deploy an endpoint for a completed training job and evaluate it.
 
         Expects TRAINING_JOB_ID to be set in the environment (written by
@@ -226,6 +231,8 @@ class TestAlgorithmPerformance:
                 "TRAINING_JOB_ID not set — run test_start_training first, "
                 "then re-run with TRAINING_JOB_ID=<id>"
             )
+
+        training_job_cleanup(training_job_id)
 
         algorithm_name = algorithm_config_entry["name"]
         min_success_rate = algorithm_config_entry["min_success_rate"]
@@ -300,7 +307,6 @@ class TestAlgorithmPerformance:
                 f.write(f"success_rate={success_rate}\n")
 
         nc.delete_endpoint(endpoint_id)
-        nc.delete_training_job(training_job_id)
 
         if success_rate < min_success_rate:
             raise ValueError(

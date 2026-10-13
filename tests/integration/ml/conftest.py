@@ -1,6 +1,7 @@
+import logging
 import os
 import sys
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,7 @@ import pytest
 import yaml
 
 # Resolve neuracore from the installed wheel before repo_root joins sys.path.
-import neuracore  # noqa: F401
+import neuracore as nc
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 repo_root = str(Path(__file__).resolve().parents[3])
@@ -18,10 +19,39 @@ if repo_root not in sys.path:
 _CONFIGS_FILE = os.path.join(THIS_DIR, "algorithm_configs.yaml")
 _TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 
+logger = logging.getLogger(__name__)
+
 
 def _load_algorithm_configs() -> list[dict]:
     with open(_CONFIGS_FILE) as f:
         return yaml.safe_load(f)["algorithms"]
+
+
+@pytest.fixture(scope="class")
+def training_job_cleanup() -> Generator[Callable[[str], None]]:
+    """Register training job IDs to delete once the test class finishes.
+
+    The jobs are deleted whether or not the tests passed, so a failed run does
+    not leave its jobs and their metrics behind.
+    """
+    job_ids: list[str] = []
+
+    def register(job_id: str) -> None:
+        if job_id not in job_ids:
+            job_ids.append(job_id)
+
+    try:
+        yield register
+    finally:
+        for job_id in job_ids:
+            try:
+                nc.login()
+                nc.delete_training_job(job_id)
+                logger.info("Deleted training job %s", job_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to delete training job %s", job_id, exc_info=True
+                )
 
 
 @pytest.fixture(autouse=True)

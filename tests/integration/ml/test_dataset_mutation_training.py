@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 
 import numpy as np
 from neuracore_types import DataType, EmbodimentDescription
@@ -340,13 +341,6 @@ class TestDatasetMutationTraining:
                 "one or more steps failed"
             )
             return
-        for job_id in (cls.baseline_job_id, cls.retrain_job_id, cls.corrupt_job_id):
-            if job_id is None:
-                continue
-            try:
-                nc.delete_training_job(job_id)
-            except Exception:
-                logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
         for dataset in (cls.dataset, cls.corrupt_dataset):
             if dataset is None:
                 continue
@@ -409,7 +403,9 @@ class TestDatasetMutationTraining:
         self.__class__.stats_fingerprint_initial = fingerprint
         logger.info("[STEP 2] [PASSED] Initial dataset statistics verified")
 
-    def test_step3_start_baseline_training(self) -> None:
+    def test_step3_start_baseline_training(
+        self, training_job_cleanup: Callable[[str], None]
+    ) -> None:
         assert self.dataset is not None, "[STEP 1] Did Not Complete"
         assert self.input_desc is not None, "[STEP 2] Did Not Complete"
         assert self.output_desc is not None, "[STEP 2] Did Not Complete"
@@ -425,13 +421,16 @@ class TestDatasetMutationTraining:
             input_cross_embodiment_description=self.input_desc,
             output_cross_embodiment_description=self.output_desc,
         )
+        training_job_cleanup(job_data["id"])
         self.__class__.baseline_job_id = job_data["id"]
         logger.info(
             f"[STEP 3] [PASSED] Baseline training started on the initial dataset: "
             f"job_id={self.baseline_job_id}"
         )
 
-    def test_step4_start_corrupt_training(self) -> None:
+    def test_step4_start_corrupt_training(
+        self, training_job_cleanup: Callable[[str], None]
+    ) -> None:
         # Started before the dataset mutation so the corrupted-inputs run trains
         # in parallel with the baseline (it uses a separate dataset, so it does
         # not block the later mutation of the main dataset).
@@ -464,6 +463,7 @@ class TestDatasetMutationTraining:
             input_cross_embodiment_description=corrupt_input_desc,
             output_cross_embodiment_description=corrupt_output_desc,
         )
+        training_job_cleanup(job_data["id"])
         self.__class__.corrupt_job_id = job_data["id"]
         logger.info(
             f"[STEP 4] [PASSED] Corrupted-inputs training started (runs in "
@@ -574,7 +574,9 @@ class TestDatasetMutationTraining:
         ), "Expected dataset statistics to change after mutation"
         logger.info("[STEP 6] [PASSED] Updated dataset statistics verified")
 
-    def test_step7_start_retrain(self) -> None:
+    def test_step7_start_retrain(
+        self, training_job_cleanup: Callable[[str], None]
+    ) -> None:
         assert self.dataset is not None, "[STEP 5] Did Not Complete"
         assert self.input_desc is not None, "[STEP 2] Did Not Complete"
         assert self.output_desc is not None, "[STEP 2] Did Not Complete"
@@ -591,6 +593,7 @@ class TestDatasetMutationTraining:
             output_cross_embodiment_description=self.output_desc,
             name_auto_increment=True,
         )
+        training_job_cleanup(job_data["id"])
         self.__class__.retrain_job_id = job_data["id"]
         logger.info(
             f"[STEP 7] [PASSED] Retrain started on the mutated dataset: "

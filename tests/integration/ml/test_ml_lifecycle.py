@@ -30,6 +30,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 
 from neuracore_types import (
     DataType,
@@ -303,17 +304,6 @@ class TestMLLifecycle:
                 logger.warning(
                     f"Failed to delete endpoint {endpoint_id}", exc_info=True
                 )
-        for job_id in (
-            cls.job_id,
-            cls.deletion_relaunch_job_id,
-            cls.addition_relaunch_job_id,
-        ):
-            if job_id is None:
-                continue
-            try:
-                nc.delete_training_job(job_id)
-            except Exception:
-                logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
         for dataset in (cls.merged_dataset, cls.collected_dataset):
             if dataset is None:
                 continue
@@ -382,7 +372,9 @@ class TestMLLifecycle:
 
     # -- 3. Train ----------------------------------------------------------
 
-    def test_step03_start_training(self) -> None:
+    def test_step03_start_training(
+        self, training_job_cleanup: Callable[[str], None]
+    ) -> None:
         assert self.merged_dataset is not None, "[STEP 2] Did Not Complete"
         dataset = nc.get_dataset(name=self.merged_dataset_name)
         assert (
@@ -406,6 +398,7 @@ class TestMLLifecycle:
             input_cross_embodiment_description=input_desc,
             output_cross_embodiment_description=output_desc,
         )
+        training_job_cleanup(job_data["id"])
         self.__class__.job_id = job_data["id"]
         logger.info(
             f"[STEP 3] [PASSED] Training Job Started: {self.job_id}"
@@ -658,7 +651,9 @@ class TestMLLifecycle:
 
     # -- 10-11. Retrain after mutating the original collected dataset -----
 
-    def test_step10_retrain_after_data_deletion(self) -> None:
+    def test_step10_retrain_after_data_deletion(
+        self, training_job_cleanup: Callable[[str], None]
+    ) -> None:
         assert self.collected_dataset is not None, "[STEP 1] Did Not Complete"
         dataset = nc.get_dataset(name=self.collected_dataset_name)
         assert len(dataset) == COLLECT_NUM_EPISODES, (
@@ -704,6 +699,7 @@ class TestMLLifecycle:
             input_cross_embodiment_description=input_desc,
             output_cross_embodiment_description=output_desc,
         )
+        training_job_cleanup(job_data["id"])
         self.__class__.deletion_relaunch_job_id = job_data["id"]
         final_status = wait_for_training(job_id=self.deletion_relaunch_job_id)
         assert (
@@ -718,7 +714,9 @@ class TestMLLifecycle:
             f" Completed On {len(self.collected_dataset)}-Recording Dataset"
         )
 
-    def test_step11_retrain_after_data_addition(self) -> None:
+    def test_step11_retrain_after_data_addition(
+        self, training_job_cleanup: Callable[[str], None]
+    ) -> None:
         assert self.collected_dataset is not None, "[STEP 1] Did Not Complete"
         dataset = nc.get_dataset(name=self.collected_dataset_name)
         recordings_before_addition = len(dataset)
@@ -763,6 +761,7 @@ class TestMLLifecycle:
             input_cross_embodiment_description=input_desc,
             output_cross_embodiment_description=output_desc,
         )
+        training_job_cleanup(job_data["id"])
         self.__class__.addition_relaunch_job_id = job_data["id"]
         final_status = wait_for_training(job_id=self.addition_relaunch_job_id)
         assert (
