@@ -521,6 +521,9 @@ class TestSaveModelArtifacts:
             f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
         )
         requests_mock.put(SIGNED_URL, status_code=200)
+        promote_mock = requests_mock.post(
+            f"{BASE_JOB_URL}/promote-upload", json={}, status_code=200
+        )
 
         def fake_archive(
             model,
@@ -543,6 +546,55 @@ class TestSaveModelArtifacts:
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
         assert len(put_requests) == 2
+        assert promote_mock.call_count == 2
+        upload_filepaths = sorted(
+            r.qs["filepath"][0]
+            for r in requests_mock.request_history
+            if r.method == "GET" and "/upload-url" in r.url
+        )
+        assert upload_filepaths == ["config.json.publishing", "model.pt.publishing"]
+
+    def test_save_model_artifacts_publishes_model_archive_via_staging_promote(
+        self, handler, requests_mock
+    ):
+        mock_model = MagicMock()
+        output_dir = Path("run_1")
+
+        requests_mock.get(
+            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
+        )
+        requests_mock.put(SIGNED_URL, status_code=200)
+        promote_mock = requests_mock.post(
+            f"{BASE_JOB_URL}/promote-upload", json={}, status_code=200
+        )
+
+        def fake_archive(
+            model,
+            output_dir,
+            algorithm_config,
+            input_cross_embodiment_description,
+            output_cross_embodiment_description,
+            input_preprocessing_config,
+            output_preprocessing_config,
+        ):
+            (output_dir / "model.nc.zip").write_bytes(b"zip-bytes")
+
+        with patch(
+            "neuracore.ml.utils.training_storage_handler.create_nc_archive",
+            side_effect=fake_archive,
+        ):
+            handler.save_model_artifacts(mock_model, output_dir)
+        handler.wait_for_pending_uploads()
+
+        upload_gets = [
+            r
+            for r in requests_mock.request_history
+            if r.method == "GET" and "/upload-url" in r.url
+        ]
+        assert len(upload_gets) == 1
+        assert upload_gets[0].qs["filepath"] == ["model.nc.zip.publishing"]
+        assert promote_mock.call_count == 1
+        assert promote_mock.last_request.qs["filepath"] == ["model.nc.zip"]
 
 
 class TestUpdateTrainingProgress:

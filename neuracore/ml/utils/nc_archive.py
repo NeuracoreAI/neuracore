@@ -8,6 +8,7 @@ dependency management, and packaging of all required files for inference.
 import inspect
 import json
 import logging
+import os
 import tempfile
 import zipfile
 from importlib.metadata import PackageNotFoundError, version
@@ -154,50 +155,66 @@ def create_nc_archive(
         with open(temp_path / "metadata", "w") as f:
             json.dump(_build_archive_metadata(), f, indent=2)
 
-        # Create the ZIP archive
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            zip_file.write(
-                temp_path / "model.pt", "model.pt", compress_type=zipfile.ZIP_STORED
-            )
+        # Build the zip in a same-directory staging file, then atomically replace
+        # the published archive so readers never observe a half-written zip.
+        with tempfile.NamedTemporaryFile(
+            dir=output_dir, suffix=".part", delete=False
+        ) as handle:
+            staging_path = Path(handle.name)
+        try:
+            with zipfile.ZipFile(staging_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                zip_file.write(
+                    temp_path / "model.pt",
+                    "model.pt",
+                    compress_type=zipfile.ZIP_STORED,
+                )
 
-            # Add model initialization description
-            zip_file.write(
-                temp_path / "model_init_description.json", "model_init_description.json"
-            )
+                # Add model initialization description
+                zip_file.write(
+                    temp_path / "model_init_description.json",
+                    "model_init_description.json",
+                )
 
-            # Add algorithm config (always present)
-            zip_file.write(temp_path / "algorithm_config.json", "algorithm_config.json")
+                # Add algorithm config (always present)
+                zip_file.write(
+                    temp_path / "algorithm_config.json", "algorithm_config.json"
+                )
 
-            # Add cross-embodiment descriptions
-            zip_file.write(
-                temp_path / "input_cross_embodiment_description.json",
-                "input_cross_embodiment_description.json",
-            )
-            zip_file.write(
-                temp_path / "output_cross_embodiment_description.json",
-                "output_cross_embodiment_description.json",
-            )
-            zip_file.write(
-                temp_path / "input_preprocessing_config.json",
-                "input_preprocessing_config.json",
-            )
-            zip_file.write(
-                temp_path / "output_preprocessing_config.json",
-                "output_preprocessing_config.json",
-            )
+                # Add cross-embodiment descriptions
+                zip_file.write(
+                    temp_path / "input_cross_embodiment_description.json",
+                    "input_cross_embodiment_description.json",
+                )
+                zip_file.write(
+                    temp_path / "output_cross_embodiment_description.json",
+                    "output_cross_embodiment_description.json",
+                )
+                zip_file.write(
+                    temp_path / "input_preprocessing_config.json",
+                    "input_preprocessing_config.json",
+                )
+                zip_file.write(
+                    temp_path / "output_preprocessing_config.json",
+                    "output_preprocessing_config.json",
+                )
 
-            # Add archive metadata
-            zip_file.write(temp_path / "metadata", "metadata")
+                # Add archive metadata
+                zip_file.write(temp_path / "metadata", "metadata")
 
-            # Add all algorithm files
-            for algo_file in algo_files:
-                # Calculate relative path from algorithm directory
-                rel_path = algo_file.relative_to(algorithm_loader.algorithm_dir)
-                zip_file.write(algo_file, f"algorithm/{rel_path}")
+                # Add all algorithm files
+                for algo_file in algo_files:
+                    # Calculate relative path from algorithm directory
+                    rel_path = algo_file.relative_to(algorithm_loader.algorithm_dir)
+                    zip_file.write(algo_file, f"algorithm/{rel_path}")
 
-            # Add requirements file if it exists
-            if requirements_file_path.exists():
-                zip_file.write(requirements_file_path, "algorithm/requirements.txt")
+                # Add requirements file if it exists
+                if requirements_file_path.exists():
+                    zip_file.write(requirements_file_path, "algorithm/requirements.txt")
+
+            os.replace(staging_path, archive_path)
+        except BaseException:
+            staging_path.unlink(missing_ok=True)
+            raise
 
     archive_size_mb = archive_path.stat().st_size / (1024 * 1024)
     logger.info(
