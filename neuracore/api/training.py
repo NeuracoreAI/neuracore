@@ -160,6 +160,7 @@ def start_training_run(
     name_auto_increment: bool = False,
     disk_size_gb: int = 500,
     resume_from_job_id: str | None = None,
+    wait_for_gpu: bool = True,
 ) -> dict:
     """Start a new training run on the cloud.
 
@@ -185,6 +186,8 @@ def start_training_run(
             continues from. The algorithm, data types, number of data slots per
             data type and output prediction horizon must match that job, and
             ``algorithm_config["epochs"]`` must exceed the epoch it reached.
+        wait_for_gpu: If True, queue the job even when no GPUs are free and keep
+            retrying provisioning until capacity is available.
 
     Returns:
         dict: Training job data including job ID and status
@@ -265,6 +268,7 @@ def start_training_run(
         input_cross_embodiment_description=input_cross_embodiment_description,
         output_cross_embodiment_description=output_cross_embodiment_description,
         resume_from_job_id=resume_from_job_id,
+        wait_for_gpu=wait_for_gpu,
     )
 
     auth = get_auth()
