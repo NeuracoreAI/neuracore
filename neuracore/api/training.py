@@ -6,6 +6,7 @@ including algorithm discovery, dataset resolution, and job status tracking.
 
 import concurrent.futures
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 import requests
@@ -13,11 +14,13 @@ from neuracore_types import (
     CrossEmbodimentDescription,
     GPUType,
     SynchronizationDetails,
+    TrainingCheckpoint,
     TrainingJobRequest,
     estimate_min_disk_size_gb,
 )
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.utils.download import download_with_progress
 from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
@@ -485,3 +488,109 @@ def delete_training_job(job_id: str, org_id: str | None = None) -> None:
         response.raise_for_status()
     except Exception as e:
         raise ValueError(f"Error deleting training job: {e}")
+
+
+def list_training_checkpoints(job_id: str) -> list[TrainingCheckpoint]:
+    """List the checkpoints available for download from a training job.
+
+    Args:
+        job_id: The ID of the training job
+
+    Returns:
+        list[TrainingCheckpoint]: The job's checkpoints sorted by ascending
+            epoch. Empty if the job has not saved any checkpoints yet.
+
+    Raises:
+        ValueError: If the job is not found
+        requests.exceptions.HTTPError: If the API request returns an error status
+        requests.exceptions.RequestException: If there is a network problem
+        ConfigError: If there is an error trying to get the current org
+    """
+    auth = get_auth()
+    org_id = get_current_org()
+    session = thread_local_session()
+    try:
+        response = session.get(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/list-checkpoints",
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            # Starlette (from FastAPI) answers an unknown route with a bare "Not Found".
+            if extract_error_detail(e.response) == "Not Found":
+                raise ValueError(
+                    f"List-checkpoints endpoint (GET /training/jobs/{job_id}/"
+                    "list-checkpoints) is not available."
+                ) from e
+            raise ValueError("Job not found") from e
+        raise
+    return [TrainingCheckpoint.model_validate(item) for item in response.json()]
+
+
+def download_training_checkpoint(
+    job_id: str,
+    epoch: int | None = None,
+    output_dir: str | Path = ".",
+    overwrite: bool = False,
+) -> Path:
+    """Download a checkpoint saved by a training job.
+
+    Args:
+        job_id: The ID of the training job
+        epoch: The epoch of the checkpoint to download. Defaults to the
+            latest checkpoint.
+        output_dir: Directory to save the checkpoint into. Created if missing.
+        overwrite: Whether to replace an existing file at the destination.
+
+    Returns:
+        Path: Path to the downloaded checkpoint file.
+
+    Raises:
+        ValueError: If the job is not found, has no checkpoint for the
+            requested epoch, or the download cannot be authorised
+        FileExistsError: If the destination file exists and ``overwrite`` is
+            False
+        requests.exceptions.HTTPError: If the API request returns an error status
+        requests.exceptions.RequestException: If there is a network problem
+        ConfigError: If there is an error trying to get the current org
+    """
+    checkpoints = list_training_checkpoints(job_id)
+    if not checkpoints:
+        raise ValueError("Training job has no checkpoints yet")
+    if epoch is None:
+        checkpoint = checkpoints[-1]
+    else:
+        matching = [c for c in checkpoints if c.epoch == epoch]
+        if not matching:
+            available = ", ".join(str(c.epoch) for c in checkpoints)
+            raise ValueError(
+                f"No checkpoint for epoch {epoch}. Available epochs: {available}"
+            )
+        checkpoint = matching[0]
+
+    destination = Path(output_dir) / checkpoint.name
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"{destination} already exists")
+
+    auth = get_auth()
+    org_id = get_current_org()
+    session = thread_local_session()
+    response = session.get(
+        f"{API_URL}/org/{org_id}/training/jobs/{job_id}/checkpoint_url/"
+        f"{checkpoint.name}",
+        headers=auth.get_headers(),
+    )
+    if response.status_code == 402:
+        raise ValueError(
+            "Cannot download checkpoint: "
+            f"{extract_error_detail(response) or 'egress limit exceeded'}"
+        )
+    if response.status_code == 404:
+        raise ValueError(f"Checkpoint {checkpoint.name} is no longer available")
+    response.raise_for_status()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return download_with_progress(
+        response.json()["url"], f"Downloading {checkpoint.name}", destination
+    )

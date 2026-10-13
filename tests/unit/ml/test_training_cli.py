@@ -407,3 +407,118 @@ def test_training_cloud_delete_uses_env_org_override(
         and req.url == f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123"
         for req in mock_auth_requests.request_history
     )
+
+
+def _mock_checkpoint_list(mock_auth_requests, org_id: str) -> None:
+    mock_auth_requests.get(
+        f"{API_URL}/org/{org_id}/training/jobs/job_123/list-checkpoints",
+        json=[
+            {"job_id": "job_123", "name": "checkpoint_5.pt", "epoch": 5},
+            {"job_id": "job_123", "name": "checkpoint_10.pt", "epoch": 10},
+        ],
+    )
+
+
+def test_training_checkpoints_lists_cloud_checkpoints(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    sample_training_jobs_response,
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=sample_training_jobs_response,
+    )
+    _mock_checkpoint_list(mock_auth_requests, mocked_org_id)
+
+    result = runner.invoke(
+        app,
+        ["training", "list-checkpoints", "-t", "training_run_1"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "5 | checkpoint_5.pt | - | -" in result.output
+    assert "10 | checkpoint_10.pt | - | -" in result.output
+
+
+def test_training_download_checkpoint_by_epoch(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    sample_training_jobs_response,
+    tmp_path,
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=sample_training_jobs_response,
+    )
+    _mock_checkpoint_list(mock_auth_requests, mocked_org_id)
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123/checkpoint_url/"
+        "checkpoint_5.pt",
+        json={"url": "https://storage.example.com/checkpoint_5"},
+    )
+    mock_auth_requests.get(
+        "https://storage.example.com/checkpoint_5", content=b"weights"
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "training",
+            "download-checkpoint",
+            "-t",
+            "training_run_1",
+            "--epoch",
+            "5",
+            "-o",
+            str(tmp_path),
+        ],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "checkpoint_5.pt").read_bytes() == b"weights"
+    assert "Saved checkpoint to" in result.output
+
+
+def test_training_download_checkpoint_unknown_epoch(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    sample_training_jobs_response,
+    tmp_path,
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=sample_training_jobs_response,
+    )
+    _mock_checkpoint_list(mock_auth_requests, mocked_org_id)
+
+    result = runner.invoke(
+        app,
+        [
+            "training",
+            "download-checkpoint",
+            "-t",
+            "training_run_1",
+            "--epoch",
+            "7",
+            "-o",
+            str(tmp_path),
+        ],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "Available epochs: 5, 10" in result.output
