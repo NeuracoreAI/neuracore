@@ -1860,6 +1860,44 @@ class TestRunTraining:
         assert train_loader.batch_size == setup.batch_size
         assert val_loader.batch_size == setup.batch_size
 
+    @pytest.mark.parametrize("world_size", [1, 2])
+    @pytest.mark.parametrize(
+        ("num_train_workers", "num_val_workers", "train_method", "val_method"),
+        [(2, 0, "spawn", None), (0, 2, None, "spawn")],
+    )
+    def test_run_training_dataloader_worker_start_method(
+        self,
+        mock_cfg_training,
+        mock_dataset,
+        model_init_description,
+        mock_model_class,
+        monkeypatch,
+        world_size,
+        num_train_workers,
+        num_val_workers,
+        train_method,
+        val_method,
+    ):
+        mock_cfg_training.num_train_workers = num_train_workers
+        mock_cfg_training.num_val_workers = num_val_workers
+        setup = RunTrainingTestSetup(
+            monkeypatch,
+            model_init_description,
+            mock_model_class,
+            world_size=world_size,
+        )
+        setup.setup_mocks()
+
+        setup.call_run_training(mock_cfg_training, mock_dataset)
+
+        call_kwargs = setup.mock_trainer_class.call_args[1]
+        for loader_key, expected in (
+            ("train_loader", train_method),
+            ("val_loader", val_method),
+        ):
+            context = call_kwargs[loader_key].multiprocessing_context
+            assert (context.get_start_method() if context else None) == expected
+
     def test_run_training_creates_training_storage_handler_with_correct_params(
         self,
         mock_cfg_training,

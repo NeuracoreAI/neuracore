@@ -392,6 +392,15 @@ def determine_optimal_batch_size(
     return optimal_batch_size
 
 
+def _worker_context(num_workers: int) -> str | None:
+    """Return the DataLoader worker start method, or None without workers.
+
+    Forking a parent with live threads can leave a worker blocked forever on a
+    lock it inherited held, which stalls the loader silently.
+    """
+    return "spawn" if num_workers > 0 else None
+
+
 def run_training(
     rank: int,
     world_size: int,
@@ -439,6 +448,8 @@ def run_training(
 
         num_train_workers = min(cfg.num_train_workers, cpu_count())
         num_val_workers = min(cfg.num_val_workers, cpu_count())
+        train_worker_context = _worker_context(num_train_workers)
+        val_worker_context = _worker_context(num_val_workers)
 
         if world_size > 1:
             train_sampler = DistributedSampler(
@@ -463,6 +474,7 @@ def run_training(
                 num_workers=num_train_workers,
                 pin_memory=True,
                 persistent_workers=num_train_workers > 0,
+                multiprocessing_context=train_worker_context,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -473,6 +485,7 @@ def run_training(
                 num_workers=num_val_workers,
                 pin_memory=True,
                 persistent_workers=num_val_workers > 0,
+                multiprocessing_context=val_worker_context,
                 collate_fn=dataset.collate_fn,
             )
         else:
@@ -484,6 +497,7 @@ def run_training(
                 num_workers=num_train_workers,
                 pin_memory=True,
                 persistent_workers=num_train_workers > 0,
+                multiprocessing_context=train_worker_context,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -494,6 +508,7 @@ def run_training(
                 num_workers=num_val_workers,
                 pin_memory=True,
                 persistent_workers=num_val_workers > 0,
+                multiprocessing_context=val_worker_context,
                 collate_fn=dataset.collate_fn,
             )
 
