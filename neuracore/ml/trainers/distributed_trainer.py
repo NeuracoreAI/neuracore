@@ -574,11 +574,15 @@ class DistributedTrainer:
         if not self._histograms_enabled:
             return
         model = self.get_model_without_ddp()
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                self.training_logger.log_histogram(
-                    f"gradients/{name}", param.grad, step
-                )
+        self.training_logger.log_histogram(
+            "gradients",
+            {
+                name: param.grad
+                for name, param in model.named_parameters()
+                if param.grad is not None
+            },
+            step,
+        )
 
     def _log_weights(self, step: int) -> None:
         """Log weight histograms for model parameters.
@@ -589,8 +593,9 @@ class DistributedTrainer:
         if not self._histograms_enabled:
             return
         model = self.get_model_without_ddp()
-        for name, param in model.named_parameters():
-            self.training_logger.log_histogram(f"weights/{name}", param, step)
+        self.training_logger.log_histogram(
+            "weights", dict(model.named_parameters()), step
+        )
 
     def _log_scalars(
         self, scalars: dict[str, float], step: int, prefix: str = "train/"
