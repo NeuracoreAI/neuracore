@@ -392,6 +392,35 @@ def determine_optimal_batch_size(
     return optimal_batch_size
 
 
+def _any_rank_failed_to_load_checkpoint(
+    *,
+    local_failed: bool,
+    rank: int,
+    device: torch.device | None = None,
+) -> bool:
+    """Return whether any rank failed to load the resume checkpoint.
+
+    Every rank must enter this collective before training starts, so a load
+    failure on one rank cannot leave the others inside the training loop.
+
+    Args:
+        local_failed: Whether this rank failed to load the checkpoint.
+        rank: Rank of this process. Used to select a CUDA device when
+            ``device`` is omitted.
+        device: Device for the collective flag. Training uses this rank's
+            CUDA device so the flag matches the NCCL process group. Tests
+            pass CPU and use the gloo backend.
+
+    Returns:
+        True if any rank failed to load the checkpoint.
+    """
+    if device is None:
+        device = torch.device("cuda", rank)
+    flag = torch.tensor([int(local_failed)], dtype=torch.int32, device=device)
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+    return bool(flag.item())
+
+
 def run_training(
     rank: int,
     world_size: int,
@@ -571,15 +600,45 @@ def run_training(
             device=device,
         )
 
-        # Resume from checkpoint if specified
+        # Resume from checkpoint if specified. A failed load must abort the run:
+        # continuing would train and save artifacts from unrestored state.
         start_epoch = 0
         if cfg.resume_checkpoint_path is not None:
+            checkpoint_path = cfg.resume_checkpoint_path
+            load_error: Exception | None = None
             try:
-                checkpoint = trainer.load_checkpoint(cfg.resume_checkpoint_path)
+                checkpoint = trainer.load_checkpoint(checkpoint_path)
                 start_epoch = checkpoint.get("epoch", 0) + 1
-                logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
-            except Exception:
-                logger.error("Failed to load checkpoint.", exc_info=True)
+            except Exception as exc:
+                load_error = exc
+
+            if world_size > 1:
+                try:
+                    any_rank_failed = _any_rank_failed_to_load_checkpoint(
+                        local_failed=load_error is not None,
+                        rank=rank,
+                    )
+                except Exception as collective_exc:
+                    if load_error is None:
+                        raise RuntimeError(
+                            "Failed to synchronize resume-checkpoint status for "
+                            f"{checkpoint_path!r}."
+                        ) from collective_exc
+                    raise RuntimeError(
+                        f"Failed to load resume checkpoint {checkpoint_path!r}."
+                    ) from load_error
+                if any_rank_failed and load_error is None:
+                    load_error = RuntimeError(
+                        "Another rank failed to load the resume checkpoint "
+                        f"{checkpoint_path!r}."
+                    )
+
+            if load_error is not None:
+                raise RuntimeError(
+                    f"Failed to load resume checkpoint {checkpoint_path!r}."
+                ) from load_error
+
+            logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
 
         # Start training
         try:
