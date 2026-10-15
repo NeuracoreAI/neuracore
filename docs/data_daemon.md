@@ -203,6 +203,8 @@ These are the supported settings:
 | `api_key` | API key used for authenticating the daemon. |
 | `current_org_id` | Which organisation the daemon should operate under. |
 | `video_codec` | Video encoding for RGB cameras. `h264_medium` (default) / `h264_fast` / `h264_lossless`. |
+| `transcode_workers` | Number of concurrent `ffmpeg` transcodes. Defaults to half the CPU cores, minimum 2. |
+| `upload_workers` | Number of concurrent trace uploads. Defaults to 16. |
 
 ---
 
@@ -256,6 +258,8 @@ Supported environment variables:
 | `api_key` | `NCD_API_KEY` |
 | `current_org_id` | `NEURACORE_ORG_ID` (shared with the SDK) |
 | `video_codec` | `NCD_VIDEO_CODEC` |
+| `transcode_workers` | `NCD_TRANSCODE_WORKERS` |
+| `upload_workers` | `NCD_UPLOAD_WORKERS` |
 
 Note on `NEURACORE_ORG_ID`: the daemon uses it only as a fallback while
 `~/.neuracore/config.json` has no organization set. The config file is watched
@@ -397,13 +401,13 @@ neuracore data-daemon profile create laptop
 Update a named profile:
 
 ```bash
-neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>] [--video-codec <h264_lossless|h264_medium|h264_fast>]
+neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>] [--video-codec <h264_lossless|h264_medium|h264_fast>] [--transcode-workers <n>] [--upload-workers <n>]
 ```
 
 Update the default profile:
 
 ```bash
-neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>] [--video-codec <h264_lossless|h264_medium|h264_fast>]
+neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>] [--video-codec <h264_lossless|h264_medium|h264_fast>] [--transcode-workers <n>] [--upload-workers <n>]
 ```
 
 Example:

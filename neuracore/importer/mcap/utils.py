@@ -32,6 +32,7 @@ from neuracore_types.nc_data import DatasetImportConfig
 from neuracore_types.nc_data.nc_data import MappingItem
 
 from neuracore.importer.core.exceptions import ImportError
+from neuracore.importer.core.png_frame import PNGFrame
 
 
 def split_topic_path(source: str) -> tuple[str, list[str]]:
@@ -1017,12 +1018,13 @@ def _decode_compressed_image(
     *,
     logger: logging.Logger,
     image_context: MCAPImageContext | None = None,
-) -> np.ndarray:
+) -> np.ndarray | PNGFrame:
     """Decode ``sensor_msgs/CompressedImage``-style payloads.
 
-    Still-image containers (PNG/JPEG/...) go through PIL. Payloads whose
-    ``format`` field names an H.264 stream are handed to the per-topic video
-    decoder in ``image_context`` instead.
+    An 8-bit RGB PNG stays encoded as a PNGFrame. Other still-image containers
+    (PNG/JPEG/...) go through PIL. Payloads whose ``format`` field names an
+    H.264 stream are handed to the per-topic video decoder in ``image_context``
+    instead.
     """
     raw = _read_field(message, "data")
     if raw is None:
@@ -1034,7 +1036,7 @@ def _decode_compressed_image(
             logger=logger,
             image_context=image_context,
         )
-    return __decode_compressed_image_bytes(data_type, raw, logger=logger)
+    return _png_frame_or_decode(data_type, raw, logger=logger)
 
 
 def _decode_h264_image(
@@ -1103,7 +1105,7 @@ def read_image_data(
 
     if isinstance(data, (bytes, bytearray, memoryview, str)) or _is_byte_list(data):
         try:
-            return __decode_compressed_image_bytes(data_type, data, logger=logger)
+            return _png_frame_or_decode(data_type, data, logger=logger)
         except ImportError:
             pass
 
@@ -1111,6 +1113,20 @@ def read_image_data(
         "Image mapping resolved to unsupported payload type "
         f"{type(data).__name__}. Configure mapping to point to image bytes/data."
     )
+
+
+def _png_frame_or_decode(
+    data_type: DataType, data: Any, *, logger: logging.Logger
+) -> np.ndarray | PNGFrame:
+    """Keep an 8-bit RGB PNG encoded; decode any other image bytes."""
+    if data_type == DataType.RGB_IMAGES:
+        try:
+            frame = PNGFrame.from_bytes(_read_bytes(data))
+        except ImportError:
+            frame = None
+        if frame is not None:
+            return frame
+    return __decode_compressed_image_bytes(data_type, data, logger=logger)
 
 
 def __decode_compressed_image_bytes(
@@ -1199,6 +1215,10 @@ def convert_decoded_mcap_data(decoded_data: Any) -> Any:
 
 def _apply_item_indexing(source_data: Any, item: MappingItem) -> Any:
     """Apply a mapping item's ``index``/``index_range`` to an extracted value."""
+    if isinstance(source_data, PNGFrame) and (
+        item.index is not None or item.index_range is not None
+    ):
+        source_data = source_data.decode()
     if item.index is not None:
         return source_data[item.index]
     if item.index_range is not None:

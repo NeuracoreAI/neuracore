@@ -3,9 +3,11 @@ import importlib
 import logging
 
 import pytest
+from neuracore_types import Codec
 from typer.testing import CliRunner
 
 from neuracore.importer.cli.app import app
+from neuracore.importer.core.daemon_settings import ImporterDaemonConfig
 from neuracore.importer.core.exceptions import CLIError
 from neuracore.importer.importer import cli_args_validation
 
@@ -51,7 +53,7 @@ def test_import_command_invokes_run_import_with_defaults(monkeypatch, tmp_path):
     assert called["skip_on_error"] == "episode"
     assert called["suppress_validation_warnings"] is False
     assert called["random_sample"] is None
-    assert called["storage_limit"] == 5 * 1024**3
+    assert called["daemon_config"] == ImporterDaemonConfig()
 
 
 def test_import_command_propagates_flags(monkeypatch, tmp_path):
@@ -87,8 +89,14 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
             "--no-validation-warnings",
             "--random-sample",
             "3",
-            "--storage-limit",
+            "--spool-limit",
             "500mb",
+            "--daemon-transcode-workers",
+            "6",
+            "--daemon-upload-workers",
+            "32",
+            "--video-codec",
+            "h264_fast",
         ],
         env={"TERM": "dumb", "NO_COLOR": "1"},
     )
@@ -100,7 +108,12 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
     assert captured["skip_on_error"] == "step"
     assert captured["suppress_validation_warnings"] is True
     assert captured["random_sample"] == 3
-    assert captured["storage_limit"] == 500 * 1024**2
+    assert captured["daemon_config"] == ImporterDaemonConfig(
+        spool_limit=500 * 1024**2,
+        transcode_workers=6,
+        upload_workers=32,
+        video_codec=Codec.H264_FAST,
+    )
 
 
 def test_import_command_handles_cli_error(monkeypatch, tmp_path, caplog):

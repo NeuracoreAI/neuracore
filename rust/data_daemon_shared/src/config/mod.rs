@@ -74,6 +74,10 @@ pub struct DaemonConfig {
     pub current_org_id: Option<String>,
     /// Global video codec selection (a Codec value, e.g. "h264_medium").
     pub video_codec: Option<String>,
+    /// Concurrent ffmpeg transcodes. Unset uses the core-scaled default.
+    pub transcode_workers: Option<i64>,
+    /// Concurrent trace uploads. Unset uses the built-in default.
+    pub upload_workers: Option<i64>,
 }
 
 impl DaemonConfig {
@@ -115,7 +119,18 @@ impl DaemonConfig {
         if other.video_codec.is_some() {
             self.video_codec = other.video_codec.clone();
         }
+        if other.transcode_workers.is_some() {
+            self.transcode_workers = other.transcode_workers;
+        }
+        if other.upload_workers.is_some() {
+            self.upload_workers = other.upload_workers;
+        }
     }
+}
+
+/// A configured worker count, or `None` when unset or not positive.
+pub fn positive_count(value: Option<i64>) -> Option<usize> {
+    value.filter(|count| *count > 0).map(|count| count as usize)
 }
 
 /// Build a default daemon configuration based on local disk availability.
@@ -148,6 +163,8 @@ pub fn build_default_daemon_config() -> std::io::Result<DaemonConfig> {
         api_key: None,
         current_org_id: None,
         video_codec: None,
+        transcode_workers: None,
+        upload_workers: None,
     })
 }
 
@@ -248,6 +265,26 @@ mod tests {
     }
 
     #[test]
+    fn overlay_sets_worker_counts_when_provided() {
+        let mut base = DaemonConfig::default();
+        base.overlay(&DaemonConfig {
+            transcode_workers: Some(6),
+            upload_workers: Some(32),
+            ..DaemonConfig::default()
+        });
+        assert_eq!(base.transcode_workers, Some(6));
+        assert_eq!(base.upload_workers, Some(32));
+    }
+
+    #[test]
+    fn positive_count_rejects_unset_and_non_positive() {
+        assert_eq!(positive_count(None), None);
+        assert_eq!(positive_count(Some(0)), None);
+        assert_eq!(positive_count(Some(-3)), None);
+        assert_eq!(positive_count(Some(5)), Some(5));
+    }
+
+    #[test]
     fn json_output_keeps_python_field_order() {
         let config = DaemonConfig {
             storage_limit: Some(1),
@@ -261,6 +298,8 @@ mod tests {
             api_key: None,
             current_org_id: None,
             video_codec: None,
+            transcode_workers: Some(4),
+            upload_workers: Some(8),
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let keys: Vec<&str> = json
@@ -282,6 +321,8 @@ mod tests {
                 "api_key",
                 "current_org_id",
                 "video_codec",
+                "transcode_workers",
+                "upload_workers",
             ]
         );
     }
