@@ -842,10 +842,8 @@ impl Dispatcher {
     /// Open the window for `source`'s announced recording, now that it has
     /// published at `publish_ts`.
     ///
-    /// The lower bound is the recording's own start, so what the producer
-    /// published before this datum still lands inside. It is clamped to
-    /// `publish_ts` so the triggering datum is not excluded, and floored at any
-    /// predecessor's close so it cannot steal that recording's tail.
+    /// The backend's start time is the window bound, floored at any
+    /// predecessor's close.
     async fn open_announced_window(&mut self, source: &Source, publish_ts: i64, recv_at: Instant) {
         let announced = self.announced.0.get(source).map(|entry| entry.clone());
         let Some(announced) = announced else {
@@ -854,12 +852,8 @@ impl Dispatcher {
         if announced.recording_index.is_some() {
             return;
         }
-        let mut open_at_ns = announced.open_at_ns.min(publish_ts);
-        // A datum opens this window: floor it at any predecessor's close so it
-        // cannot claim that recording's tail. The datum can be older than the
-        // announced start, when it is the predecessor's own tail. A start
-        // opening its own window at its own publish time spans no such gap,
-        // and keeps the boundary its envelope set.
+        let mut open_at_ns = announced.open_at_ns;
+        // Only a remote start can fall before its predecessor's close.
         if publish_ts != announced.open_at_ns {
             if let Some(entry) = self.windows.get(source) {
                 let predecessor_close_ns = entry
@@ -3303,7 +3297,68 @@ mod tests {
             Some(200),
             "the new window cut the previous recording short"
         );
-        assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 200);
+        assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 5_000_000);
+    }
+
+    #[tokio::test]
+    async fn a_window_opened_by_data_between_recordings_starts_at_its_own_start() {
+        // Data published after the stop but before the web start belongs to
+        // neither recording, even when it is what opens the window.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher.handle_inbound(start("robot-1", 100), now).await;
+        dispatcher.handle_inbound(stop("robot-1", 200), now).await;
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-web", 5_000_000), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 300, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        assert_eq!(
+            entry.live.as_ref().unwrap().started_at_ns,
+            5_000_000,
+            "the window claimed data published before its start"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_web_start_before_the_previous_close_opens_at_that_close() {
+        // The previous recording closed after the web start, so the new window
+        // opens at that close and leaves the tail where it is.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher
+            .handle_inbound(start("robot-1", 1_000_000_000), now)
+            .await;
+        dispatcher
+            .handle_inbound(stop("robot-1", 3_000_000_000), now)
+            .await;
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-web", 2_000_000_000), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 4_000_000_000, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        assert_eq!(entry.closing[0].stopped_at_ns, Some(3_000_000_000));
+        assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 3_000_000_000);
     }
 
     #[tokio::test]
