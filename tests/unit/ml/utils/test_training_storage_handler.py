@@ -627,6 +627,23 @@ class TestUpdateTrainingProgress:
             "seconds_per_epoch": 12.5,
         }
 
+    def test_includes_completed_epochs_when_provided(self, handler, requests_mock):
+        requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
+
+        handler.update_training_progress(
+            TrainingProgress(epoch=4, completed_epochs=3, step=200)
+        )
+        handler.wait_for_pending_progress_updates()
+
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        assert len(put_requests) == 1
+        assert put_requests[0].json() == {
+            "epoch": 4,
+            "completed_epochs": 3,
+            "step": 200,
+            "error": None,
+        }
+
     def test_omits_seconds_per_epoch_when_none(self, handler, requests_mock):
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
