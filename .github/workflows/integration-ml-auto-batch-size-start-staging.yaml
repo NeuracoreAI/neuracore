@@ -105,7 +105,9 @@ jobs:
 
         wait_log="$RUNNER_TEMP/wait.log"
         start_output="$RUNNER_TEMP/start_output.txt"
-        gpu_unavailable_pattern='No GPUs? available'
+        # Kubernetes reports a GPU stockout as a scheduling timeout on the job
+        # rather than as "No GPUs available".
+        gpu_unavailable_pattern='No GPUs? available|No machine with the requested GPUs became available'
         export GITHUB_OUTPUT="$start_output"
 
         run_phase() {
