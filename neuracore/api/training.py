@@ -14,7 +14,6 @@ from neuracore_types import (
     GPUType,
     SynchronizationDetails,
     TrainingJobRequest,
-    estimate_min_disk_size_gb,
 )
 
 from neuracore.core.config.get_current_org import get_current_org
@@ -32,6 +31,9 @@ from neuracore.core.utils.training_input_args_validation import (
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.data.dataset import Dataset
+
+# Default VM disk when the caller does not override (matches frontend default).
+DEFAULT_DISK_SIZE_GB = 2000
 
 
 def _resolve_next_name(base_name: str, existing_names: set[str]) -> str:
@@ -158,7 +160,7 @@ def start_training_run(
     allow_duplicates: bool = True,
     trim_no_movement_at_start_threshold: float | None = None,
     name_auto_increment: bool = False,
-    disk_size_gb: int = 500,
+    disk_size_gb: int = DEFAULT_DISK_SIZE_GB,
     resume_from_job_id: str | None = None,
 ) -> dict:
     """Start a new training run on the cloud.
@@ -180,7 +182,8 @@ def start_training_run(
             of its value in the first frame. None keeps every frame.
         name_auto_increment: If True and a job with this name already exists, use
             name_1, name_2, ... instead of failing or duplicating the name.
-        disk_size_gb: Disk size in GB for the training VM (default: 500).
+        disk_size_gb: Disk size in GB for the training VM (default: 2000).
+            Must be at least the backend estimate for the selected modalities.
         resume_from_job_id: ID of a training job whose latest checkpoint this run
             continues from. The algorithm, data types, number of data slots per
             data type and output prediction horizon must match that job, and
@@ -221,13 +224,23 @@ def start_training_run(
     )
 
     # Validate that the machine disk is large enough for training workloads.
-    min_disk_size_gb = estimate_min_disk_size_gb(
-        size_bytes=dataset.size_bytes,
-        num_demonstrations=len(dataset),
-        hydra_arg_name=algorithm_name,
-        input_cross_embodiment_description=input_cross_embodiment_description,
-        output_cross_embodiment_description=output_cross_embodiment_description,
+    auth = get_auth()
+    org_id = get_current_org()
+    session = thread_local_session()
+    estimate_response = session.post(
+        f"{API_URL}/org/{org_id}/training/estimate-disk",
+        headers=auth.get_headers(),
+        json={
+            "dataset_id": dataset_id,
+            "algorithm_id": algorithm_id,
+            "input_cross_embodiment_description": (input_cross_embodiment_description),
+            "output_cross_embodiment_description": (
+                output_cross_embodiment_description
+            ),
+        },
     )
+    estimate_response.raise_for_status()
+    min_disk_size_gb = int(estimate_response.json()["disk_size_gb"])
     if disk_size_gb < min_disk_size_gb:
         raise ValueError(
             f"Estimated minimum disk for this training job is "
@@ -267,9 +280,6 @@ def start_training_run(
         resume_from_job_id=resume_from_job_id,
     )
 
-    auth = get_auth()
-    org_id = get_current_org()
-    session = thread_local_session()
     # Ideally the backend would queue the job and return immediately instead of
     # blocking on VM provisioning. Until it does, allow a longer read timeout.
     response = session.post(
