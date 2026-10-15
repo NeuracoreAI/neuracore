@@ -13,7 +13,7 @@
 //! promotion (and its write-behind-lag safety-net role). Registration failures
 //! roll the status back to `Pending` so the next tick re-claims them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::api::models::RegisterTraceRequest;
+use crate::api::models::{CloudFile, RegisterTraceRequest};
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::{cloud_file_list, is_video_family};
 use crate::cloud::{ConfigRx, OrgIdRx};
@@ -268,7 +268,7 @@ async fn submit_batch(
                         "outcome": "ok",
                     }),
                 );
-                let registered_ids: HashMap<String, _> = response
+                let mut registered_ids: HashMap<String, _> = response
                     .registered_traces
                     .into_iter()
                     .map(|entry| (entry.trace_id.clone(), entry.upload_session_uris))
@@ -279,9 +279,9 @@ async fn submit_batch(
                     .map(|entry| (entry.trace_id, entry.error))
                     .collect();
 
-                for trace in &traces {
-                    if let Some(uris) = registered_ids.get(&trace.trace_id) {
-                        // The uploader finalises an empty URI map as a 0 byte upload.
+                for (trace, request) in traces.iter().zip(&payload) {
+                    if let Some(mut uris) = registered_ids.remove(&trace.trace_id) {
+                        // The uploader fails a trace with an empty URI map.
                         if uris.is_empty() {
                             handle_registration_setback(
                                 store,
@@ -293,12 +293,30 @@ async fn submit_batch(
                             .await;
                             continue;
                         }
+                        if let Err(error) = fetch_missing_upload_links(
+                            client,
+                            &org_id,
+                            &cloud_id,
+                            &request.cloud_files,
+                            &mut uris,
+                        )
+                        .await
+                        {
+                            handle_registration_setback(
+                                store,
+                                registration_attempts,
+                                &trace.trace_id,
+                                Some(error),
+                                "failed to fetch a missing upload link",
+                            )
+                            .await;
+                            continue;
+                        }
                         // A serialise failure must NOT mark the trace registered
-                        // with a "{}" placeholder — that records an empty URI map
-                        // and the uploader later finalises it as 0 bytes uploaded
-                        // (silent data loss). Roll back to pending so the next
-                        // tick re-registers it instead.
-                        let serialised = match serde_json::to_string(uris) {
+                        // with a "{}" placeholder — that records an empty URI map,
+                        // which the uploader then fails. Roll back to pending so
+                        // the next tick re-registers it instead.
+                        let serialised = match serde_json::to_string(&uris) {
                             Ok(serialised) => serialised,
                             Err(error) => {
                                 tracing::warn!(%error, trace_id = trace.trace_id, "failed to serialise session URIs; rolling back to pending");
@@ -372,6 +390,34 @@ async fn submit_batch(
             }
         }
     }
+}
+
+/// Fetch an upload link for each requested file the backend returned none for.
+async fn fetch_missing_upload_links(
+    client: &ApiClient,
+    org_id: &str,
+    cloud_id: &str,
+    cloud_files: &[CloudFile],
+    uris: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    for file in cloud_files {
+        if uris.contains_key(&file.filepath) {
+            continue;
+        }
+        tracing::warn!(
+            recording_id = cloud_id,
+            filepath = file.filepath,
+            "backend returned no upload link; fetching one"
+        );
+        let uri = client
+            .fetch_resumable_upload_url(org_id, cloud_id, &file.filepath, &file.content_type)
+            .await
+            .map_err(|error| {
+                format!("failed to fetch upload link for {}: {error}", file.filepath)
+            })?;
+        uris.insert(file.filepath.clone(), uri);
+    }
+    Ok(())
 }
 
 /// Promote any traces that are now both registered and written to `queued` and
@@ -485,7 +531,7 @@ mod tests {
     use crate::state::{NewRecording, TraceUploadStatus, TraceWriteStatus};
     use std::time::Duration;
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -623,6 +669,111 @@ mod tests {
                 .is_none_or(|uris| uris != "{}"),
             "an empty URI map must never be persisted"
         );
+    }
+
+    /// Register a written RGB trace (`lossy.mp4` + `trace.json`) against a
+    /// backend whose response only has the `lossy.mp4` link.
+    async fn register_rgb_trace_without_trace_json_link(
+        server: &MockServer,
+    ) -> (SqliteStateStore, TempDir) {
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [{
+                    "trace_id": "trace-1",
+                    "upload_session_uris": {"RGB_IMAGES/cam0/lossy.mp4": "https://upload/lossy"}
+                }],
+                "failed_traces": []
+            })))
+            .mount(server)
+            .await;
+        let (store, dir) = open_store().await;
+        let recording_index = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap()
+            .recording_index;
+        store
+            .mark_recording_start_notified(recording_index, "cloud-rec-1")
+            .await
+            .unwrap();
+        store
+            .create_trace(recording_index, "trace-1", Some("RGB_IMAGES"), Some("cam0"))
+            .await
+            .unwrap();
+        let claimed = store
+            .claim_traces_for_registration(BATCH_SIZE, 0.0)
+            .await
+            .unwrap();
+        submit_batch(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &client(server),
+            &org_rx(Some("org-1")),
+            &config_rx(None),
+            claimed,
+            &mut HashMap::new(),
+        )
+        .await;
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn missing_upload_link_is_fetched_before_registering() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/org/org-1/recording/cloud-rec-1/resumable_upload_url",
+            ))
+            .and(query_param("filepath", "RGB_IMAGES/cam0/trace.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"url": "https://upload/trace-json"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = register_rgb_trace_without_trace_json_link(&server).await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.registration_status,
+            TraceRegistrationStatus::Registered
+        );
+        let uris: HashMap<String, String> =
+            serde_json::from_str(trace.upload_session_uris.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            uris,
+            HashMap::from([
+                (
+                    "RGB_IMAGES/cam0/lossy.mp4".to_string(),
+                    "https://upload/lossy".to_string()
+                ),
+                (
+                    "RGB_IMAGES/cam0/trace.json".to_string(),
+                    "https://upload/trace-json".to_string()
+                ),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_upload_link_fetch_is_a_setback() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/org/org-1/recording/cloud-rec-1/resumable_upload_url",
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = register_rgb_trace_without_trace_json_link(&server).await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
+        assert_eq!(trace.upload_session_uris, None, "no partial map persisted");
     }
 
     #[tokio::test]
