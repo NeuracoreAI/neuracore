@@ -30,7 +30,7 @@ use crate::state::{
 };
 use crate::storage::paths::TracePath;
 
-/// Maximum number of traces uploading concurrently. A trade-off: more slots
+/// Default number of traces uploading concurrently. A trade-off: more slots
 /// drain a large backlog in fewer rounds, but oversubscribing the link inflates
 /// per-request latency and its p95/p99 tail, which drives timeouts and retries.
 pub const MAX_CONCURRENT_UPLOADS: usize = 16;
@@ -52,6 +52,7 @@ impl UploaderHandle {
 /// Spawn the uploader task on the current Tokio runtime.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_uploader(
+    upload_workers: usize,
     store: SqliteStateStore,
     trace_writer: TraceWriteHandle,
     bus: EventBus,
@@ -64,7 +65,7 @@ pub fn spawn_uploader(
     let mut subscriber = bus.subscribe();
     let store = Arc::new(store);
     let join = tokio::spawn(async move {
-        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+        let semaphore = Arc::new(Semaphore::new(upload_workers));
         let mut in_flight: JoinSet<String> = JoinSet::new();
         // Tracks dispatched trace IDs to prevent a drain triggered by
         // join_next from re-queuing a trace whose task hasn't yet run the

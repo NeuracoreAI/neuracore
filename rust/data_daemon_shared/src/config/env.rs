@@ -151,6 +151,16 @@ pub fn env_config_overrides() -> DaemonConfig {
     if let Some(value) = env_var("NCD_VIDEO_CODEC") {
         config.video_codec = Some(value);
     }
+    if let Some(value) = env_var("NCD_TRANSCODE_WORKERS") {
+        if let Ok(parsed) = value.parse::<i64>() {
+            config.transcode_workers = Some(parsed);
+        }
+    }
+    if let Some(value) = env_var("NCD_UPLOAD_WORKERS") {
+        if let Ok(parsed) = value.parse::<i64>() {
+            config.upload_workers = Some(parsed);
+        }
+    }
 
     config
 }
@@ -304,6 +314,8 @@ mod tests {
         "NCD_API_KEY",
         "NEURACORE_ORG_ID",
         "NCD_VIDEO_CODEC",
+        "NCD_TRANSCODE_WORKERS",
+        "NCD_UPLOAD_WORKERS",
         "NEURACORE_DAEMON_PROFILE",
     ];
 
@@ -329,6 +341,8 @@ mod tests {
         std::env::set_var("NCD_API_KEY", "secret-key");
         std::env::set_var("NEURACORE_ORG_ID", "org-42");
         std::env::set_var("NCD_VIDEO_CODEC", "h264_medium");
+        std::env::set_var("NCD_TRANSCODE_WORKERS", "6");
+        std::env::set_var("NCD_UPLOAD_WORKERS", "32");
         std::env::set_var("NEURACORE_DAEMON_PROFILE", "lab");
 
         let config = env_config_overrides();
@@ -350,6 +364,8 @@ mod tests {
         assert_eq!(config.api_key.as_deref(), Some("secret-key"));
         assert_eq!(config.current_org_id.as_deref(), Some("org-42"));
         assert_eq!(config.video_codec.as_deref(), Some("h264_medium"));
+        assert_eq!(config.transcode_workers, Some(6));
+        assert_eq!(config.upload_workers, Some(32));
         assert_eq!(active_profile_name().as_deref(), Some("lab"));
 
         // 2) An empty string is treated as unset; an unparseable numeric is
@@ -386,6 +402,8 @@ mod tests {
         assert_eq!(config.api_key, None);
         assert_eq!(config.current_org_id, None);
         assert_eq!(config.video_codec, None);
+        assert_eq!(config.transcode_workers, None);
+        assert_eq!(config.upload_workers, None);
         assert_eq!(active_profile_name(), None);
 
         // Restore the pre-test environment for other tests in this binary.

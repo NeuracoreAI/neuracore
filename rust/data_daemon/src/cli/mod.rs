@@ -131,6 +131,12 @@ enum ProfileCommand {
         /// (same encode at a faster preset) or `h264_lossless`.
         #[arg(long = "video-codec", visible_alias = "video_codec")]
         video_codec: Option<String>,
+        /// Concurrent ffmpeg transcodes (default: half the cores, minimum 2).
+        #[arg(long = "transcode-workers", visible_alias = "transcode_workers")]
+        transcode_workers: Option<i64>,
+        /// Concurrent trace uploads (default: 16).
+        #[arg(long = "upload-workers", visible_alias = "upload_workers")]
+        upload_workers: Option<i64>,
     },
     /// Get a profile's configuration.
     Get {

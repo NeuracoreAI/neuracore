@@ -5,8 +5,10 @@ including joint positions, camera images, point clouds, and custom data streams.
 All logging functions support optional robot identification and timestamping.
 """
 
+import io
 import json
 import logging
+import struct
 import time
 from dataclasses import dataclass
 from itertools import islice
@@ -27,6 +29,7 @@ from neuracore_types import (
     RGBCameraData,
 )
 from neuracore_types.utils import validate_safe_name
+from PIL import Image
 
 from neuracore.api.core import _get_robot
 from neuracore.core.exceptions import RobotError
@@ -392,6 +395,9 @@ def _validate_extrinsics_intrinsics(
             raise ValueError("Intrinsics must be a numpy array of shape (3, 3)")
         intrinsics = intrinsics.astype(np.float16)
     return extrinsics, intrinsics
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _log_camera_data(
@@ -1281,6 +1287,85 @@ def log_rgb(
         instance,
         dry_run,
     )
+
+
+def log_rgb_png(
+    name: str,
+    png: bytes,
+    extrinsics: np.ndarray | None = None,
+    intrinsics: np.ndarray | None = None,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log an RGB frame that is already a PNG.
+
+    The PNG goes to the data daemon as is, which saves the decode and the
+    re-encode of log_rgb. The frame is decoded only for live data; with live
+    data off, the robot's latest RGB data has no decoded frame.
+
+    Args:
+        name: Unique identifier for the camera
+        png: PNG bytes, 8-bit RGB and not interlaced
+        extrinsics: Optional extrinsics matrix (4x4)
+        intrinsics: Optional intrinsics matrix (3x3)
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If the PNG is not 8-bit RGB or its size changes
+    """
+    width, height = _png_dimensions(png)
+    extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
+    storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+    if timestamp is None:
+        timestamp = time.time()
+    camera_data = RGBCameraData(
+        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
+    )
+    robot = _get_robot(robot_name, instance)
+    str_id = f"{DataType.RGB_IMAGES.value}:{name}"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = RGBDataStream(storage_name, width, height)
+        robot.add_data_stream(str_id, stream)
+    assert isinstance(
+        stream, VideoDataStream
+    ), "Expected stream as instance of VideoDataStream"
+    if stream.width != width or stream.height != height:
+        raise ValueError(
+            f"Camera image dimensions {width}x{height} do not match "
+            f"stream dimensions {stream.width}x{stream.height}"
+        )
+    live = not get_provide_live_data_enabled_manager().is_disabled()
+    frame = _decode_png(png) if live else None
+    stream.log(camera_data, frame=frame, recording_epoch=robot._recording_epoch())
+    robot._get_daemon_recording_context().log_rgb_png(storage_name, png, timestamp)
+    if frame is not None:
+        _publish_video_to_p2p(robot, name, DataType.RGB_IMAGES, camera_data, frame)
+
+
+def _decode_png(png: bytes) -> np.ndarray:
+    with Image.open(io.BytesIO(png)) as image:
+        return np.array(image.convert("RGB"))
+
+
+def _png_dimensions(png: bytes) -> tuple[int, int]:
+    """Return (width, height) from a PNG header.
+
+    Raises:
+        ValueError: If png is not a PNG.
+    """
+    if len(png) < 24 or png[:8] != _PNG_SIGNATURE or png[12:16] != b"IHDR":
+        raise ValueError("Payload is not a PNG")
+    width, height = struct.unpack(">II", png[16:24])
+    return width, height
 
 
 def log_depth(

@@ -134,6 +134,8 @@ Or via environment variable (bytes):
 export NCD_SPOOL_LIMIT=8589934592   # 8 GiB
 ```
 
+The dataset importer sets the spool limit itself. Its default, `--spool-limit auto`, uses 25% of the free disk. See [dataset_importer.md](dataset_importer.md).
+
 `0` disables the bound entirely (not recommended, you lose the disk-fill
 safety net). Restart the daemon after changing this.
 

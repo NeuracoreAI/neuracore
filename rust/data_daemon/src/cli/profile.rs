@@ -35,6 +35,8 @@ pub fn run(command: ProfileCommand) {
             api_key,
             current_org_id,
             video_codec,
+            transcode_workers,
+            upload_workers,
         } => {
             let updates = DaemonConfig {
                 storage_limit,
@@ -48,6 +50,8 @@ pub fn run(command: ProfileCommand) {
                 api_key,
                 current_org_id,
                 video_codec,
+                transcode_workers,
+                upload_workers,
             };
             update(&profiles, name.as_deref(), &updates);
         }

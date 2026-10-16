@@ -220,9 +220,10 @@ pub struct TraceActorContext {
 }
 
 impl TraceActorContext {
-    /// Build a context with the default ffmpeg concurrency cap. Suitable for
-    /// production wiring; tests that need a deterministic transcode order may
-    /// prefer [`TraceActorContext::with_ffmpeg_permits`].
+    /// Build a context with the default ffmpeg concurrency cap. Production
+    /// wiring uses [`TraceActorContext::with_ffmpeg_permits`] so the
+    /// configured `transcode_workers` applies.
+    #[cfg(test)]
     pub fn new(
         recordings_root: impl Into<std::path::PathBuf>,
         storage_budget: Arc<StorageBudget>,
@@ -272,8 +273,7 @@ impl TraceActorContext {
     }
 
     /// Attach a daemon event bus to this context. Returns `self` so it
-    /// composes cleanly with [`TraceActorContext::new`] /
-    /// [`TraceActorContext::with_ffmpeg_permits`].
+    /// composes cleanly with [`TraceActorContext::with_ffmpeg_permits`].
     pub fn with_event_bus(mut self, bus: crate::state::EventBus) -> Self {
         self.event_bus = Some(bus);
         self

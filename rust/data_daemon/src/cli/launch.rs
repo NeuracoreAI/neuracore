@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::cli::coordinators::{build_api_client, spawn_cloud_coordinators};
 use crate::cli::launch_logging::{
@@ -22,7 +22,7 @@ use crate::cloud::{
 };
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
-use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
+use crate::config::{positive_count, resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
 use crate::connection::spawn_wakelock;
 use crate::encoding::video_encoder::VideoEncoder;
 use crate::ipc::listener;
@@ -32,7 +32,7 @@ use crate::lifecycle::pidfile::{PidFile, PidFileError};
 use crate::lifecycle::recovery::{cleanup_stale_ipc, reclaim_stale_pid_file, PidReclaim};
 use crate::lifecycle::shutdown::{install_shutdown_handler, ShutdownSignal};
 use crate::pipeline::dispatcher::{self, DispatcherContext};
-use crate::pipeline::trace_actor::TraceActorContext;
+use crate::pipeline::trace_actor::{default_ffmpeg_concurrency, TraceActorContext};
 use crate::state::{EventBus, SqliteStateStore};
 use crate::storage::budget::{StorageBudget, StoragePolicy};
 use data_daemon_shared::paths;
@@ -344,10 +344,14 @@ fn run_daemon(
             mpsc::channel::<ConfigRefreshRequest>(CONFIG_REFRESH_CHANNEL_CAPACITY);
 
         let actor_context = Arc::new(
-            TraceActorContext::new(
+            TraceActorContext::with_ffmpeg_permits(
                 recordings_root.clone(),
                 storage_budget,
                 video_encoder,
+                Arc::new(Semaphore::new(
+                    positive_count(config_for_runtime.transcode_workers)
+                        .unwrap_or_else(default_ffmpeg_concurrency),
+                )),
                 trace_write_handle.clone(),
                 json_write_handle,
             )
