@@ -2,6 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -85,14 +86,19 @@ class TrainingLogger(ABC):
     def log_histogram(
         self,
         name: str,
-        values: np.ndarray | torch.Tensor,
+        values: np.ndarray | torch.Tensor | Mapping[str, torch.Tensor],
         step: int,
     ) -> None:
-        """Log a histogram of values.
+        """Log a histogram of values, or one histogram per tensor of a mapping.
+
+        A mapping logs the histogram of each tensor under the name
+        "<name>/<key>".
 
         Args:
-            name: Name for the histogram.
-            values: Values to create the histogram from, as numpy array or torch tensor.
+            name: Name for the histogram, or the prefix of the histogram names when
+                values is a mapping.
+            values: Values to create the histogram from, as numpy array or torch
+                tensor, or a mapping from histogram name suffix to tensor.
             step: Training step.
         """
         pass

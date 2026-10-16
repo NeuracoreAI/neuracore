@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -99,16 +100,17 @@ class CloudTrainingLogger(TrainingLogger):
     def log_histogram(
         self,
         name: str,
-        values: np.ndarray | torch.Tensor,
+        values: np.ndarray | torch.Tensor | Mapping[str, torch.Tensor],
         step: int,
     ) -> None:
-        """Log a histogram of values.
+        """Log a histogram of values, or one histogram per tensor of a mapping.
 
         Args:
-            name: Name for the histogram.
-            values: Values to create histogram from.
+            name: Name for the histogram, or the prefix of the histogram names when
+                values is a mapping.
+            values: Values to create the histogram from, as numpy array or torch
+                tensor, or a mapping from histogram name suffix to tensor.
             step: Training step.
-            bins: Binning method ("tensorflow", "auto", "fd", etc.).
         """
         pass  # TODO: "Not yet supported for cloud. Coming soon.
 
