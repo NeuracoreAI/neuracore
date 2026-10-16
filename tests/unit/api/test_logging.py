@@ -128,7 +128,7 @@ def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
     robot.id = None
 
 
-def test_log_depth_keeps_uint16_and_its_scale_on_the_data_stream(
+def test_log_depth_uint16_reaches_the_bridge_unchanged_with_its_scale(
     temp_config_dir,
     mock_auth_requests,
     reset_neuracore,
@@ -136,7 +136,7 @@ def test_log_depth_keeps_uint16_and_its_scale_on_the_data_stream(
     monkeypatch,
     mocked_org_id,
 ):
-    """Keep uint16 depth and its scale on the stream and send meters to the bridge."""
+    """uint16 depth reaches the bridge unchanged, with its scale and no clipping."""
     nc.login("test_api_key")
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/robots",
@@ -154,11 +154,10 @@ def test_log_depth_keeps_uint16_and_its_scale_on_the_data_stream(
     nc.log_depth("depth_u16", depth, depth_scale_m=0.001)
 
     call = native.log_frame.call_args
-    assert call.args[6] == "float32"
-    recorded = np.frombuffer(bytes(call.args[7]), dtype="<f4").reshape(2, 2)
-    np.testing.assert_array_equal(
-        recorded, depth.astype(np.float32) * np.float32(0.001)
-    )
+    assert call.args[6] == "uint16"
+    recorded = np.frombuffer(bytes(call.args[7]), dtype="<u2").reshape(2, 2)
+    np.testing.assert_array_equal(recorded, depth)
+    assert call.args[10] == 0.001
     latest = robot.get_data_stream(
         f"{DataType.DEPTH_IMAGES.value}:depth_u16"
     ).get_latest_data()
@@ -179,7 +178,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
 ):
     """log_frame's native dtype must be derived from the array, per call.
 
-    RGB forwards "uint8" and depth forwards "float32".
+    RGB forwards "uint8" and depth forwards "uint16".
     """
     nc.login("test_api_key")
     mock_auth_requests.post(
@@ -205,7 +204,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
     }
     assert calls_by_dtype == {
         DataType.RGB_IMAGES.value: "uint8",
-        DataType.DEPTH_IMAGES.value: "float32",
+        DataType.DEPTH_IMAGES.value: "uint16",
     }
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
