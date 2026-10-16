@@ -92,12 +92,6 @@ pub(crate) async fn upload_one_file(
         .map_err(|error| format!("stat {} failed: {error}", local_path.display()))?;
     let total_bytes = metadata.len();
     let original_uri = session_uri.clone();
-    if total_bytes == 0 {
-        return Ok(UploadFileOutcome {
-            bytes_uploaded: 0,
-            final_session_uri: None,
-        });
-    }
 
     let mut file = File::open(local_path)
         .await
@@ -105,6 +99,7 @@ pub(crate) async fn upload_one_file(
     let mut offset: u64 = 0;
     let mut crc: u32 = 0;
     let mut server_crc: Option<u32> = None;
+    let mut finalised = false;
     let mut session_uri = session_uri;
     let recording_index = trace.recording_index;
     let trace_id = trace.trace_id.clone();
@@ -161,6 +156,7 @@ pub(crate) async fn upload_one_file(
                 crc = crc32c::crc32c_append(crc, &chunk);
                 if is_final {
                     server_crc = extract_server_crc32c(&headers, &body);
+                    finalised = true;
                 }
                 offset += chunk_len as u64;
             }
@@ -296,6 +292,33 @@ pub(crate) async fn upload_one_file(
         }
     }
 
+    // The loop can end on a 308 without a 2xx; only a 2xx means the object
+    // exists, so ask the server for the upload's status.
+    if !finalised {
+        let outcome = put_chunk(
+            client,
+            PutChunkRequest {
+                session_uri: &session_uri,
+                chunk: Bytes::new(),
+                chunk_start: total_bytes,
+                chunk_end: total_bytes,
+                total_bytes,
+                is_final: true,
+                recording_index,
+                trace_id: &trace_id,
+                cloud_filepath,
+            },
+        )
+        .await?;
+        if !matches!(outcome, PutChunkOutcome::Accepted { .. }) {
+            return Err(format!(
+                "upload of {} was not finalised by the server",
+                local_path.display()
+            )
+            .into());
+        }
+    }
+
     // Persist the final offset once so the DB row reflects the completed bytes
     // even if the last persisted checkpoint was several chunks back.
     if offset != last_persisted_offset {
@@ -380,7 +403,9 @@ async fn put_chunk(
         cloud_filepath,
     } = request;
     let mut headers = HeaderMap::new();
-    let content_range = if is_final {
+    let content_range = if chunk.is_empty() {
+        format!("bytes */{total_bytes}")
+    } else if is_final {
         format!("bytes {chunk_start}-{chunk_end}/{total_bytes}")
     } else {
         format!("bytes {chunk_start}-{chunk_end}/*")
