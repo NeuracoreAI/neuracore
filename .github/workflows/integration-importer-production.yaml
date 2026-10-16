@@ -1,4 +1,4 @@
-name: Integration PF - Importer (Production)
+name: Integration PF - Importer / Exporter (Production)
 
 on:
   schedule:
@@ -102,10 +102,10 @@ jobs:
         uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
         with:
           version: ${{ steps.harness.outputs.release-tag }}
-          extras: dev,import
+          extras: dev,import,export
           pytorch-cpu: "true"
 
-      - name: Run Importer Integration Tests
+      - name: Run Importer / Exporter Integration Tests
         env:
           NEURACORE_API_URL: https://api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
@@ -121,7 +121,11 @@ jobs:
             -v
             -k "not shared"
           )
-          pytest "${pytest_args[@]}" "tests/integration/importer_exporter/test_${{ matrix.suite }}_dataset_import.py"
+          test_paths=("tests/integration/importer_exporter/test_${{ matrix.suite }}_dataset_import.py")
+          if [[ "${{ matrix.suite }}" == "mcap" ]]; then
+            test_paths+=("tests/integration/importer_exporter/test_importer_exporter.py")
+          fi
+          pytest "${pytest_args[@]}" "${test_paths[@]}"
 
       - name: Upload data-daemon diagnostics
         if: always()
