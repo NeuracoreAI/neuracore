@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
+import requests
 import typer
 from neuracore_types import TrainingJob, TrainingJobStatus
 from omegaconf import OmegaConf
@@ -19,7 +20,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from neuracore.api.training import delete_training_job
+from neuracore.api.training import (
+    delete_training_job,
+    download_training_checkpoint,
+    list_training_checkpoints,
+)
+from neuracore.core.cli.cache_commands import _format_bytes
 from neuracore.core.cli.training_display import (
     STATUS_STYLES,
     RunDisplayRow,
@@ -623,6 +629,117 @@ def delete_training(
     except (AuthenticationError, ConfigError, TrainingRunError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)
+
+
+@training_app.command("list-checkpoints")
+def list_checkpoints(
+    training_name: str = typer.Option(
+        ...,
+        "--training-name",
+        "-t",
+        help="Name or ID of the cloud training run.",
+    ),
+) -> None:
+    """List the checkpoints available for download from a cloud training run."""
+    try:
+        job_id, job = _resolve_cloud_training_job(training_name)
+        checkpoints = list_training_checkpoints(job_id)
+    except (
+        AuthenticationError,
+        ConfigError,
+        TrainingRunError,
+        ValueError,
+        requests.exceptions.RequestException,
+    ) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    if not checkpoints:
+        typer.echo(f"No checkpoints found for training run '{job.name}'.")
+        return
+
+    rows = [
+        [
+            str(checkpoint.epoch),
+            checkpoint.name,
+            (
+                _format_bytes(checkpoint.size_bytes)
+                if checkpoint.size_bytes is not None
+                else "-"
+            ),
+            (
+                checkpoint.updated_at.strftime("%Y-%m-%d %H:%M:%S")
+                if checkpoint.updated_at
+                else "-"
+            ),
+        ]
+        for checkpoint in checkpoints
+    ]
+
+    if sys.stdout.isatty():
+        table = Table(title=f"Checkpoints for '{job.name}'", box=box.SIMPLE_HEAVY)
+        table.add_column("Epoch", justify="right")
+        table.add_column("Name")
+        table.add_column("Size", justify="right")
+        table.add_column("Updated")
+        for row in rows:
+            table.add_row(*row)
+        console.print(table)
+    else:
+        # Plain-text only when not a TTY (piped/CI) so rich table may not render.
+        for row in rows:
+            typer.echo(" | ".join(row))
+
+
+@training_app.command("download-checkpoint")
+def download_checkpoint(
+    training_name: str = typer.Option(
+        ...,
+        "--training-name",
+        "-t",
+        help="Name or ID of the cloud training run.",
+    ),
+    epoch: int | None = typer.Option(
+        None,
+        "--epoch",
+        "-e",
+        help="Epoch of the checkpoint to download. Defaults to the latest.",
+    ),
+    output_dir: Path = typer.Option(
+        Path("."),
+        "--output-dir",
+        "-o",
+        help="Directory to save the checkpoint into.",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite the checkpoint file if it already exists.",
+    ),
+) -> None:
+    """Download a checkpoint from a cloud training run."""
+    try:
+        job_id, _ = _resolve_cloud_training_job(training_name)
+        path = download_training_checkpoint(
+            job_id, epoch=epoch, output_dir=output_dir, overwrite=force
+        )
+    except FileExistsError as exc:
+        typer.echo(f"Error: {exc}. Use --force to overwrite.", err=True)
+        raise typer.Exit(code=1)
+    except (
+        AuthenticationError,
+        ConfigError,
+        TrainingRunError,
+        ValueError,
+        requests.exceptions.RequestException,
+    ) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Saved checkpoint to {path}")
 
 
 @training_app.command("start")
