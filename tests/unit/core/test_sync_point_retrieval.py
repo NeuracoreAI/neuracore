@@ -37,7 +37,8 @@ class DummyData:
     }
     depth_image = {
         "name": "test_depth_camera",
-        "image": np.ones((100, 100), dtype=np.float32),
+        "image": np.full((100, 100), 1000, dtype=np.uint16),
+        "depth_scale_m": 0.001,
         "extrinsics": np.eye(4, dtype=np.float32),
         "intrinsics": np.eye(3, dtype=np.float32),
     }
@@ -142,10 +143,12 @@ def setup_test_config():
                 depth=data["image"],
                 extrinsics=data["extrinsics"],
                 intrinsics=data["intrinsics"],
+                depth_scale_m=data["depth_scale_m"],
             ),
             expected_value=lambda data: {
                 data["name"]: {
                     "frame": data["image"],
+                    "depth_scale_m": data["depth_scale_m"],
                     "extrinsics": data["extrinsics"].astype(np.float16),
                     "intrinsics": data["intrinsics"].astype(np.float16),
                 }
