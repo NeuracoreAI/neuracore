@@ -382,9 +382,11 @@ class DistributedTrainer:
                 train_elapsed = time.perf_counter() - epoch_t0
 
                 # Save checkpoint and artifacts periodically (only from rank 0)
+                checkpoint_saved = False
                 if self.rank == 0 and epoch % self.save_freq == 0:
                     save_t0 = time.perf_counter()
                     self.save_checkpoint(epoch, train_loss_metrics)
+                    checkpoint_saved = True
 
                     # Save model artifacts
                     self.storage_handler.save_model_artifacts(
@@ -416,6 +418,7 @@ class DistributedTrainer:
                     self.storage_handler.update_training_progress(
                         TrainingProgress(
                             epoch=epoch,
+                            completed_epochs=epoch if checkpoint_saved else None,
                             step=self.global_train_step,
                             seconds_per_epoch=seconds_per_epoch,
                         )

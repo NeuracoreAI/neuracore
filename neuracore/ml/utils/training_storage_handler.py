@@ -474,6 +474,8 @@ class TrainingStorageHandler(UploadStorageMixin):
                 self._last_reported_epoch = progress.epoch
             elif "epoch" not in pending and self._last_reported_epoch >= 0:
                 pending["epoch"] = self._last_reported_epoch
+            if progress.completed_epochs is not None:
+                pending["completed_epochs"] = progress.completed_epochs
             if progress.step is not None:
                 pending["step"] = progress.step
                 self._last_reported_step = progress.step
