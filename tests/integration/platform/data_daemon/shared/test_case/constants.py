@@ -118,9 +118,9 @@ RECORDING_CONTROLS = (CONTROL_LOCAL, CONTROL_REMOTE, CONTROL_SPLIT_PROCESS)
 
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
-DepthMode = Literal["float16", "float32"]
-"""Depth camera sample dtype, matching the wire labels `nc.log_depth()`
-derives from the array's own dtype (`image.dtype.name`)."""
+DepthMode = Literal["uint16_tenth_mm", "uint16_mm"]
+"""Unit of the uint16 depth frames, logged with the depth_scale_m in
+DEPTH_SCALE_M_BY_MODE."""
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
 RecordingControl = Literal["local", "remote", "split"]
@@ -336,8 +336,7 @@ LOSSLESS_CONTENT_BYTES_PER_PIXEL = 0.1
 
 # `encode_depth_frame` builds each frame as
 # floor + per-frame-base + row-gradient + col-gradient, all expressed as
-# fractions of MAX_DEPTH (see neuracore.core.utils.depth_utils.MAX_DEPTH) so
-# the pattern automatically stays proportional if that constant ever changes.
+# fractions of DEPTH_SATURATED_VALUE, the largest uint16 sensor value.
 # The floor keeps every pixel strictly non-zero; the row/col fractions are
 # deliberately unequal so a width/height transpose bug shifts the decoded
 # pattern rather than leaving it looking correct.
@@ -347,13 +346,20 @@ DEPTH_FRAME_ROW_FRACTION = 0.3
 DEPTH_FRAME_COL_FRACTION = 0.15
 DEPTH_FRAME_BASE_MODULUS = 997  # prime; spreads per-frame bases pseudo-randomly
 
-# Numerical tolerance for comparing a value retrieved from a synchronized
-# recording against the value that was actually passed to `nc.log_depth()`
-# (after its source-dtype cast). The only lossy step between those two points
-# is the 24-bit depth-to-RGB24 storage quantization
-# (MAX_DEPTH / (2**24 - 1) ~= 5.96e-7 m) plus ordinary float32 rounding across
-# the encode/decode arithmetic — both far smaller than this. Genuine
-# corruption (wrong channel order, wrong dtype, transposed axes) produces
-# errors many orders of magnitude larger, so this stays tight enough to catch
-# it.
-DEPTH_ROUND_TRIP_ATOL_M = 1e-4
+# Meters per unit each uint16 depth mode logs with: a RealSense D405 counts
+# tenths of a millimeter, many other sensors whole millimeters.
+DEPTH_SCALE_M_BY_MODE: dict[DepthMode, float] = {
+    "uint16_tenth_mm": 0.0001,
+    "uint16_mm": 0.001,
+}
+
+# Every depth frame carries a square of no-return pixels (value 0) in its
+# bottom right corner and one saturated pixel (65535) in its bottom left
+# corner. Both sit away from pixel (0, 0), which frame matching reads first.
+DEPTH_HOLE_SIZE = 8
+DEPTH_SATURATED_VALUE = 65535
+
+# Bounds on the depth viewer video, in grey levels, against the log curve of
+# the frames in the lossless archive.
+DEPTH_PREVIEW_MEDIAN_LEVEL_TOLERANCE = 2.0
+DEPTH_PREVIEW_MAX_CHROMA_OFFSET = 2.0

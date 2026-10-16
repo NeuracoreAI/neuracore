@@ -39,6 +39,7 @@ bgra
 bibtex
 bigendian
 bigym
+bindgen
 blit
 blowaway
 bodyless
@@ -316,6 +317,7 @@ MJFC
 mline
 mocap
 moov
+moveaxis
 movflags
 mpng
 mpsa
@@ -455,6 +457,7 @@ REUSEADDR
 rgba
 rgbd
 rgbs
+rint
 rlds
 rlib
 RLIM
@@ -466,6 +469,7 @@ roundoff
 rowwise
 rposition
 rsplit
+rtol
 rtype
 rustls
 rustup
@@ -608,6 +612,7 @@ xmat
 xmls
 xmlstr
 xquat
+xsize
 xyzrgb
 xyzw
 ylabel
