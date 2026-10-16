@@ -15,6 +15,11 @@
 //! id, so an offline recording simply stays pending until the daemon is online
 //! and `/recording/start` lands.
 //!
+//! A recording cancelled before its start POST goes out is settled here: no
+//! start is sent and the cancel is stamped as delivered, since the backend
+//! never heard of it. [`notify_backend`] explains why this notifier, not the
+//! cancel notifier, owns that case.
+//!
 //! Every POST opens a distinct backend recording — the backend never reuses a
 //! pending one for the source — so recordings that follow each other with no
 //! gap stay separate no matter what order their stop and start notifications
@@ -57,6 +62,24 @@ impl RecordingNotifier for StartNotifier {
         store: &Arc<SqliteStateStore>,
     ) -> Result<Vec<RecordingRow>, StateStoreError> {
         store.recordings_pending_start_notify().await
+    }
+
+    /// Only the cancelled rows, which are settled locally without a POST.
+    ///
+    /// `/recording/start` is not idempotent: a start the backend committed but
+    /// the client never saw (a timeout) would become another orphaned backend
+    /// recording on every re-sweep. The full set is still swept at startup and
+    /// after a lag.
+    async fn periodic_pending(
+        &self,
+        store: &Arc<SqliteStateStore>,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        Ok(store
+            .recordings_pending_start_notify()
+            .await?
+            .into_iter()
+            .filter(|row| row.cancelled_at.is_some())
+            .collect())
     }
 
     async fn notify(&self, ctx: &NotifierCtx, recording_index: i64) {
@@ -112,7 +135,24 @@ async fn notify_backend(
         return;
     }
     if row.cancelled_at.is_some() {
-        // Cancelled before the POST was sent: no backend recording is opened.
+        // Cancelled before `/recording/start` went out, so the backend has
+        // nothing to cancel. Only this notifier can settle that: it sends its
+        // POSTs inline, so here no start can be in flight, whereas to the
+        // cancel notifier a missing cloud id may just mean the start response
+        // has not arrived yet.
+        tracing::info!(
+            recording_index,
+            "recording cancelled before its start was notified; \
+             nothing to cancel server-side"
+        );
+        if let Err(error) = store.mark_recording_cancel_notified(recording_index).await {
+            // The row stays in the pending-start set, so the next sweep retries.
+            tracing::warn!(
+                %error,
+                recording_index,
+                "failed to settle the cancel of a never-started recording",
+            );
+        }
         return;
     }
 
@@ -258,6 +298,107 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": recording_id })),
             )
+    }
+
+    /// A recording cancelled before its start POST goes out is settled without
+    /// a POST, so the reaper can reclaim it.
+    #[tokio::test]
+    async fn settles_a_recording_cancelled_before_its_start_was_posted() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-never-used").mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store).await;
+        store
+            .cancel_recording(index, 5_000_000_000)
+            .await
+            .expect("cancel");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        // The startup sweep alone must settle it — the recording is cancelled,
+        // so no `RecordingStarted` event is coming.
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let row = store
+                    .get_recording(index)
+                    .await
+                    .expect("get")
+                    .expect("exists");
+                if row.backend_cancel_notified_at.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the sweep must settle the cancel within 3s");
+
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "a cancelled recording must not open a backend recording"
+        );
+        assert!(
+            store
+                .get_recording(index)
+                .await
+                .expect("get")
+                .expect("exists")
+                .recording_id
+                .is_none(),
+            "no cloud id is minted for a recording the backend never heard of"
+        );
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    /// The periodic re-sweep must never re-send a live recording's start.
+    #[tokio::test]
+    async fn resweep_never_reposts_a_live_recordings_start() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-orphan").mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        let live = seed_recording(&store).await;
+        let cancelled = seed_recording(&store).await;
+        store
+            .cancel_recording(cancelled, 5_000_000_000)
+            .await
+            .expect("cancel");
+
+        // Both rows are pending a start POST; only the cancelled one is safe
+        // to re-drive on a timer.
+        let full = StartNotifier
+            .pending(&Arc::new(store.clone()))
+            .await
+            .unwrap();
+        assert_eq!(full.len(), 2, "the full sweep still sees both");
+        let periodic = StartNotifier
+            .periodic_pending(&Arc::new(store.clone()))
+            .await
+            .unwrap();
+        let indices: Vec<i64> = periodic.iter().map(|row| row.recording_index).collect();
+        assert_eq!(
+            indices,
+            vec![cancelled],
+            "the periodic re-sweep must skip the live recording"
+        );
+        assert_ne!(indices, vec![live]);
     }
 
     #[tokio::test]

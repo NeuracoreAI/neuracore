@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -18,16 +19,32 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     assert_post_test_storage_state,
     verify_cloud_results,
 )
+from tests.integration.platform.data_daemon.shared.db_constants import (
+    COLUMN_RECORDING_INDEX,
+    COLUMN_UPLOAD_STATUS,
+    TRACE_UPLOAD_UPLOADED,
+    TRACES_TABLE,
+)
+from tests.integration.platform.data_daemon.shared.db_helpers import (
+    fetch_all_rows,
+    fetch_recording,
+    wait_for_recording_index_for_source,
+)
+from tests.integration.platform.data_daemon.shared.disk_helpers import (
+    list_recording_indexes_on_disk,
+)
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
+    PerThread,
     Synchronous,
     case_ids,
     has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    CONTROL_REMOTE,
     CONTROL_SPLIT_PROCESS,
     MAX_TIME_TO_START_S,
     camera_names,
@@ -41,6 +58,9 @@ from tests.integration.platform.data_daemon.shared.test_case.context_worker impo
     create_testing_dataset_name,
     log_frames,
 )
+from tests.integration.platform.data_daemon.shared.test_case.producers import (
+    make_producer_session,
+)
 from tests.integration.platform.data_daemon.shared.test_case.recording_control import (
     await_gate,
     make_recording_controller,
@@ -52,7 +72,26 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 logger = logging.getLogger(__name__)
 
-_CASES = DataDaemonTestBatch(
+_CLEANUP_CASES = DataDaemonTestBatch(
+    cases=(
+        Synchronous(
+            duration_sec=5,
+            joint_count=4,
+            video_count=1,
+            image_width=64,
+            image_height=64,
+        ),
+        PerThread(
+            duration_sec=5,
+            joint_count=4,
+            video_count=1,
+            image_width=64,
+            image_height=64,
+            recording_control=CONTROL_REMOTE,
+        ),
+    ),
+).as_cases()
+_NEIGHBOR_CASES = DataDaemonTestBatch(
     cases=(
         Synchronous(
             duration_sec=5,
@@ -89,7 +128,62 @@ def _await_window_open(robot: object) -> None:
     )
 
 
-@pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
+_CANCEL_CLEANUP_TIMEOUT_S = 75.0
+
+
+def _trace_rows(recording_index: int) -> list[dict[str, Any]]:
+    """Return every trace still tied to the recording, including orphans."""
+    return [
+        row
+        for row in fetch_all_rows(TRACES_TABLE)
+        if int(row[COLUMN_RECORDING_INDEX]) == recording_index
+    ]
+
+
+def _await_materialized_recording(recording_index: int) -> None:
+    """Prove the test is cancelling real, not-yet-uploaded local state."""
+    deadline = time.monotonic() + MAX_TIME_TO_START_S
+    last_state: tuple[bool, int, bool, bool] | None = None
+    while time.monotonic() < deadline:
+        recording_exists = fetch_recording(recording_index) is not None
+        traces = _trace_rows(recording_index)
+        on_disk = recording_index in list_recording_indexes_on_disk()
+        has_pending_trace = any(
+            trace[COLUMN_UPLOAD_STATUS] != TRACE_UPLOAD_UPLOADED for trace in traces
+        )
+        last_state = (recording_exists, len(traces), on_disk, has_pending_trace)
+        if recording_exists and traces and on_disk and has_pending_trace:
+            return
+        time.sleep(0.1)
+
+    raise AssertionError(
+        f"Recording {recording_index} never materialized before cancel; "
+        f"last state was {last_state}"
+    )
+
+
+def _await_recording_fully_reclaimed(recording_index: int) -> None:
+    """Wait until the cancelled recording is absent from DB and disk."""
+    deadline = time.monotonic() + _CANCEL_CLEANUP_TIMEOUT_S
+    last_state: tuple[dict[str, Any] | None, list[dict[str, Any]], bool] | None = None
+    while time.monotonic() < deadline:
+        recording = fetch_recording(recording_index)
+        traces = _trace_rows(recording_index)
+        on_disk = recording_index in list_recording_indexes_on_disk()
+        last_state = (recording, traces, on_disk)
+        if recording is None and not traces and not on_disk:
+            return
+        time.sleep(0.25)
+
+    recording, traces, on_disk = last_state or (None, [], False)
+    raise AssertionError(
+        f"Cancelled recording {recording_index} was not fully reclaimed within "
+        f"{_CANCEL_CLEANUP_TIMEOUT_S}s: recording_row={recording!r}, "
+        f"trace_rows={traces!r}, on_disk={on_disk}"
+    )
+
+
+@pytest.mark.parametrize("case", _CLEANUP_CASES, ids=case_ids(_CLEANUP_CASES))
 def test_cancel_recording_produces_no_data(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
@@ -98,8 +192,8 @@ def test_cancel_recording_produces_no_data(
 ) -> None:
     """Verify that cancelling a recording discards all logged data.
 
-    Runs for every way a case can make the cancel: from this process, and from
-    a peer that knows of the window only because the backend said so.
+    Runs both real paths: a producer-side SDK cancel and a backend-side cancel
+    delivered to the daemon by the recording notification stream.
     """
     if not has_configured_org():
         pytest.skip(
@@ -128,16 +222,26 @@ def test_cancel_recording_produces_no_data(
                     robot = nc.connect_robot(robot_name, overwrite=False)
 
                 controller = make_recording_controller(spec, robot=robot)
-                controller.open(time.time())
-                _await_window_open(robot)
+                producer = make_producer_session(spec, marker_name="marker_cancel")
+                producer.start()
+                try:
+                    controller.open(time.time())
+                    _await_window_open(robot)
 
-                log_frames(
-                    spec, robot=robot, recording_index=0, marker_name="marker_cancel"
-                )
+                    producer.run_recording(0)
 
-                controller.cancel(time.time())
-
-                time.sleep(5)
+                    # A backend-announced window is materialized lazily by its
+                    # first datum. Resolve its row only after publishing data;
+                    # waiting before that deadlocks the remote-control case.
+                    recording_index = wait_for_recording_index_for_source(
+                        str(robot.id),
+                        int(robot.instance),
+                    )
+                    _await_materialized_recording(recording_index)
+                    controller.cancel(time.time())
+                finally:
+                    producer.finish()
+                _await_recording_fully_reclaimed(recording_index)
 
                 with Timer(
                     MAX_TIME_TO_START_S,
@@ -162,7 +266,7 @@ def test_cancel_recording_produces_no_data(
     assert_post_test_storage_state(case.storage_state_action)
 
 
-@pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
+@pytest.mark.parametrize("case", _NEIGHBOR_CASES, ids=case_ids(_NEIGHBOR_CASES))
 @pytest.mark.parametrize("gap_s", [0, 10], ids=["no_gap", "10s_gap"])
 def test_cancel_either_side_of_a_valid_recording(
     gap_s: int,
@@ -234,8 +338,10 @@ def test_cancel_either_side_of_a_valid_recording(
                     time.sleep(gap_s)
 
                 # --- valid recording ---
-                wall_started_at = time.time()
-                controller.open(wall_started_at)
+                recording_capture_start_s = time.time()
+                recording_capture_stop_s = recording_capture_start_s + case.duration_sec
+                opened = controller.open(recording_capture_start_s)
+                wall_started_at = opened.settled_at
                 resumed_recording_id = robot.get_cloud_recording_id()
                 assert resumed_recording_id is not None
 
@@ -243,8 +349,8 @@ def test_cancel_either_side_of_a_valid_recording(
                     spec, robot=robot, recording_index=0, marker_name="marker_resume"
                 )
 
-                closed = controller.close(time.time())
-                wall_stopped_at = closed.settled_at
+                controller.close(recording_capture_stop_s)
+                wall_stopped_at = time.time()
 
                 # --- cancelled window behind the valid recording ---
                 controller.open(time.time())

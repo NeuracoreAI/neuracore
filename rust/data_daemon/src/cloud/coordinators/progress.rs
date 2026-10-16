@@ -24,7 +24,8 @@ use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::{
-    ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceRecord, TraceWriteStatus,
+    EventBus, ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceRecord,
+    TraceWriteStatus,
 };
 
 /// Handle returned by [`spawn_progress_reporter`].
@@ -44,6 +45,7 @@ impl ProgressReporterHandle {
 /// Spawn the progress reporter task on the current Tokio runtime.
 pub fn spawn_progress_reporter(
     store: SqliteStateStore,
+    bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
@@ -61,7 +63,7 @@ pub fn spawn_progress_reporter(
                     break;
                 }
                 _ = ticker.tick() => {
-                    sweep_once(&store, &client, &org_rx).await;
+                    sweep_once(&store, &bus, &client, &org_rx).await;
                 }
             }
         }
@@ -69,7 +71,12 @@ pub fn spawn_progress_reporter(
     ProgressReporterHandle { join }
 }
 
-async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
+async fn sweep_once(
+    store: &Arc<SqliteStateStore>,
+    bus: &EventBus,
+    client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
+) {
     // Server-side filter to stopped, non-cancelled, cloud-id-assigned
     // recordings that still have reporting work outstanding, so fully-settled
     // recordings drop out of the sweep instead of being re-scanned (and their
@@ -112,12 +119,32 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_
         if traces.is_empty() {
             continue;
         }
-        report_expected_trace_count(store, client, &recording, &org_id, &recording_id, &traces)
-            .await;
+        if !report_expected_trace_count(
+            store,
+            bus,
+            client,
+            &recording,
+            &org_id,
+            &recording_id,
+            &traces,
+        )
+        .await
+        {
+            continue;
+        }
         if matches!(recording.progress_reported, ProgressReportStatus::Reported) {
             continue;
         }
-        report_progress(store, client, &recording, &org_id, &recording_id, &traces).await;
+        report_progress(
+            store,
+            bus,
+            client,
+            &recording,
+            &org_id,
+            &recording_id,
+            &traces,
+        )
+        .await;
     }
 }
 
@@ -125,22 +152,25 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_
 /// lands, the backend keeps the recording hidden from its parent dataset
 /// regardless of how many trace blobs are already uploaded. Idempotent:
 /// short-circuits once `expected_trace_count_reported` is non-zero.
+/// Returns `false` when the backend answered that the recording is cancelled
+/// or not found, so the caller sends nothing more for it this tick.
 async fn report_expected_trace_count(
     store: &Arc<SqliteStateStore>,
+    bus: &EventBus,
     client: &Arc<ApiClient>,
     recording: &RecordingRow,
     org_id: &str,
     recording_id: &str,
     traces: &[TraceRecord],
-) {
+) -> bool {
     if recording.expected_trace_count_reported > 0 {
-        return;
+        return true;
     }
     // Wait until every trace has reached a terminal write state. Reporting
     // the count too early would race the per-trace actors and risk telling
     // the backend a number that excludes traces still being flushed.
     if !traces.iter().all(write_status_is_terminal) {
-        return;
+        return true;
     }
     let count = i64::try_from(traces.len()).unwrap_or(i64::MAX);
 
@@ -155,7 +185,7 @@ async fn report_expected_trace_count(
             recording_index = recording.recording_index,
             "failed to persist expected trace count"
         );
-        return;
+        return true;
     }
 
     let request_started = Instant::now();
@@ -184,7 +214,7 @@ async fn report_expected_trace_count(
                     recording_index = recording.recording_index,
                     "failed to mark expected trace count as reported"
                 );
-                return;
+                return true;
             }
             tracing::info!(
                 recording_index = recording.recording_index,
@@ -204,6 +234,20 @@ async fn report_expected_trace_count(
                     "outcome": "ok",
                 }),
             );
+        }
+        Err(error) if error.is_recording_cancelled() => {
+            super::discard_recording_locally(store, bus, recording.recording_index).await;
+            return false;
+        }
+        Err(error) if error.is_not_found() => {
+            super::stop_uploading_not_found_recording(
+                store,
+                bus,
+                recording.recording_index,
+                recording_id,
+            )
+            .await;
+            return false;
         }
         Err(error) => {
             tracing::warn!(
@@ -226,10 +270,12 @@ async fn report_expected_trace_count(
             );
         }
     }
+    true
 }
 
 async fn report_progress(
     store: &Arc<SqliteStateStore>,
+    bus: &EventBus,
     client: &Arc<ApiClient>,
     recording: &RecordingRow,
     org_id: &str,
@@ -308,6 +354,18 @@ async fn report_progress(
                 }),
             );
         }
+        Err(error) if error.is_recording_cancelled() => {
+            super::discard_recording_locally(store, bus, recording.recording_index).await;
+        }
+        Err(error) if error.is_not_found() => {
+            super::stop_uploading_not_found_recording(
+                store,
+                bus,
+                recording.recording_index,
+                recording_id,
+            )
+            .await;
+        }
         Err(error) => {
             tracing::warn!(%error, recording_index = recording.recording_index, "progress report failed");
             crate::perf_events::emit(
@@ -344,6 +402,7 @@ fn write_status_is_terminal(trace: &TraceRecord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::DaemonEvent;
     use std::time::Duration;
 
     use crate::api::auth::StaticAuthProvider;
@@ -362,9 +421,8 @@ mod tests {
         (store, dir)
     }
 
-    /// Create a recording stamped with `org-1` and the given cloud
-    /// `recording_id` so the wiremock URL expectations resolve. Returns the
-    /// local `recording_index`.
+    /// Create a recording with the given cloud `recording_id` so the wiremock
+    /// URL expectations resolve. Returns the local `recording_index`.
     async fn seed_recording(store: &SqliteStateStore, cloud_recording_id: &str) -> i64 {
         let recording = store
             .create_recording(NewRecording::default())
@@ -443,7 +501,13 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &api,
+            &org_rx(Some("org-1")),
+        )
+        .await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, Some(2));
@@ -482,7 +546,13 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &api,
+            &org_rx(Some("org-1")),
+        )
+        .await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, None);
@@ -549,7 +619,13 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &api,
+            &org_rx(Some("org-1")),
+        )
+        .await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(
@@ -601,7 +677,13 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &api,
+            &org_rx(Some("org-1")),
+        )
+        .await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(matches!(
@@ -650,7 +732,13 @@ mod tests {
             .await
             .unwrap();
 
-        sweep_once(&Arc::new(store.clone()), &client(&server), &org_rx(None)).await;
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &client(&server),
+            &org_rx(None),
+        )
+        .await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(
@@ -707,6 +795,7 @@ mod tests {
 
         sweep_once(
             &Arc::new(store.clone()),
+            &EventBus::new(),
             &client(&server),
             &org_rx(Some("org-1")),
         )
@@ -720,6 +809,157 @@ mod tests {
         assert!(
             matches!(recording.progress_reported, ProgressReportStatus::Pending),
             "a failed progress POST rolls Reporting back to Pending for retry"
+        );
+    }
+
+    /// A stopped recording with one written trace, ready to report.
+    async fn seed_reportable_recording(store: &SqliteStateStore) -> i64 {
+        let recording_index = seed_recording(store, "rec-1").await;
+        store
+            .create_trace(recording_index, "t-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    total_bytes: Some(7),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
+        recording_index
+    }
+
+    /// Answer both reports with `response`, sweep twice, and return the events
+    /// the first sweep published. Asserts the second sweep sends nothing: with
+    /// no retry budget on either report, a recording the backend no longer
+    /// holds must leave the sweep.
+    async fn sweep_twice_against(
+        store: &SqliteStateStore,
+        response: ResponseTemplate,
+    ) -> Vec<DaemonEvent> {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .respond_with(response.clone())
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let store_arc = Arc::new(store.clone());
+        let bus = EventBus::new();
+        let mut subscriber = bus.subscribe();
+        sweep_once(&store_arc, &bus, &client(&server), &org_rx(Some("org-1"))).await;
+        let mut events = Vec::new();
+        while let Ok(event) = subscriber.try_recv() {
+            events.push(event);
+        }
+
+        let before = server.received_requests().await.unwrap_or_default().len();
+        sweep_once(&store_arc, &bus, &client(&server), &org_rx(Some("org-1"))).await;
+        let after = server.received_requests().await.unwrap_or_default().len();
+        assert_eq!(before, after, "the second sweep must not report again");
+        events
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_410_from_the_reports_discards_the_recording() {
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_reportable_recording(&store).await;
+
+        let events = sweep_twice_against(
+            &store,
+            ResponseTemplate::new(410).set_body_json(serde_json::json!({
+                "detail": { "error": "Recording has been cancelled.", "error_code": "RECORDING_CANCELLED" }
+            })),
+        )
+        .await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert!(recording.cancelled_at.is_some());
+        assert!(
+            recording.backend_cancel_notified_at.is_some(),
+            "the backend already has the cancel; it must not be POSTed back"
+        );
+        assert!(events.contains(&DaemonEvent::RecordingCancelled { recording_index }));
+    }
+
+    #[tokio::test]
+    async fn a_404_from_the_reports_stops_reporting_but_keeps_the_recording() {
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_reportable_recording(&store).await;
+
+        let events = sweep_twice_against(
+            &store,
+            ResponseTemplate::new(404).set_body_json(
+                serde_json::json!({ "detail": { "error": "Recording not found." } }),
+            ),
+        )
+        .await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert!(recording.cancelled_at.is_none(), "a 404 must not cancel it");
+        assert!(recording.backend_not_found_at.is_some());
+        assert!(events.contains(&DaemonEvent::RecordingNotFound { recording_index }));
+        let trace = store.get_trace("t-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_status, crate::state::TraceUploadStatus::Failed);
+        assert!(
+            store
+                .recordings_pending_reclaim()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.recording_index != recording_index),
+            "the reaper must keep its files"
+        );
+    }
+
+    /// Once the expected-trace-count PUT is answered 404, the progress POST
+    /// for the same recording must not follow in the same sweep.
+    #[tokio::test]
+    async fn a_404_on_the_count_does_not_also_fire_the_progress_post() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(
+                serde_json::json!({ "detail": { "error": "Recording not found." } }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_reportable_recording(&store).await;
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &client(&server),
+            &org_rx(Some("org-1")),
+        )
+        .await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert!(recording.backend_not_found_at.is_some());
+        assert!(
+            !matches!(recording.progress_reported, ProgressReportStatus::Reporting),
+            "the recording must not be left wedged in Reporting"
         );
     }
 
@@ -764,6 +1004,7 @@ mod tests {
 
         sweep_once(
             &Arc::new(store.clone()),
+            &EventBus::new(),
             &client(&server),
             &org_rx(Some("org-1")),
         )

@@ -90,6 +90,42 @@ impl ApiClientError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
     }
+
+    /// True when the backend responded `403 Forbidden`.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::FORBIDDEN)
+    }
+
+    /// True when the backend answered `410 Gone` with `RECORDING_CANCELLED`.
+    ///
+    /// The only response that means the recording's data should be discarded:
+    /// a plain 404 carries no error code, so it cannot tell a cancelled
+    /// recording from a saved or reaped one, or from an unrelated 404.
+    pub fn is_recording_cancelled(&self) -> bool {
+        self.error_code(StatusCode::GONE).as_deref() == Some("RECORDING_CANCELLED")
+    }
+
+    /// True when a cancel lost the race with upload completion (409
+    /// `RECORDING_ALREADY_UPLOADED`). Other conflicts are not terminal.
+    pub fn is_recording_already_uploaded(&self) -> bool {
+        self.error_code(StatusCode::CONFLICT).as_deref() == Some("RECORDING_ALREADY_UPLOADED")
+    }
+
+    /// The backend's `detail.error_code` when it responded with `expected`.
+    fn error_code(&self, expected: StatusCode) -> Option<String> {
+        let ApiClientError::Status { status, body } = self else {
+            return None;
+        };
+        if *status != expected {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()?
+            .get("detail")?
+            .get("error_code")?
+            .as_str()
+            .map(str::to_owned)
+    }
 }
 
 /// Upload connection-pool tuning for [`build_upload_client`]. Sized together for
@@ -753,6 +789,41 @@ mod tests {
             1,
             "auth is reloaded exactly once, not on every 401"
         );
+    }
+
+    fn status_error(status: u16, body: serde_json::Value) -> ApiClientError {
+        ApiClientError::Status {
+            status: StatusCode::from_u16(status).unwrap(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_cancelled_410_is_told_apart_from_a_404() {
+        let cancelled = status_error(
+            410,
+            serde_json::json!({ "detail": { "error_code": "RECORDING_CANCELLED" } }),
+        );
+        assert!(cancelled.is_recording_cancelled());
+        assert!(!cancelled.is_not_found());
+
+        let not_found = status_error(404, serde_json::json!({ "detail": "Recording not found." }));
+        assert!(!not_found.is_recording_cancelled());
+        assert!(not_found.is_not_found());
+    }
+
+    #[test]
+    fn a_410_without_the_cancelled_code_is_not_a_cancellation() {
+        // An expired upload session is also 410; only the code means cancelled.
+        let expired = status_error(410, serde_json::json!({ "detail": "gone" }));
+        assert!(!expired.is_recording_cancelled());
+        assert!(!expired.is_not_found());
+
+        let wrong_status = status_error(
+            404,
+            serde_json::json!({ "detail": { "error_code": "RECORDING_CANCELLED" } }),
+        );
+        assert!(!wrong_status.is_recording_cancelled());
     }
 
     #[tokio::test]
