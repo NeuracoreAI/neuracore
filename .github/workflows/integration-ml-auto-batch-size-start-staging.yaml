@@ -42,7 +42,7 @@ jobs:
   start-training:
     needs: [discover-algorithms]
     runs-on: ubuntu-24.04
-    # Allow for up to 5 attempts with 30-minute waits between GPU-capacity
+    # Allow for up to 15 attempts with 1-minute waits between GPU-capacity
     # retries, plus the training run itself.
     timeout-minutes: 180
     strategy:
@@ -97,8 +97,8 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         TEST_CASE: ${{ matrix.algorithm }}_${{ matrix.gpu_type }}
-        MAX_ATTEMPTS: "5"
-        RETRY_WAIT_SECONDS: "1800"  # 30 minutes
+        MAX_ATTEMPTS: "15"
+        RETRY_WAIT_SECONDS: "60"  # 1 minute
       run: |
         set -uo pipefail
         set +e
