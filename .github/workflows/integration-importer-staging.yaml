@@ -127,7 +127,7 @@ jobs:
             --log-cli-date-format="%H:%M:%S"
             -v
           )
-          pytest "${pytest_args[@]}" "tests/integration/importer/test_${{ matrix.suite }}_dataset_import.py"
+          pytest "${pytest_args[@]}" "tests/integration/importer_exporter/test_${{ matrix.suite }}_dataset_import.py"
 
       - name: Upload data-daemon diagnostics
         if: always()

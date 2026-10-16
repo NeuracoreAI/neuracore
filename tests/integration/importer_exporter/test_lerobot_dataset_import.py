@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.integration.importer import cli_option_tests
-from tests.integration.importer.utils import LEROBOT_KIND
+from tests.integration.importer_exporter import cli_option_tests
+from tests.integration.importer_exporter.utils import LEROBOT_KIND
 
 
 def test_import_lerobot_dataset(
