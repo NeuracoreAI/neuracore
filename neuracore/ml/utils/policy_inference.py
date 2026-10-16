@@ -1,11 +1,15 @@
 """Policy Inference Module."""
 
+import inspect
 import logging
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+import numpy as np
 import torch
 from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
@@ -30,6 +34,9 @@ from neuracore.ml.utils.preprocessing import (
     apply_preprocessing_methods,
     validate_preprocessing_configuration,
 )
+
+if TYPE_CHECKING:
+    from neuracore.ml.utils.real_time_chunking import RTCConfig
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +129,264 @@ class PolicyInference:
         self.prediction_horizon = (
             self.model.model_init_description.output_prediction_horizon
         )
+
+    @property
+    def supports_real_time_chunking(self) -> bool:
+        """Whether the loaded model exposes the hooks real-time chunking needs."""
+        from neuracore.ml.utils.real_time_chunking import supports_real_time_chunking
+
+        return supports_real_time_chunking(self.model)
+
+    def _action_output_data_types(self) -> list[DataType]:
+        """Data types that occupy columns in a raw action chunk.
+
+        Continuous action heads live in ``model.output_dims``. Classification
+        outputs such as a ``CUSTOM_1D`` done flag are listed in
+        ``ordered_output_data_types`` but are produced by a separate head and
+        must not appear in the chunk layout.
+        """
+        model = self.model
+        preferred = getattr(model, "action_output_data_types", None)
+        if preferred:
+            return list(preferred)
+        return [
+            data_type
+            for data_type in model.ordered_output_data_types
+            if data_type in model.output_dims
+        ]
+
+    def output_action_names(self) -> list[tuple[DataType, str | None]]:
+        """Describe the column layout of a raw action chunk.
+
+        Entry ``i`` names the sensor that column ``i`` of the ``(T, action_dim)``
+        array produced by :meth:`predict_action_chunk` belongs to. ``None`` marks
+        a cross-embodiment padding column with no sensor in this embodiment.
+
+        Returns:
+            list[tuple[DataType, str | None]]: One entry per action column.
+        """
+        names: list[tuple[DataType, str | None]] = []
+        for data_type in self._action_output_data_types():
+            start_idx, end_idx = self.model.output_dims[data_type]
+            indexed = self.output_embodiment_description.get(data_type, {})
+            for index in range(end_idx - start_idx):
+                names.append((data_type, indexed.get(index)))
+        return names
+
+    def predict_action_chunk(
+        self,
+        sync_point: SynchronizedPoint,
+        prev_chunk: np.ndarray | None = None,
+        rtc_config: "RTCConfig | None" = None,
+        num_inference_steps: int | None = None,
+    ) -> np.ndarray:
+        """Predict one action chunk as a plain array.
+
+        Bypasses the per-sensor dict that :meth:`__call__` builds, which matters
+        when a real-time control loop replans several times a second. Column
+        order is described by :meth:`output_action_names`.
+
+        Without ``prev_chunk`` / ``rtc_config``, runs the model's ordinary
+        unguided sampler (any policy exposing ``_predict_action`` and an action
+        normalizer). With RTC arguments, requires a diffusion/flow model with
+        real-time chunking hooks.
+
+        Args:
+            sync_point: Observation to condition on.
+            prev_chunk: Previously predicted chunk with shape
+                ``(prediction_horizon, action_dim)``, already aligned to the new
+                chunk's timeline. ``None`` predicts without guidance.
+            rtc_config: Real-time chunking configuration. Required whenever
+                ``prev_chunk`` is given; when given alone, applies RTC sampler
+                overrides to an unguided bootstrap chunk.
+            num_inference_steps: Sampler steps for the unguided path, for models
+                that expose a step count. ``None`` uses the model's own setting,
+                which for ``DiffusionPolicy`` is the offline default of 100 and
+                far too slow for a control loop. Ignored when ``rtc_config`` is
+                given, since that carries its own override.
+
+        Returns:
+            np.ndarray: Unnormalized actions with shape
+            ``(prediction_horizon, action_dim)``.
+
+        Raises:
+            ValueError: If ``prev_chunk`` is supplied without ``rtc_config``, or
+                the loaded model cannot produce an action chunk.
+        """
+        sync_point = sync_point.order(self.input_embodiment_description)
+        self._validate_input_sync_point(sync_point)
+        batch = self._preprocess(sync_point)
+
+        if prev_chunk is None and rtc_config is None:
+            return self._unguided_action_chunk(
+                batch, num_inference_steps=num_inference_steps
+            )
+
+        from neuracore.ml.utils.real_time_chunking import (
+            missing_rtc_attributes,
+            rtc_predict_actions,
+        )
+
+        if prev_chunk is not None and rtc_config is None:
+            raise ValueError("rtc_config is required when prev_chunk is provided.")
+        missing = missing_rtc_attributes(self.model)
+        if missing:
+            raise ValueError(
+                f"Real-time chunking is not supported for "
+                f"{type(self.model).__name__}: it is missing {', '.join(missing)}. "
+                "Real-time chunking requires a diffusion policy."
+            )
+
+        prev_tensor = None
+        if prev_chunk is not None:
+            prev_tensor = torch.as_tensor(
+                prev_chunk, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+
+        chunk = rtc_predict_actions(self.model, batch, prev_tensor, rtc_config)
+        return chunk[0].detach().cpu().numpy()
+
+    def _pack_action_outputs(
+        self, outputs: dict[DataType, list[BatchedNCData]]
+    ) -> torch.Tensor:
+        """Assemble ``(B, H, A)`` from per-sensor model outputs.
+
+        Only types in :meth:`_action_output_data_types` are packed, matching the
+        column layout of :meth:`output_action_names`.
+
+        Args:
+            outputs: Model ``forward`` outputs keyed by data type.
+
+        Returns:
+            torch.Tensor: Unnormalized action chunk with shape ``(B, H, A)``.
+        """
+        pieces: list[torch.Tensor] = []
+        for data_type in self._action_output_data_types():
+            start_idx, end_idx = self.model.output_dims[data_type]
+            width = end_idx - start_idx
+            slots = outputs[data_type]
+            if len(slots) < width:
+                raise ValueError(
+                    f"Model returned {len(slots)} {data_type} slots but "
+                    f"output_dims expects {width}"
+                )
+            for index in range(width):
+                item = slots[index]
+                tensor = getattr(item, "value", None)
+                if tensor is None:
+                    tensor = getattr(item, "open_amount", None)
+                if tensor is None:
+                    tensor = getattr(item, "data", None)
+                if tensor is None:
+                    raise ValueError(
+                        f"Cannot pack {type(item).__name__} for {data_type}"
+                    )
+                pieces.append(tensor)
+        return torch.cat(pieces, dim=-1)
+
+    @contextmanager
+    def _sampler_steps(self, num_inference_steps: int | None) -> Iterator[None]:
+        """Temporarily override the model's sampler step count.
+
+        ``DiffusionPolicy._conditional_sample`` and ``_flow_matching_sample``
+        read ``self.num_inference_steps`` directly and take no parameter, so an
+        attribute swap is the only lever. Restored unconditionally; a no-op for
+        models with no step count (ACT, CNNMLP).
+
+        Args:
+            num_inference_steps: Steps to use, or ``None`` to leave the model
+                untouched.
+
+        Yields:
+            None: For the duration of the override.
+        """
+        model = self.model
+        if num_inference_steps is None or not hasattr(model, "num_inference_steps"):
+            yield
+            return
+        previous = model.num_inference_steps
+        model.num_inference_steps = num_inference_steps
+        try:
+            yield
+        finally:
+            model.num_inference_steps = previous
+
+    def _unguided_action_chunk(
+        self,
+        batch: BatchedInferenceInputs,
+        num_inference_steps: int | None = None,
+    ) -> np.ndarray:
+        """Run the model's ordinary sampler and return a flat action chunk.
+
+        Prefers the diffusion-style ``_predict_action(batch, horizon)`` tensor
+        path when available. Otherwise runs ``model(batch)`` and packs continuous
+        action outputs (ACT / ACT-with-done and similar).
+
+        Args:
+            batch: Preprocessed inference batch.
+            num_inference_steps: Sampler step override; ``None`` keeps the
+                model's own setting.
+
+        Returns:
+            np.ndarray: Unnormalized actions with shape ``(H, A)``.
+
+        Raises:
+            ValueError: If the model lacks the hooks needed to produce a chunk.
+        """
+        model = self.model
+        if not getattr(model, "output_dims", None):
+            raise ValueError(
+                f"{type(model).__name__} cannot produce a raw action chunk: "
+                "it has no output_dims."
+            )
+
+        with torch.no_grad(), self._sampler_steps(num_inference_steps):
+            if self._takes_chunk_args(getattr(model, "_predict_action", None)):
+                normalized = model._predict_action(batch, self.prediction_horizon)
+                # A matching signature does not guarantee a bare tensor back;
+                # anything else (e.g. an (actions, aux) pair) goes the long way
+                # rather than reaching the normalizer as a tuple.
+                if isinstance(normalized, torch.Tensor):
+                    chunk = model.action_normalizer.unnormalize(normalized)
+                    return chunk[0].detach().cpu().numpy()
+
+            outputs = model(batch)
+            packed = self._pack_action_outputs(outputs)
+        return packed[0].detach().cpu().numpy()
+
+    def _takes_chunk_args(self, predict: object) -> bool:
+        """Whether ``predict`` is the ``(batch, prediction_horizon)`` tensor hook.
+
+        ``_predict_action`` means different things across the algorithms:
+        ``DiffusionPolicy`` takes ``(batch, prediction_horizon)`` and returns a
+        normalized tensor, ``ACT`` takes ``(mu, logvar, batch)``, and
+        ``CNNMLP`` / ``Pi0`` / ``Pi05`` take ``(batch)`` alone. Only the first
+        can be called here; the rest go through ``model(batch)``.
+
+        Dispatching on the signature rather than on a ``TypeError`` from the
+        call matters: a genuine ``TypeError`` raised *inside* a correctly
+        matched ``_predict_action`` would otherwise be swallowed and silently
+        retried as a second full forward pass.
+
+        Args:
+            predict: The model's ``_predict_action``, or ``None``.
+
+        Returns:
+            bool: True if it can be called as ``predict(batch, horizon)``.
+        """
+        if predict is None or not callable(predict):
+            return False
+        if not hasattr(self.model, "action_normalizer"):
+            return False
+        try:
+            signature = inspect.signature(predict)
+        except (TypeError, ValueError):  # C-implemented or otherwise opaque
+            return False
+        try:
+            signature.bind(object(), object())
+        except TypeError:
+            return False
+        return True
 
     def _preprocess(self, sync_point: SynchronizedPoint) -> BatchedInferenceInputs:
         """Preprocess incoming sync point into model-compatible format.
