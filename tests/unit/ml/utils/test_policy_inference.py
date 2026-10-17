@@ -84,7 +84,7 @@ def test_assign_names_to_model_outputs_raises_for_missing_output_configuration()
 
     with pytest.raises(
         ValueError,
-        match="JOINT_POSITIONS not in output configuration.",
+        match="JOINT_POSITIONS not in embodiment description.",
     ):
         policy_inference._assign_names_to_model_outputs({
             DataType.JOINT_POSITIONS: [_joint_prediction(0.1)],
