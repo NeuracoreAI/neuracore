@@ -25,6 +25,11 @@ seed: 42
 epochs: 100
 output_prediction_horizon: 100
 validation_split: 0.2
+# How many validation timesteps to save as trajectory rollouts. 0 disables
+# rollout saving. Metric validation still covers every validation sample.
+validation_rollout_points: 16
+# Write rollout snapshots when epoch % validation_rollout_frequency == 0.
+validation_rollout_frequency: 5
 frequency: 10
 allow_duplicates: true
 
