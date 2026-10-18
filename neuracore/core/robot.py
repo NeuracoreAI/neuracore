@@ -514,6 +514,30 @@ class Robot:
                 "Robot not initialized and no local URDF available. "
                 "Provide urdf_path or call init() first."
             )
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(self._fetch_urdf_package()), "r") as zf:
+                if "robot.urdf" not in zf.namelist():
+                    raise RobotError("URDF package does not contain robot.urdf")
+                try:
+                    return ET.fromstring(zf.read("robot.urdf"))
+                except ET.ParseError as e:
+                    raise RobotError(f"Failed to parse URDF: {str(e)}") from e
+        except zipfile.BadZipFile as e:
+            raise RobotError("Invalid URDF package received from server.") from e
+
+    def _fetch_urdf_package(self) -> bytes:
+        """Download the robot's URDF package ZIP from the server.
+
+        Returns:
+            Raw bytes of the ZIP package containing robot.urdf and meshes/.
+
+        Raises:
+            RobotError: If the robot is not initialized, no URDF has been
+                uploaded, or the request fails.
+        """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
         if not self.org_id:
             raise RobotError(
                 "Unauthorised: no organisation selected. "
@@ -541,17 +565,36 @@ class Robot:
             raise RobotError(f"Failed to download URDF package: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to download URDF package: {str(e)}")
+        return response.content
 
+    def download_urdf(self, output_dir: str | Path) -> Path:
+        """Download the robot's URDF and meshes from the server.
+
+        The package is extracted into ``output_dir`` as ``robot.urdf`` alongside
+        a ``meshes/`` directory referenced by the URDF.
+
+        Args:
+            output_dir: Directory to extract the URDF package into. Created if
+                it does not exist.
+
+        Returns:
+            Path to the extracted ``robot.urdf`` file.
+
+        Raises:
+            RobotError: If the robot is not initialized, no URDF is available,
+                the download fails, or the package is invalid.
+        """
+        package = self._fetch_urdf_package()
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         try:
-            with zipfile.ZipFile(io.BytesIO(response.content), "r") as zf:
+            with zipfile.ZipFile(io.BytesIO(package), "r") as zf:
                 if "robot.urdf" not in zf.namelist():
                     raise RobotError("URDF package does not contain robot.urdf")
-                try:
-                    return ET.fromstring(zf.read("robot.urdf"))
-                except ET.ParseError as e:
-                    raise RobotError(f"Failed to parse URDF: {str(e)}") from e
+                zf.extractall(output_path)
         except zipfile.BadZipFile as e:
             raise RobotError("Invalid URDF package received from server.") from e
+        return output_path / "robot.urdf"
 
     def _upload_urdf_and_meshes(self) -> None:
         """Upload URDF and associated mesh files as a ZIP package to the server.
