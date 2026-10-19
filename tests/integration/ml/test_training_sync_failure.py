@@ -130,7 +130,7 @@ SYNC_FAILURE_CASES = (
         id="exceeds_max_delta",
         max_delay_s=1e-9,
         allow_duplicates=True,
-        expected_marker="within max delta",
+        expected_marker="cannot be synchronized at time",
     ),
 )
 
