@@ -19,6 +19,8 @@ aiosqlite
 allclose
 allocvec
 altclip
+amax
+aminmax
 asarray
 ascontiguousarray
 assimp
@@ -45,6 +47,7 @@ bodyless
 Brawner
 broadcastable
 bsdinfo
+bucketize
 buildtool
 bumpversion
 byteswap
@@ -215,6 +218,7 @@ gptj
 Groot
 groot
 hdlc
+histo
 hookwrapper
 hparams
 hstack
@@ -349,6 +353,7 @@ Nonblock
 noprint
 nostdin
 nprocs
+numels
 numer
 numpy
 nvml
@@ -585,6 +590,7 @@ vsync
 waitpid
 WAKELOCK
 wakelock
+walltime
 wasmbind
 widowx
 worldbody
