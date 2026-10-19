@@ -182,7 +182,10 @@ class Recording:
         )
 
     def _refresh_recording_metadata(self) -> None:
-        """Refresh the recording metadata from the cloud.
+        """Refresh the recording metadata as it is stored in this dataset.
+
+        A recording's name, notes and status are kept per dataset, so they are
+        read from the recording's entry in `self.dataset`.
 
         Ideally we should implement If-Match & Etag header as well.
         """
@@ -191,19 +194,22 @@ class Recording:
         try:
             session = thread_local_session()
             response = session.get(
-                f"{API_URL}/org/{org_id}/recording/{self.id}",
+                f"{API_URL}/org/{org_id}/datasets/{self.dataset.id}"
+                f"/recording/{self.id}",
                 headers=auth.get_headers(),
+                params={"is_shared": self.dataset.is_shared},
             )
             response.raise_for_status()
             updated_recording = RecordingModel.model_validate(response.json())
             self.metadata = updated_recording.metadata
+            self.name = self.metadata.name
         except AuthenticationError:
             raise
         except Exception as e:
             raise RuntimeError(f"Error fetching recording metadata: {e}")
 
     def _update_metadata(self, recording_metadata: RecordingMetadata) -> None:
-        """Update the metadata of a recording.
+        """Update the metadata of a recording in this dataset.
 
         Args:
             recording_metadata: The metadata to update the recording with
@@ -218,13 +224,16 @@ class Recording:
         try:
             session = thread_local_session()
             response = session.put(
-                f"{API_URL}/org/{org_id}/recording/{self.id}/metadata",
+                f"{API_URL}/org/{org_id}/recording/{self.dataset.id}"
+                f"/{self.id}/metadata",
                 headers=auth.get_headers(),
                 json=recording_metadata.model_dump(mode="json"),
             )
             response.raise_for_status()
-            updated_recording = RecordingModel.model_validate(response.json())
-            self.metadata = updated_recording.metadata
+            self.metadata = RecordingMetadata.model_validate(
+                response.json()["metadata"]
+            )
+            self.name = self.metadata.name
         except AuthenticationError:
             raise
         except Exception as e:

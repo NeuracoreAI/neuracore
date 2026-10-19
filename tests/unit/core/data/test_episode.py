@@ -156,7 +156,8 @@ class TestRecording:
         mocked_org_id: str,
     ):
         mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}",
+            f"{API_URL}/org/{mocked_org_id}/datasets/{recording.dataset.id}"
+            f"/recording/{recording.id}",
             json=recording_model.model_dump(mode="json"),
             status_code=200,
         )
@@ -165,8 +166,13 @@ class TestRecording:
         recording_clone.metadata.status = RecordingStatus.FLAGGED
 
         mock_data_requests.put(
-            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}/metadata",
-            json=recording_clone.model_dump(mode="json"),
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.dataset.id}"
+            f"/{recording.id}/metadata",
+            json={
+                "dataset_id": recording.dataset.id,
+                "recording_id": recording.id,
+                "metadata": recording_clone.metadata.model_dump(mode="json"),
+            },
             status_code=200,
         )
 
@@ -183,7 +189,8 @@ class TestRecording:
         mocked_org_id: str,
     ):
         mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}",
+            f"{API_URL}/org/{mocked_org_id}/datasets/{recording.dataset.id}"
+            f"/recording/{recording.id}",
             json=recording_model.model_dump(mode="json"),
             status_code=200,
         )
@@ -192,8 +199,13 @@ class TestRecording:
         recording_clone.metadata.notes = "Test notes"
 
         mock_data_requests.put(
-            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}/metadata",
-            json=recording_clone.model_dump(mode="json"),
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.dataset.id}"
+            f"/{recording.id}/metadata",
+            json={
+                "dataset_id": recording.dataset.id,
+                "recording_id": recording.id,
+                "metadata": recording_clone.metadata.model_dump(mode="json"),
+            },
             status_code=200,
         )
 
@@ -203,3 +215,39 @@ class TestRecording:
             mock_data_requests.request_history[-1].json().get("notes") == "Test notes"
         )
         assert recording.metadata.notes == "Test notes"
+
+    def test_set_status_keeps_the_name_from_its_dataset(
+        self,
+        recording: Recording,
+        recording_model: RecordingModel,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        in_dataset = recording_model.model_copy(deep=True)
+        in_dataset.metadata.name = "Renamed in dataset"
+        mock_data_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/datasets/{recording.dataset.id}"
+            f"/recording/{recording.id}",
+            json=in_dataset.model_dump(mode="json"),
+            status_code=200,
+        )
+        updated = in_dataset.metadata.model_copy()
+        updated.status = RecordingStatus.FLAGGED
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.dataset.id}"
+            f"/{recording.id}/metadata",
+            json={
+                "dataset_id": recording.dataset.id,
+                "recording_id": recording.id,
+                "metadata": updated.model_dump(mode="json"),
+            },
+            status_code=200,
+        )
+
+        recording.set_status(RecordingStatus.FLAGGED)
+
+        assert (
+            mock_data_requests.request_history[-1].json().get("name")
+            == "Renamed in dataset"
+        )
+        assert recording.name == "Renamed in dataset"
