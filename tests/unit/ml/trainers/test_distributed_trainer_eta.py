@@ -9,6 +9,7 @@ from neuracore.ml.trainers.distributed_trainer import (
     SECONDS_PER_EPOCH_EMA_ALPHA,
     DistributedTrainer,
 )
+from neuracore.ml.utils.validation_rollouts import ValidationRolloutConfig
 
 
 def _progress_from_call(call):
@@ -39,6 +40,10 @@ def trainer(tmp_path: Path) -> DistributedTrainer:
     trainer.validate = MagicMock(return_value={})
     trainer.save_checkpoint = MagicMock()
     trainer.get_model_without_ddp = MagicMock(return_value=MagicMock())
+    trainer.validation_rollout_config = ValidationRolloutConfig(
+        num_points=0, frequency=1, seed=0
+    )
+    trainer._run_rollout_validation = False
     return trainer
 
 

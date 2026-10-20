@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from neuracore.ml.trainers.distributed_trainer import DistributedTrainer
+from neuracore.ml.utils.validation_rollouts import ValidationRolloutConfig
 
 
 @pytest.fixture
@@ -30,6 +31,9 @@ def _trainer(tmp_path: Path) -> DistributedTrainer:
         storage_handler=MagicMock(),
         output_dir=tmp_path,
         num_epochs=1,
+        validation_rollout_config=ValidationRolloutConfig(
+            num_points=0, frequency=1, seed=0
+        ),
         device=torch.device("cpu"),
     )
 

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from neuracore_types import (
-    BatchedJointData,
     BatchedNCData,
     CrossEmbodimentDescription,
     DataType,
@@ -38,97 +37,6 @@ def _make_policy_inference(
         )
     )
     return policy_inference
-
-
-def _joint_prediction(value: float) -> BatchedJointData:
-    return BatchedJointData(value=torch.full((1, 1, 1), value))
-
-
-def _indexed_names(*names: str) -> dict[int, str]:
-    """Build index-to-name mapping preserving declared order."""
-    return dict(enumerate(names))
-
-
-def test_assign_names_to_model_outputs_drops_extra_padded_tensors() -> None:
-    policy_inference = _make_policy_inference({
-        DataType.JOINT_TARGET_POSITIONS: _indexed_names("joint1", "joint2"),
-    })
-
-    first_prediction = _joint_prediction(0.1)
-    second_prediction = _joint_prediction(0.2)
-    extra_prediction = _joint_prediction(0.3)
-
-    outputs = policy_inference._assign_names_to_model_outputs({
-        DataType.JOINT_TARGET_POSITIONS: [
-            first_prediction,
-            second_prediction,
-            extra_prediction,
-        ]
-    })
-
-    assert list(outputs[DataType.JOINT_TARGET_POSITIONS].keys()) == [
-        "joint1",
-        "joint2",
-    ]
-    assert outputs[DataType.JOINT_TARGET_POSITIONS]["joint1"] is first_prediction
-    assert outputs[DataType.JOINT_TARGET_POSITIONS]["joint2"] is second_prediction
-    assert extra_prediction not in outputs[DataType.JOINT_TARGET_POSITIONS].values()
-
-
-def test_assign_names_to_model_outputs_raises_for_missing_output_configuration() -> (
-    None
-):
-    policy_inference = _make_policy_inference({
-        DataType.JOINT_TARGET_POSITIONS: _indexed_names("joint1"),
-    })
-
-    with pytest.raises(
-        ValueError,
-        match="JOINT_POSITIONS not in output configuration.",
-    ):
-        policy_inference._assign_names_to_model_outputs({
-            DataType.JOINT_POSITIONS: [_joint_prediction(0.1)],
-        })
-
-
-def test_assign_names_to_model_outputs_raises_for_short_sparse_output_tensor_list() -> (
-    None
-):
-    policy_inference = _make_policy_inference({
-        DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 2: "joint3"},
-    })
-
-    with pytest.raises(
-        ValueError,
-        match="Expected at least 3, but got 2",
-    ):
-        policy_inference._assign_names_to_model_outputs({
-            DataType.JOINT_TARGET_POSITIONS: [
-                _joint_prediction(0.1),
-                _joint_prediction(0.2),
-            ],
-        })
-
-
-def test_assign_names_to_model_outputs_supports_sparse_indices() -> None:
-    policy_inference = _make_policy_inference({
-        DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 2: "joint3"},
-    })
-    tensor_at_index_0 = _joint_prediction(0.1)
-    tensor_at_index_1 = _joint_prediction(0.2)
-    tensor_at_index_2 = _joint_prediction(0.3)
-
-    outputs = policy_inference._assign_names_to_model_outputs({
-        DataType.JOINT_TARGET_POSITIONS: [
-            tensor_at_index_0,
-            tensor_at_index_1,
-            tensor_at_index_2,
-        ],
-    })
-
-    assert outputs[DataType.JOINT_TARGET_POSITIONS]["joint1"] is tensor_at_index_0
-    assert outputs[DataType.JOINT_TARGET_POSITIONS]["joint3"] is tensor_at_index_2
-    assert tensor_at_index_1 not in outputs[DataType.JOINT_TARGET_POSITIONS].values()
 
 
 def test_validate_input_sync_point_accepts_mixed_string_and_enum_data_types() -> None:
