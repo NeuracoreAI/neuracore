@@ -599,6 +599,52 @@ class TestSetupLogging:
         assert new_dir.exists()
         assert (new_dir / "train.log").exists()
 
+    @pytest.fixture
+    def isolated_root_logger(self):
+        root = logging.getLogger()
+        original_handlers = root.handlers[:]
+        original_level = root.level
+        # Detach rather than close, since setup_logging(force=True) closes
+        # every handler still attached to the root logger.
+        root.handlers.clear()
+        yield root
+        for handler in root.handlers:
+            handler.close()
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+    def test_output_routed_by_level(
+        self, temp_output_dir, isolated_root_logger, capsys
+    ):
+        setup_logging(str(temp_output_dir), rank=0)
+        isolated_root_logger.setLevel(logging.DEBUG)
+        logger = logging.getLogger("neuracore.test")
+
+        logger.debug("debug message")
+        logger.info("info message")
+        logger.warning("warning message")
+        logger.error("error message")
+        logger.critical("critical message")
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logger.exception("training failed")
+
+        captured = capsys.readouterr()
+        assert captured.out.splitlines() == [
+            "DEBUG:neuracore.test:debug message",
+            "INFO:neuracore.test:info message",
+        ]
+        err_lines = captured.err.splitlines()
+        assert err_lines[:4] == [
+            "WARNING:neuracore.test:warning message",
+            "ERROR:neuracore.test:error message",
+            "CRITICAL:neuracore.test:critical message",
+            "ERROR:neuracore.test:training failed",
+        ]
+        assert err_lines[4] == "Traceback (most recent call last):"
+        assert err_lines[-1] == "ValueError: boom"
+
 
 class TestTrainingConfigMerge:
     """Tests for native Hydra user config composition."""

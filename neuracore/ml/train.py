@@ -44,6 +44,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
+from neuracore.ml.logging.stream_handlers import build_stream_handlers
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.trainers.batch_autotuner import (
@@ -201,7 +202,6 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
     """Setup logging configuration."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    stream_handler = logging.StreamHandler()
 
     if rank == 0:
         file_handler = logging.FileHandler(output_path / "train.log")
@@ -209,7 +209,7 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
         file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
     file_handler.setFormatter(JsonLineLogFormatter())
 
-    handlers: list[logging.Handler] = [file_handler, stream_handler]
+    handlers: list[logging.Handler] = [file_handler, *build_stream_handlers()]
     logging.basicConfig(
         level=logging.INFO,
         handlers=handlers,
