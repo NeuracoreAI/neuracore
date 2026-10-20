@@ -53,6 +53,7 @@ jobs:
             )
         )
 
+        # One matrix cell per training job (nested evaluations share the job).
         matrix = [
             {
                 "algorithm": algorithm["name"],
