@@ -189,3 +189,19 @@ def test_train_amortizes_checkpoint_into_seconds_per_epoch(
     assert by_epoch[3] == pytest.approx(13.0)
     trainer.save_checkpoint.assert_called()
     trainer.storage_handler.save_model_artifacts.assert_called()
+
+
+def test_train_reports_completed_epochs_only_when_a_checkpoint_is_saved(
+    trainer: DistributedTrainer,
+):
+    trainer.save_checkpoints = True
+    trainer.save_freq = 2
+    trainer.num_epochs = 4
+    trainer.train(start_epoch=1)
+
+    progress_calls = trainer.storage_handler.update_training_progress.call_args_list
+    completed_by_epoch = {
+        _progress_from_call(call).epoch: _progress_from_call(call).completed_epochs
+        for call in progress_calls[1:]
+    }
+    assert completed_by_epoch == {1: None, 2: 2, 3: None, 4: 4}
