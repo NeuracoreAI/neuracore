@@ -101,9 +101,9 @@ train_preprocessing:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
         size: [224, 224]
       - _target_: neuracore.ml.preprocessing.methods.color_jitter.ColorJitter
-        brightness: 0.5
-        contrast: 0.3
-        saturation: 0.35
+        brightness: 0.6
+        contrast: 0.4
+        saturation: 0.4
         hue: 0.02
       - _target_: neuracore.ml.preprocessing.methods.gaussian_noise.GaussianNoise
         std: 2.0
