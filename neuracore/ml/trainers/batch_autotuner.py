@@ -17,6 +17,7 @@ from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
+from neuracore.ml.logging.stream_handlers import build_stream_handlers
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
@@ -207,7 +208,7 @@ def _run_batch_size_probe_worker(
     device_str: str,
 ) -> None:
     """Subprocess entrypoint that probes a single batch size."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, handlers=build_stream_handlers())
     worker_logger = logging.getLogger(__name__)
 
     try:

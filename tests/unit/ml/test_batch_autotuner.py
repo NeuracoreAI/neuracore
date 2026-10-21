@@ -1,6 +1,7 @@
 """Tests for batch size autotuner."""
 
 import functools
+import logging
 import pickle
 from unittest.mock import MagicMock, Mock, patch
 
@@ -14,6 +15,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.trainers.batch_autotuner import (
+    _WORKER_RESULT_FAILURE,
     BatchProbeResult,
     BatchSizeAutotuner,
     BatchSizeValidator,
@@ -21,6 +23,7 @@ from neuracore.ml.trainers.batch_autotuner import (
     _estimate_max_batch_size,
     _fits_within_budget,
     _probe_batch_size,
+    _run_batch_size_probe_worker,
     find_optimal_batch_size,
     is_valid_batch_size,
 )
@@ -389,6 +392,48 @@ def test_batch_size_validator_requires_cuda_device():
             train_dataloader_kwargs={},
             num_iterations=2,
         )
+
+
+def test_probe_worker_routes_logs_by_level(capsys):
+    def probe(**kwargs):
+        probe_logger = logging.getLogger("neuracore.ml.trainers.batch_autotuner")
+        probe_logger.info("probe progress")
+        probe_logger.warning("probe warning")
+        raise ValueError("probe exploded")
+
+    result_queue = Mock()
+    root = logging.getLogger()
+    # A spawned worker starts with no root handlers, unlike the pytest process.
+    with (
+        patch.object(root, "handlers", []),
+        patch.object(root, "level", logging.WARNING),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner._probe_batch_size",
+            side_effect=probe,
+        ),
+    ):
+        _run_batch_size_probe_worker(
+            result_queue=result_queue,
+            model_factory=MagicMock(),
+            train_dataset=MagicMock(),
+            train_dataloader_kwargs={},
+            num_iterations=1,
+            batch_size=8,
+            device_str="cpu",
+        )
+
+    result_queue.put.assert_called_once_with(
+        (_WORKER_RESULT_FAILURE, repr(ValueError("probe exploded")))
+    )
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "INFO:neuracore.ml.trainers.batch_autotuner:probe progress"
+    ]
+    err_lines = captured.err.splitlines()
+    assert err_lines[0] == "WARNING:neuracore.ml.trainers.batch_autotuner:probe warning"
+    assert "Unhandled exception while probing batch size 8" in err_lines[1]
+    assert err_lines[2] == "Traceback (most recent call last):"
+    assert err_lines[-1] == "ValueError: probe exploded"
 
 
 def test_probe_batch_size_returns_false_on_torch_cuda_oom():
