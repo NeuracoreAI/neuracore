@@ -599,6 +599,17 @@ class TestSetupLogging:
         assert new_dir.exists()
         assert (new_dir / "train.log").exists()
 
+    def test_setup_logging_writes_console_logs_as_json_with_severity(
+        self, temp_output_dir, capsys
+    ):
+        setup_logging(str(temp_output_dir), rank=0)
+
+        logging.getLogger(__name__).info("training started")
+
+        event = json.loads(capsys.readouterr().err.splitlines()[-1])
+        assert event["severity"] == "INFO"
+        assert event["message"] == "training started"
+
 
 class TestTrainingConfigMerge:
     """Tests for native Hydra user config composition."""

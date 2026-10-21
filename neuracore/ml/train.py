@@ -207,9 +207,11 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
         file_handler = logging.FileHandler(output_path / "train.log")
     else:
         file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
-    file_handler.setFormatter(JsonLineLogFormatter())
 
     handlers: list[logging.Handler] = [file_handler, stream_handler]
+    formatter = JsonLineLogFormatter()
+    for handler in handlers:
+        handler.setFormatter(formatter)
     logging.basicConfig(
         level=logging.INFO,
         handlers=handlers,
