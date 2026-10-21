@@ -10,5 +10,3 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
-
-The trainer now reports how many epochs have a saved checkpoint, so the platform shows the right epoch count when you resume a training job.
