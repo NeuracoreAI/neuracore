@@ -10,3 +10,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+- A training run started with the `training_id` of a local training job reports how it ended: COMPLETED when training finishes, FAILED on an error, CANCELLED when stopped with Ctrl+C. Its progress, checkpoints and model then show on the Training page like a cloud job's.

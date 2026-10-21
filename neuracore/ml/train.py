@@ -624,20 +624,44 @@ def _try_report_error_to_cloud(cfg: DictConfig, error_msg: str) -> None:
         error_msg: Formatted traceback / error message to persist.
     """
     try:
-        nc.login()
-        org_id = getattr(cfg, "org_id", None)
-        if org_id is not None:
-            nc.set_organization(org_id)
-        local_output_dir = getattr(cfg, "local_output_dir", None)
-        training_id = getattr(cfg, "training_id", None)
-        storage_handler = TrainingStorageHandler(
-            local_dir=str(local_output_dir) if local_output_dir else "./output",
-            training_job_id=training_id,
-        )
-        storage_handler.report_training_error(error_msg)
+        _cloud_storage_handler(cfg).report_training_error(error_msg)
         logger.info("Successfully reported training error to cloud.")
     except Exception:
         logger.error("Failed to report training error to cloud.", exc_info=True)
+
+
+def _try_report_cancel_to_cloud(cfg: DictConfig) -> None:
+    """Best-effort report that the user stopped training, e.g. with Ctrl+C.
+
+    Args:
+        cfg: Hydra configuration (may be only partially resolved).
+    """
+    try:
+        _cloud_storage_handler(cfg).report_training_finished(
+            TrainingJobStatus.CANCELLED
+        )
+    except Exception:
+        logger.error("Failed to report training cancellation to cloud.", exc_info=True)
+
+
+def _cloud_storage_handler(cfg: DictConfig) -> TrainingStorageHandler:
+    """Sign in and build a storage handler for the run's cloud job.
+
+    Args:
+        cfg: Hydra configuration (may be only partially resolved).
+
+    Returns:
+        A storage handler for the job named by ``training_id``.
+    """
+    nc.login()
+    org_id = getattr(cfg, "org_id", None)
+    if org_id is not None:
+        nc.set_organization(org_id)
+    local_output_dir = getattr(cfg, "local_output_dir", None)
+    return TrainingStorageHandler(
+        local_dir=str(local_output_dir) if local_output_dir else "./output",
+        training_job_id=getattr(cfg, "training_id", None),
+    )
 
 
 def _main(cfg: DictConfig) -> None:
@@ -894,6 +918,11 @@ def _main(cfg: DictConfig) -> None:
                 pytorch_dataset,
                 device,
             )
+
+        if setup_storage_handler is not None:
+            # A local job has no VM for the backend to watch, so the run says
+            # when it is done. Uploads have finished by now.
+            setup_storage_handler.report_training_finished(TrainingJobStatus.COMPLETED)
     finally:
         if log_streamer is not None:
             log_streamer.close()
@@ -908,6 +937,10 @@ def main(cfg: DictConfig) -> None:
 
     try:
         _main(cfg)
+    except KeyboardInterrupt:
+        if training_id is not None:
+            _try_report_cancel_to_cloud(cfg)
+        raise
     except Exception:
         error_msg = traceback.format_exc()
         logger.error("Training script failed:\n%s", error_msg)

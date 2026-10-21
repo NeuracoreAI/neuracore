@@ -8,7 +8,7 @@ from typing import Any
 
 import requests
 import torch
-from neuracore_types import TrainingProgress
+from neuracore_types import TrainingJobStatus, TrainingProgress
 from torch import nn
 
 from neuracore.core.auth import get_auth
@@ -560,11 +560,35 @@ class TrainingStorageHandler(UploadStorageMixin):
         if self.log_to_cloud:
             response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
-                json={"epoch": None, "step": None, "error": error},
+                json={
+                    "epoch": None,
+                    "step": None,
+                    "error": error,
+                    "status": TrainingJobStatus.FAILED.value,
+                },
             )
             if response.status_code != 200:
                 logger.error(
                     f"Failed to report training error to cloud: {response.text}"
+                )
+
+    def report_training_finished(self, status: TrainingJobStatus) -> None:
+        """Report the status a training run ended on.
+
+        The backend works out a cloud job's end from its VM, so it only acts on
+        this for a job that trains on the user's own machine.
+
+        Args:
+            status: COMPLETED, or CANCELLED when the user stopped the run.
+        """
+        if self.log_to_cloud:
+            response = self._put_request(
+                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
+                json={"status": status.value},
+            )
+            if response.status_code != 200:
+                logger.error(
+                    f"Failed to report the end of training to cloud: {response.text}"
                 )
 
     def _put_request(

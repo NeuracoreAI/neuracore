@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from neuracore_types import TrainingProgress
+from neuracore_types import TrainingJobStatus, TrainingProgress
 
 from neuracore.core.const import API_URL
 from neuracore.ml.utils import upload_storage_mixin
@@ -737,10 +737,26 @@ class TestReportTrainingError:
             "epoch": None,
             "step": None,
             "error": "OOM error",
+            "status": "FAILED",
         }
 
     def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
         local_handler.report_training_error("some error")
+
+        assert len(requests_mock.request_history) == 0
+
+
+class TestReportTrainingFinished:
+    def test_sends_the_final_status_to_cloud(self, handler, requests_mock):
+        requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
+
+        handler.report_training_finished(TrainingJobStatus.COMPLETED)
+
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        assert [r.json() for r in put_requests] == [{"status": "COMPLETED"}]
+
+    def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
+        local_handler.report_training_finished(TrainingJobStatus.COMPLETED)
 
         assert len(requests_mock.request_history) == 0
 

@@ -26,6 +26,7 @@ from neuracore_types import (
     GPUType,
     JointDataStats,
     ModelInitDescription,
+    TrainingJobStatus,
 )
 from omegaconf import DictConfig, OmegaConf
 
@@ -3135,6 +3136,56 @@ class TestMainErrorReporting:
         )
         assert call_order.index("streamer_start") < call_order.index("get_dataset")
         setup.mock_cloud_log_streamer.close.assert_called_once()
+
+    def test_reports_completion_after_training_finishes(
+        self, monkeypatch, temp_output_dir
+    ):
+        """A local job has no VM to watch, so the run reports its own end."""
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+
+        main(cfg)
+
+        setup.mock_training_storage_handler.report_training_finished.assert_called_once_with(
+            TrainingJobStatus.COMPLETED
+        )
+
+    def test_does_not_report_completion_when_training_fails(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_run_training.side_effect = RuntimeError("crash!")
+        monkeypatch.setattr("neuracore.ml.train._try_report_error_to_cloud", Mock())
+
+        with pytest.raises(RuntimeError):
+            main(cfg)
+
+        setup.mock_training_storage_handler.report_training_finished.assert_not_called()
+
+    def test_reports_cancel_when_the_user_stops_training(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_run_training.side_effect = KeyboardInterrupt
+        mock_report_error = Mock()
+        mock_report_cancel = Mock()
+        monkeypatch.setattr(
+            "neuracore.ml.train._try_report_error_to_cloud", mock_report_error
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.train._try_report_cancel_to_cloud", mock_report_cancel
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            main(cfg)
+
+        mock_report_cancel.assert_called_once()
+        mock_report_error.assert_not_called()
 
     def test_reported_error_message_contains_full_traceback(
         self, monkeypatch, temp_output_dir
