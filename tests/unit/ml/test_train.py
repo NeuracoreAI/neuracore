@@ -40,6 +40,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 from neuracore.ml.train import (
     DEFAULT_OPEN_FILE_LIMIT,
     _any_rank_failed_to_load_checkpoint,
+    _main,
     _raise_open_file_limit,
     _resolve_recording_cache_dir,
     _serialize_cross_embodiment_description,
@@ -386,7 +387,7 @@ class RunTrainingTestSetup:
             )
         else:
             self.monkeypatch.setattr(
-                "neuracore.ml.train.TensorboardTrainingLogger",
+                "neuracore.ml.logging.tensorboard_training_logger.TensorboardTrainingLogger",
                 self.mock_tensorboard_logger,
             )
 
@@ -1063,6 +1064,31 @@ class TestResolveCrossEmbodimentDescription:
                 },
             },
         }
+
+
+class TestMainInstallsAlgorithmRequirements:
+    """Tests for installing algorithm dependencies at training start."""
+
+    def test_main_installs_requirements_before_resolving_config(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "neuracore.ml.train.install_packaged_algorithm_requirements",
+            lambda target: calls.append(("install", target)),
+        )
+
+        def stop_after_recording(cfg):
+            calls.append(("resolve", None))
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr(
+            "neuracore.ml.train.resolve_user_input_config", stop_after_recording
+        )
+        cfg = OmegaConf.create({"algorithm": {"_target_": "pkg.algo.Algo"}})
+
+        with pytest.raises(RuntimeError, match="stop"):
+            _main(cfg)
+
+        assert calls == [("install", "pkg.algo.Algo"), ("resolve", None)]
 
 
 class TestGetModelAndAlgorithmConfig:

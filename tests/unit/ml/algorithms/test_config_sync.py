@@ -14,6 +14,7 @@ import pytest
 from omegaconf import OmegaConf
 
 import neuracore.ml as nc_ml
+from neuracore.ml.utils.algorithm_loader import install_packaged_algorithm_requirements
 
 CONFIG_DIR = Path(nc_ml.__file__).parent / "config" / "algorithm"
 
@@ -66,6 +67,7 @@ def test_config_hydra_yaml_values_match_init_defaults(config_path: Path) -> None
     ``__init__`` param is present in the yaml."""
     algorithm = _load_algorithm_block(config_path)
     target = algorithm["_target_"]
+    install_packaged_algorithm_requirements(target)
     cls = hydra.utils.get_object(target)
     defaults = _init_defaults(cls)
 

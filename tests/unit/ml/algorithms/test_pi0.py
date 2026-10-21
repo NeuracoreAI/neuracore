@@ -17,10 +17,15 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
-from neuracore.ml.algorithms.pi0.pi0 import Pi0 as Pi0Model
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
+from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.validate import run_validation
+
+PI0_ALGORITHM_DIR = Path(__file__).resolve().parents[4] / "neuracore/ml/algorithms/pi0"
+AlgorithmLoader(PI0_ALGORITHM_DIR).install_requirements()
+
+from neuracore.ml.algorithms.pi0.pi0 import Pi0 as Pi0Model  # noqa: E402
 
 BS = 1
 OUTPUT_PREDICTION_HORIZON = 1

@@ -17,11 +17,24 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
-from neuracore.ml.algorithms.groot.groot import Groot as GrootModel
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.validate import run_validation
+
+GROOT_ALGORITHM_DIR = (
+    Path(__file__).resolve().parents[4] / "neuracore/ml/algorithms/groot"
+)
+# AlgorithmLoader.install_requirements tries uv pip first and falls back
+# to pip, and skips the install entirely if requirements are already
+# satisfied (avoiding unnecessary reinstalls that can break PyO3 deps).
+if not GROOT_ALGORITHM_DIR.exists():
+    raise FileNotFoundError(
+        f"Could not find groot algorithm dir at {GROOT_ALGORITHM_DIR}"
+    )
+AlgorithmLoader(GROOT_ALGORITHM_DIR).install_requirements()
+
+from neuracore.ml.algorithms.groot.groot import Groot as GrootModel  # noqa: E402
 
 BS = 1
 OUTPUT_PREDICTION_HORIZON = 16
@@ -62,24 +75,8 @@ OUTPUT_PARAMS = [
 ]
 
 
-GROOT_ALGORITHM_DIR = (
-    Path(__file__).resolve().parents[4] / "neuracore/ml/algorithms/groot"
-)
-
-
 @pytest.fixture(scope="module")
 def Groot():  # noqa: N802
-    # AlgorithmLoader.install_requirements tries uv pip first and falls back
-    # to pip, and skips the install entirely if requirements are already
-    # satisfied (avoiding unnecessary reinstalls that can break PyO3 deps).
-    if not GROOT_ALGORITHM_DIR.exists():
-        raise FileNotFoundError(
-            f"Could not find groot algorithm dir at {GROOT_ALGORITHM_DIR}"
-        )
-    AlgorithmLoader(GROOT_ALGORITHM_DIR).install_requirements()
-
-    from neuracore.ml.algorithms.groot.groot import Groot as GrootModel
-
     return GrootModel
 
 

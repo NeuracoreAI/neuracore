@@ -45,7 +45,7 @@ from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.stream_handlers import build_stream_handlers
-from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
+from neuracore.ml.logging.training_logger import TrainingLogger
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.trainers.batch_autotuner import (
     find_optimal_batch_size,
@@ -56,7 +56,10 @@ from neuracore.ml.trainers.distributed_trainer import (
     cleanup_distributed,
     setup_distributed,
 )
-from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
+from neuracore.ml.utils.algorithm_loader import (
+    AlgorithmLoader,
+    install_packaged_algorithm_requirements,
+)
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
@@ -639,8 +642,12 @@ def run_training(
             f"{sum(p.numel() for p in model.parameters()):,} parameters"
         )
 
-        training_logger: TensorboardTrainingLogger | CloudTrainingLogger
+        training_logger: TrainingLogger
         if training_id is None:
+            from neuracore.ml.logging.tensorboard_training_logger import (
+                TensorboardTrainingLogger,
+            )
+
             training_logger = TensorboardTrainingLogger(
                 log_dir=Path(cfg.local_output_dir) / "tensorboard",
             )
@@ -748,6 +755,9 @@ def _main(cfg: DictConfig) -> None:
         cfg: Fully resolved Hydra configuration.
     """
     _raise_open_file_limit()
+
+    if "algorithm" in cfg:
+        install_packaged_algorithm_requirements(cfg.algorithm._target_)
 
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
