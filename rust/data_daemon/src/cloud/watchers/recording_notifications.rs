@@ -17,12 +17,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
+use crate::intervals::NOTIFICATION_RESYNC;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingCommand;
 
@@ -79,6 +81,18 @@ async fn run(
         }
     };
 
+    // Re-opening the subscription is the recovery path for an event the stream
+    // never delivered: every subscribe starts with the backend's `INIT`
+    // snapshot, which re-announces every recording still open. A `START` lost
+    // while the connection stayed up (heartbeats keep it looking healthy) is
+    // adopted on the next resync instead of leaving the source idle for the
+    // recording's whole life.
+    let mut resync = tokio::time::interval_at(
+        tokio::time::Instant::now() + NOTIFICATION_RESYNC,
+        NOTIFICATION_RESYNC,
+    );
+    resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     let mut backoff = RECONNECT_MIN;
     loop {
         let Some(org_id) = org_rx.borrow().clone() else {
@@ -102,6 +116,10 @@ async fn run(
                     return;
                 }
                 backoff = RECONNECT_MIN;
+                continue;
+            }
+            _ = resync.tick() => {
+                tracing::debug!("resynchronising the recording notification stream");
                 continue;
             }
             outcome = consume(&stream_client, &client, &org_id, &tx) => outcome,
@@ -295,14 +313,16 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
         }
     };
 
-    match notification.kind.as_str() {
-        "START" => serde_json::from_value::<StartPayload>(notification.payload)
+    let Notification { kind, payload } = notification;
+    let kind = kind.as_str();
+    match kind {
+        "START" => decode::<StartPayload>(kind, payload)
             .map(|payload| vec![open_command(payload)])
             .unwrap_or_default(),
-        "INIT" => serde_json::from_value::<Vec<StartPayload>>(notification.payload)
+        "INIT" => decode::<Vec<StartPayload>>(kind, payload)
             .map(|payloads| payloads.into_iter().map(open_command).collect())
             .unwrap_or_default(),
-        "STOP" | "EXPIRED" => serde_json::from_value::<StopPayload>(notification.payload)
+        "STOP" | "EXPIRED" => decode::<StopPayload>(kind, payload)
             .map(|payload| {
                 vec![RecordingCommand::Close {
                     recording_id: payload.recording_id,
@@ -311,7 +331,7 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
                 }]
             })
             .unwrap_or_default(),
-        "DISCARDED" => serde_json::from_value::<StopPayload>(notification.payload)
+        "DISCARDED" => decode::<StopPayload>(kind, payload)
             .map(|payload| {
                 vec![RecordingCommand::Discard {
                     cloud_recording_id: payload.recording_id,
@@ -320,6 +340,25 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
             })
             .unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+/// Decode a notification payload, warning rather than dropping it silently.
+///
+/// A payload that no longer matches the expected shape is a lost lifecycle
+/// event — the recording never opens or closes here — so it has to be visible
+/// in the daemon log instead of vanishing without a trace.
+fn decode<T: DeserializeOwned>(kind: &str, payload: serde_json::Value) -> Option<T> {
+    match serde_json::from_value(payload) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                kind,
+                "ignoring recording notification with an unexpected payload"
+            );
+            None
+        }
     }
 }
 
@@ -482,5 +521,30 @@ mod tests {
     fn ignores_unparsable_and_unhandled_frames() {
         assert!(parse_notification("not json").is_empty());
         assert!(parse_notification(r#"{"type":"SAVED","payload":{}}"#).is_empty());
+    }
+
+    #[test]
+    fn an_unexpected_start_payload_opens_nothing() {
+        // `instance` as a float is the shape serde rejects; the event must be
+        // dropped without panicking, and `decode` warns about it.
+        assert!(parse_notification(
+            r#"{"type":"START","payload":{"recording_id":"rec-1",
+                   "robot_id":"robot-1","instance":0.5,"start_time":1.5}}"#
+        )
+        .is_empty());
+        assert!(parse_notification(r#"{"type":"START","payload":{}}"#).is_empty());
+    }
+
+    #[test]
+    fn an_unexpected_init_payload_opens_nothing() {
+        assert!(
+            parse_notification(r#"{"type":"INIT","payload":{"recording_id":"rec-1"}}"#).is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unexpected_stop_payload_closes_nothing() {
+        assert!(parse_notification(r#"{"type":"STOP","payload":{"recording_id":7}}"#).is_empty());
+        assert!(parse_notification(r#"{"type":"DISCARDED","payload":{}}"#).is_empty());
     }
 }

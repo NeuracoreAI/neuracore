@@ -60,5 +60,13 @@ pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 /// re-sent on this timer, since they are not idempotent.
 pub const NOTIFY_RESWEEP: Duration = Duration::from_secs(30);
 
+/// Recording-notification resync: how often the daemon re-opens its SSE
+/// subscription, whose `INIT` snapshot re-announces every recording the backend
+/// still holds open. This bounds how long a lifecycle event that was never
+/// delivered — while the connection stayed up, so nothing triggered a
+/// reconnect — can leave a recording invisible here. Kept short enough for a
+/// waiting caller to see the recording within its start gate.
+pub const NOTIFICATION_RESYNC: Duration = Duration::from_secs(10);
+
 /// Connection health probe cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);
