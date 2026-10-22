@@ -298,13 +298,11 @@ CHILD_PROCESS_TERMINATE_TIMEOUT_S = 5.0
 STOP_PUBLISH_SKEW_S = 0.25
 
 # Remote control: the HTTP timeout on the backend's own start/stop endpoints,
-# how long the stop may take to come back round to this process, and how often
-# the gate is checked for either.
+# how long a start, stop or cancel may take to come back round to this process,
+# and how often the gate is checked for any of them.
 REMOTE_CONTROL_REQUEST_TIMEOUT_S = 20.0
-REMOTE_STOP_PROPAGATION_SLA_S = 2.0
+REMOTE_PROPAGATION_SLA_S = 3.0
 REMOTE_GATE_POLL_INTERVAL_S = 0.025
-
-REMOTE_START_ANNOUNCEMENT_SLA_S = 3.0
 
 SPLIT_CONTROL_ACK_POLL_S = 0.05
 

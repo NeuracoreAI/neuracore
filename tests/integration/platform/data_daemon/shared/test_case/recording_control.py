@@ -32,8 +32,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     REMOTE_CONTROL_REQUEST_TIMEOUT_S,
     REMOTE_GATE_POLL_INTERVAL_S,
-    REMOTE_START_ANNOUNCEMENT_SLA_S,
-    REMOTE_STOP_PROPAGATION_SLA_S,
+    REMOTE_PROPAGATION_SLA_S,
     SPLIT_CONTROL_ACK_POLL_S,
     STOP_PUBLISH_SKEW_S,
 )
@@ -199,7 +198,7 @@ class RemoteRecordingController(RecordingController):
     No process here opens the window: the backend mints the recording and every
     connected process learns about it over the notification stream. Both
     brackets are therefore waited out, the start against the time the cloud
-    holds for the recording (see :data:`REMOTE_START_ANNOUNCEMENT_SLA_S`).
+    holds for the recording (see :data:`REMOTE_PROPAGATION_SLA_S`).
     """
 
     def __init__(self, spec: ContextSpec, robot: object) -> None:
@@ -240,10 +239,10 @@ class RemoteRecordingController(RecordingController):
             ),
         )
         window_start_lag_s = settled_at - announced_start_s
-        assert window_start_lag_s <= REMOTE_START_ANNOUNCEMENT_SLA_S, (
+        assert window_start_lag_s <= REMOTE_PROPAGATION_SLA_S, (
             f"recording {self._cloud_recording_id} reached this process "
             f"{window_start_lag_s:.3f}s after the start time the cloud holds "
-            f"for it, over the {REMOTE_START_ANNOUNCEMENT_SLA_S}s allowed"
+            f"for it, over the {REMOTE_PROPAGATION_SLA_S}s allowed"
         )
         return ControlBracket(called_at=called_at, settled_at=settled_at)
 
@@ -268,16 +267,24 @@ class RemoteRecordingController(RecordingController):
                     "end_time": capture_stop_s,
                 },
             )
+        returned_at = time.time()
         settled_at = await_gate(
             self.robot,
             open_gate=False,
-            deadline=time.time() + REMOTE_STOP_PROPAGATION_SLA_S,
+            deadline=returned_at + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
             label="remote.stop_gate_wait",
             assert_deadline=self.spec.assert_deadline,
             overdue=(
-                f"the stop of recording {self._cloud_recording_id} did not reach "
-                f"this process within {REMOTE_STOP_PROPAGATION_SLA_S}s"
+                f"the daemon never reported recording {self._cloud_recording_id} "
+                f"closed for this source: nothing arrived in "
+                f"{REMOTE_CONTROL_REQUEST_TIMEOUT_S}s"
             ),
+        )
+        window_stop_lag_s = settled_at - returned_at
+        assert window_stop_lag_s <= REMOTE_PROPAGATION_SLA_S, (
+            f"the stop of recording {self._cloud_recording_id} reached this "
+            f"process {window_stop_lag_s:.3f}s after the call returned, over "
+            f"the {REMOTE_PROPAGATION_SLA_S}s allowed"
         )
         self._cloud_recording_id = None
         return ControlBracket(called_at=called_at, settled_at=settled_at)
@@ -303,16 +310,24 @@ class RemoteRecordingController(RecordingController):
                     "end_time": capture_stop_s,
                 },
             )
+        returned_at = time.time()
         settled_at = await_gate(
             self.robot,
             open_gate=False,
-            deadline=time.time() + REMOTE_STOP_PROPAGATION_SLA_S,
+            deadline=returned_at + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
             label="remote.cancel_gate_wait",
             assert_deadline=self.spec.assert_deadline,
             overdue=(
-                f"the cancel of recording {self._cloud_recording_id} did not "
-                f"reach this process within {REMOTE_STOP_PROPAGATION_SLA_S}s"
+                f"the daemon never reported recording {self._cloud_recording_id} "
+                f"cancelled for this source: nothing arrived in "
+                f"{REMOTE_CONTROL_REQUEST_TIMEOUT_S}s"
             ),
+        )
+        window_cancel_lag_s = settled_at - returned_at
+        assert window_cancel_lag_s <= REMOTE_PROPAGATION_SLA_S, (
+            f"the cancel of recording {self._cloud_recording_id} reached this "
+            f"process {window_cancel_lag_s:.3f}s after the call returned, over "
+            f"the {REMOTE_PROPAGATION_SLA_S}s allowed"
         )
         self._cloud_recording_id = None
         return ControlBracket(called_at=called_at, settled_at=settled_at)
@@ -550,17 +565,22 @@ class SplitProcessRecordingController(RecordingController):
         settled_at = await_gate(
             self.robot,
             open_gate=False,
-            deadline=stopped.returned_at + REMOTE_STOP_PROPAGATION_SLA_S,
+            deadline=stopped.returned_at + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
             label="split.stop_gate_wait",
             assert_deadline=self.spec.assert_deadline,
             overdue=(
                 "the peer's stop never reached the daemon: it still reports "
-                f"the window open {REMOTE_STOP_PROPAGATION_SLA_S}s after the "
+                f"the window open {REMOTE_CONTROL_REQUEST_TIMEOUT_S}s after the "
                 "peer's call returned. A peer stop whose daemon publish failed "
                 "reads exactly like this — Robot._notify_daemon_of_stop logs "
                 "it and returns — so check the peer's stderr for a failed "
                 "publish"
             ),
+        )
+        peer_stop_lag_s = settled_at - stopped.returned_at
+        assert peer_stop_lag_s <= REMOTE_PROPAGATION_SLA_S, (
+            f"the peer's stop reached this process {peer_stop_lag_s:.3f}s after "
+            f"its call returned, over the {REMOTE_PROPAGATION_SLA_S}s allowed"
         )
         return ControlBracket(called_at=called_at, settled_at=settled_at)
 
@@ -584,14 +604,20 @@ class SplitProcessRecordingController(RecordingController):
         settled_at = await_gate(
             self.robot,
             open_gate=False,
-            deadline=cancelled.returned_at + REMOTE_STOP_PROPAGATION_SLA_S,
+            deadline=cancelled.returned_at + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
             label="split.cancel_gate_wait",
             assert_deadline=self.spec.assert_deadline,
             overdue=(
                 "the peer's cancel never reached the daemon: it still reports "
-                f"the window open {REMOTE_STOP_PROPAGATION_SLA_S}s after the "
+                f"the window open {REMOTE_CONTROL_REQUEST_TIMEOUT_S}s after the "
                 "peer's call returned"
             ),
+        )
+        peer_cancel_lag_s = settled_at - cancelled.returned_at
+        assert peer_cancel_lag_s <= REMOTE_PROPAGATION_SLA_S, (
+            f"the peer's cancel reached this process {peer_cancel_lag_s:.3f}s "
+            f"after its call returned, over the {REMOTE_PROPAGATION_SLA_S}s "
+            "allowed"
         )
         return ControlBracket(called_at=called_at, settled_at=settled_at)
 
@@ -607,10 +633,10 @@ class SplitProcessRecordingController(RecordingController):
             deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
         )
         peer_start_lag_s = opened.gate_opened_at - self._window_start_s
-        assert peer_start_lag_s <= REMOTE_START_ANNOUNCEMENT_SLA_S, (
+        assert peer_start_lag_s <= REMOTE_PROPAGATION_SLA_S, (
             f"the window opened at {self._window_start_s} reached the stopping "
             f"peer {peer_start_lag_s:.3f}s later, over the "
-            f"{REMOTE_START_ANNOUNCEMENT_SLA_S}s allowed"
+            f"{REMOTE_PROPAGATION_SLA_S}s allowed"
         )
 
     def shutdown(self) -> None:
