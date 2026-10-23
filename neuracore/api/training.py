@@ -293,14 +293,16 @@ def start_training_run(
 
 
 def resume_training_run(job_id: str, additional_epochs: int) -> dict:
-    """Resume a training run.
+    """Start a new training run that continues a job from its latest checkpoint.
+
+    The job itself is left as it is.
 
     Args:
         job_id: The ID of the training job
-        additional_epochs: The number of additional epochs to run
+        additional_epochs: The number of epochs to train after the checkpoint
 
     Returns:
-        dict: Training job data including job ID and status
+        dict: The new run's training job data, including its own job ID
 
     Raises:
         ValueError: If the request cannot reach the backend or the backend

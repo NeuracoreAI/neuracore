@@ -269,6 +269,7 @@ class TestMLLifecycle:
     collected_dataset: Dataset | None = None
     merged_dataset: Dataset | None = None
     job_id: str | None = None
+    resumed_job_id: str | None = None
     endpoint_ids: list[str]
     deletion_relaunch_job_id: str | None = None
     addition_relaunch_job_id: str | None = None
@@ -284,6 +285,7 @@ class TestMLLifecycle:
         cls.collected_dataset = None
         cls.merged_dataset = None
         cls.job_id = None
+        cls.resumed_job_id = None
         cls.endpoint_ids = []
         cls.deletion_relaunch_job_id = None
         cls.addition_relaunch_job_id = None
@@ -305,6 +307,7 @@ class TestMLLifecycle:
                 )
         for job_id in (
             cls.job_id,
+            cls.resumed_job_id,
             cls.deletion_relaunch_job_id,
             cls.addition_relaunch_job_id,
         ):
@@ -619,41 +622,45 @@ class TestMLLifecycle:
     def test_step09_resume_training(self) -> None:
         assert self.job_id is not None, "[STEP 3] Did Not Complete"
         job_id = self.job_id
-        initial_epoch = nc.get_training_job_data(job_id=job_id).get("epoch", 0)
+        source_epoch = nc.get_training_job_data(job_id=job_id).get("epoch", 0)
         resumed_job = nc.resume_training_run(job_id=job_id, additional_epochs=1)
         logger.info(f"Resume response: {resumed_job}")
+        run_id = resumed_job["id"]
+        self.__class__.resumed_job_id = run_id
 
+        assert run_id != job_id, "Expected resume to start a new run"
         assert resumed_job["status"] in RESUME_ACCEPTED_STATUSES, (
             f"Expected {RESUME_ACCEPTED_STATUSES} after resume, "
             f"got: {resumed_job['status']!r}"
         )
-        assert resumed_job.get(
-            "resume_points"
-        ), "Expected non-empty resume_points after resume"
+        assert resumed_job.get("resumed_from_job_id") == job_id
+        assert resumed_job.get("root_job_id") == job_id
+        checkpoint_epoch = resumed_job.get("resumed_from_epoch")
         assert (
-            resumed_job.get("resumed_at") is not None
-        ), "Expected resumed_at to be set after resume"
+            checkpoint_epoch is not None
+        ), "Expected the run to record the epoch of its checkpoint"
+        assert resumed_job.get("target_epochs") == checkpoint_epoch + 1
 
-        final_resumed_status = wait_for_training(job_id=job_id)
+        final_resumed_status = wait_for_training(job_id=run_id)
         assert (
             final_resumed_status == "COMPLETED"
         ), f"Resumed training ended with non-COMPLETED status: {final_resumed_status}"
 
-        resumed_data = nc.get_training_job_data(job_id=job_id)
-        assert (resumed_data.get("epoch") or 0) > initial_epoch, (
-            f"Expected epoch to increase after resume, "
-            f"was {initial_epoch}, now {resumed_data.get('epoch')}"
+        run_data = nc.get_training_job_data(job_id=run_id)
+        assert (run_data.get("epoch") or 0) > checkpoint_epoch, (
+            f"Expected the run to train past epoch {checkpoint_epoch}, "
+            f"reached {run_data.get('epoch')}"
         )
         assert (
-            resumed_data.get("previous_training_time") is not None
-        ), "Expected previous_training_time to be set after resume"
+            nc.get_training_job_data(job_id=job_id).get("epoch", 0) == source_epoch
+        ), "Expected the resumed job to be left as it was"
         assert_no_training_log_errors(
-            job_id=job_id,
+            job_id=run_id,
             context="Resume training completion",
         )
         logger.info(
-            f"[STEP 9] [PASSED] Resumed Job Completed At Epoch"
-            f" {resumed_data.get('epoch')}"
+            f"[STEP 9] [PASSED] Resumed Run {run_id} Completed At Epoch"
+            f" {run_data.get('epoch')}"
         )
 
     # -- 10-11. Retrain after mutating the original collected dataset -----
