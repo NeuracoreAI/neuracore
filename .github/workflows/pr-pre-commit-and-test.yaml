@@ -226,4 +226,11 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           OMP_NUM_THREADS: "1"
-        run: uv run --no-project pytest tests/unit/ml -m "not slow" -v -n 4 --dist loadscope -o log_level=INFO
+        run: uv run --no-project pytest tests/unit/ml --ignore=tests/unit/ml/algorithms -m "not slow" -v -n 4 --dist loadscope -o log_level=INFO
+
+      - name: Run ML algorithm unit tests
+        if: env.SHOULD_RUN == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OMP_NUM_THREADS: "1"
+        run: uv run --no-project pytest tests/unit/ml/algorithms -m "not slow" -v -o log_level=INFO

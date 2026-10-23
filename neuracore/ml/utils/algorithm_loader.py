@@ -6,18 +6,31 @@ It handles package setup, requirements installation, and various import strategi
 to support flexible algorithm development workflows.
 """
 
+import importlib.metadata
 import importlib.util
 import logging
 import os
 import subprocess
 import sys
+import tempfile
 import traceback
 import types
+from functools import cache
 from pathlib import Path
 
 from ..core.neuracore_model import NeuracoreModel
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 logger = logging.getLogger(__name__)
+
+PYPROJECT_FILE = "pyproject.toml"
+REQUIREMENTS_FILE = "requirements.txt"
+CONSTRAINED_PACKAGES = ("torch", "torchvision", "numpy", "neuracore-types")
+MAX_DEPENDENCY_FILE_DEPTH = 3
 
 
 class AlgorithmLoaderError(Exception):
@@ -26,8 +39,8 @@ class AlgorithmLoaderError(Exception):
     pass
 
 
-class RequirementsInstallError(AlgorithmLoaderError):
-    """Raised when requirements installation fails."""
+class DependencyInstallError(AlgorithmLoaderError):
+    """Raised when dependency installation fails."""
 
     pass
 
@@ -64,107 +77,198 @@ class AlgorithmLoader:
 
         Args:
             algorithm_dir: Path to the directory containing the algorithm code
-                and optional requirements.txt file.
+                and optional pyproject.toml or requirements.txt file.
         """
         self.algorithm_dir = algorithm_dir
 
-    def install_requirements(self) -> bool:
-        """Install Python packages from requirements.txt if present.
+    def find_dependency_file(self) -> Path | None:
+        """Return the algorithm's pyproject.toml or requirements.txt.
 
-        Searches for a requirements.txt file in the algorithm directory and
-        installs the specified packages. Tries uv pip first, falls back to pip
-        if uv is not available. Automatically filters out Neuracore dependencies
-        to avoid version conflicts.
+        Searches the algorithm directory and up to MAX_DEPENDENCY_FILE_DEPTH
+        levels of subdirectories, skipping directories whose names start with a
+        dot or two underscores, and returns the shallowest match.
 
         Returns:
-            True if requirements were installed successfully or no requirements
-            file was found, False otherwise.
+            Path of the dependency file, or None when the algorithm has none.
 
         Raises:
-            RequirementsInstallError: If requirements installation fails with both
-                package managers.
+            DependencyInstallError: If the shallowest level holding a
+                dependency file holds more than one.
         """
-        req_file = self.algorithm_dir / "requirements.txt"
-        if not req_file.exists():
-            logger.info("No requirements.txt found in algorithm directory")
-            return True
-
-        logger.info(f"Found requirements.txt at {req_file}")
-
-        # Strip out neuracore dependencies to avoid conflicts
-        try:
-            with open(req_file) as f:
-                lines = f.readlines()
-            purged_lines = [line for line in lines if "neuracore" not in line.lower()]
-            if len(purged_lines) != len(lines):
-                logger.info("Purging Neuracore dependencies from requirements.txt")
-                with open(req_file, "w") as f:
-                    f.writelines(purged_lines)
-        except Exception as e:
-            error_msg = f"Failed to process requirements.txt: {e}"
-            raise RequirementsInstallError(error_msg)
-
-        # Check if all requirements are already satisfied before installing
-        if self._requirements_satisfied(req_file):
-            logger.info("All requirements already satisfied, skipping install")
-            return True
-
-        # Try uv first, fall back to pip. Pass --python explicitly so uv
-        # targets the current interpreter (required in conda envs and other
-        # non-uv-managed environments where VIRTUAL_ENV is not set).
-        install_commands = [
-            (
-                [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--python",
-                    sys.executable,
-                    "-r",
-                    str(req_file),
-                ],
-                "uv pip",
-            ),
-            ([sys.executable, "-m", "pip", "install", "-r", str(req_file)], "pip"),
-        ]
-
-        errors = []
-        for cmd, name in install_commands:
-            try:
-                logger.info(f"Attempting to install requirements using {name}")
-                subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
+        folders = [self.algorithm_dir]
+        for _ in range(MAX_DEPENDENCY_FILE_DEPTH + 1):
+            found = [
+                folder / name
+                for folder in folders
+                for name in (PYPROJECT_FILE, REQUIREMENTS_FILE)
+                if (folder / name).is_file()
+            ]
+            if len(found) > 1:
+                paths = ", ".join(str(path) for path in found)
+                raise DependencyInstallError(
+                    f"Found several dependency files: {paths}. Keep only one."
                 )
-                logger.info(f"Successfully installed requirements using {name}")
+            if found:
+                return found[0]
+            folders = sorted(
+                child
+                for folder in folders
+                for child in folder.iterdir()
+                if child.is_dir() and not child.name.startswith((".", "__"))
+            )
+        return None
+
+    def _read_requirements(self) -> list[str]:
+        """Return the algorithm's requirement lines, excluding Neuracore packages.
+
+        Reads project.dependencies from pyproject.toml, or the lines of
+        requirements.txt, from the file find_dependency_file returns.
+
+        Returns:
+            Requirement strings to install, empty when the algorithm declares none.
+
+        Raises:
+            DependencyInstallError: If the dependency files are ambiguous or
+                the file is unreadable.
+        """
+        try:
+            dependency_file = self.find_dependency_file()
+            if dependency_file is None:
+                logger.info("No pyproject.toml or requirements.txt found")
+                return []
+            logger.info(f"Found {dependency_file.name} at {dependency_file}")
+            if dependency_file.name == PYPROJECT_FILE:
+                with open(dependency_file, "rb") as f:
+                    project = tomllib.load(f).get("project", {})
+                lines = [str(dep) for dep in project.get("dependencies", [])]
+            else:
+                lines = dependency_file.read_text().splitlines()
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            raise DependencyInstallError(
+                f"Failed to read algorithm requirements: {e}"
+            ) from e
+
+        requirements = [line for line in lines if "neuracore" not in line.lower()]
+        if len(requirements) != len(lines):
+            logger.info("Purging Neuracore dependencies from requirements")
+        return requirements
+
+    @staticmethod
+    def _write_constraints(constraints_file: Path) -> None:
+        """Write the installed versions of the core packages to a constraints file."""
+        lines = []
+        for package in CONSTRAINED_PACKAGES:
+            try:
+                lines.append(f"{package}=={importlib.metadata.version(package)}")
+            except importlib.metadata.PackageNotFoundError:
+                continue
+        constraints_file.write_text("\n".join(lines) + "\n")
+
+    def install_requirements(self) -> bool:
+        """Install the algorithm's Python packages into the current environment.
+
+        Reads pyproject.toml (project.dependencies) or requirements.txt from the
+        algorithm directory. Tries uv pip first, falls back to pip if uv is not
+        available. Filters out Neuracore dependencies and constrains torch,
+        torchvision, numpy and neuracore_types to their installed versions.
+
+        Returns:
+            True if requirements were installed successfully or the algorithm
+            declares none, False otherwise.
+
+        Raises:
+            DependencyInstallError: If reading the requirements fails or the
+                installation fails with both package managers.
+        """
+        requirements = self._read_requirements()
+        if not requirements:
+            return True
+
+        with tempfile.TemporaryDirectory(
+            prefix="nc-algorithm-requirements-"
+        ) as temp_dir:
+            requirements_file = Path(temp_dir) / REQUIREMENTS_FILE
+            requirements_file.write_text("\n".join(requirements) + "\n")
+            constraints_file = Path(temp_dir) / "constraints.txt"
+            self._write_constraints(constraints_file)
+
+            # Check if all requirements are already satisfied before installing
+            if self._requirements_satisfied(requirements_file, constraints_file):
+                logger.info("All requirements already satisfied, skipping install")
                 return True
-            except FileNotFoundError:
-                logger.debug(f"{name} not found, trying next option")
-                errors.append(f"{name} executable not found")
-                continue
-            except subprocess.CalledProcessError as e:
-                error_msg = f"Failed to install with {name}"
-                if e.stderr:
-                    error_msg += f": {e.stderr}"
-                logger.debug(error_msg)
-                errors.append(error_msg)
-                continue
+
+            # Try uv first, fall back to pip. Pass --python explicitly so uv
+            # targets the current interpreter (required in conda envs and other
+            # non-uv-managed environments where VIRTUAL_ENV is not set).
+            install_commands = [
+                (
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--python",
+                        sys.executable,
+                        "-r",
+                        str(requirements_file),
+                        "-c",
+                        str(constraints_file),
+                    ],
+                    "uv pip",
+                ),
+                (
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "-r",
+                        str(requirements_file),
+                        "-c",
+                        str(constraints_file),
+                    ],
+                    "pip",
+                ),
+            ]
+
+            errors = []
+            for cmd, name in install_commands:
+                try:
+                    logger.info(f"Attempting to install requirements using {name}")
+                    subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    logger.info(f"Successfully installed requirements using {name}")
+                    return True
+                except FileNotFoundError:
+                    logger.debug(f"{name} not found, trying next option")
+                    errors.append(f"{name} executable not found")
+                    continue
+                except subprocess.CalledProcessError as e:
+                    error_msg = f"Failed to install with {name}"
+                    if e.stderr:
+                        error_msg += f": {e.stderr}"
+                    logger.debug(error_msg)
+                    errors.append(error_msg)
+                    continue
 
         # If we get here, both methods failed
         combined_errors = "\n".join(errors)
         error_msg = (
-            "Failed to install requirements from your requirements.txt\n"
+            "Failed to install the algorithm requirements\n"
             f"Tried: uv pip and pip\n"
             f"Errors:\n{combined_errors}"
         )
         logger.error(error_msg)
-        raise RequirementsInstallError(error_msg)
+        raise DependencyInstallError(error_msg)
 
     @staticmethod
-    def _requirements_satisfied(req_file: Path) -> bool:
-        """Check if all requirements in req_file are already installed.
+    def _requirements_satisfied(
+        requirements_file: Path, constraints_file: Path
+    ) -> bool:
+        """Check if all requirements in requirements_file are already installed.
 
         Tries uv pip first, falls back to pip if uv is not available.
         """
@@ -178,7 +282,9 @@ class AlgorithmLoader:
                     "--python",
                     sys.executable,
                     "-r",
-                    str(req_file),
+                    str(requirements_file),
+                    "-c",
+                    str(constraints_file),
                 ],
                 "uv pip",
             ),
@@ -190,7 +296,9 @@ class AlgorithmLoader:
                     "install",
                     "--dry-run",
                     "-r",
-                    str(req_file),
+                    str(requirements_file),
+                    "-c",
+                    str(constraints_file),
                 ],
                 "pip",
             ),
@@ -452,7 +560,7 @@ class AlgorithmLoader:
             The first NeuracoreModel subclass found in the algorithm directory.
 
         Raises:
-            RequirementsInstallError: If dependency installation fails.
+            DependencyInstallError: If dependency installation fails.
             PackageSetupError: If package environment setup fails.
             ModelNotFoundError: If no NeuracoreModel subclass is found after
                 trying all import strategies.
@@ -504,3 +612,18 @@ class AlgorithmLoader:
             "is properly defined."
             f"{error_details}"
         )
+
+
+@cache
+def install_packaged_algorithm_requirements(target: str) -> None:
+    """Install the dependencies of the packaged algorithm that target names.
+
+    Args:
+        target: Dotted path of the algorithm class, such as
+            neuracore.ml.algorithms.act.act.ACT.
+    """
+    module_name = target.rsplit(".", 2)[0]
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
+        return
+    AlgorithmLoader(Path(spec.origin).parent).install_requirements()
