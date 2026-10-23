@@ -9,10 +9,15 @@ import argparse
 import json
 import logging
 import os
+import re
+import signal
 import subprocess
 import sys
 import tempfile
 import venv
+from collections import deque
+from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
 
 import neuracore as nc
@@ -25,6 +30,35 @@ logger = logging.getLogger(__name__)
 # Define the markers used in the validation script
 JSON_START_MARKER = "<<<NEURACORE_VALIDATION_JSON_START>>>"
 JSON_END_MARKER = "<<<NEURACORE_VALIDATION_JSON_END>>>"
+
+LOG_TAIL_LINES = 50
+PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+class SignalExitCode(IntEnum):
+    """Return codes of a process that a POSIX signal stopped."""
+
+    SIGABRT = -6
+    SIGKILL = -9
+    SIGSEGV = -11
+    SIGTERM = -15
+
+
+@dataclass
+class OutOfMemoryKillEvidence:
+    """What the kernel recorded about an out of memory kill of one process.
+
+    Attributes:
+        killed_by_out_of_memory: True when a source shows an out of memory
+            kill, False when the readable sources show none, and None when no
+            source is readable.
+        kernel_log_line: The kernel log line that reports the kill, or an
+            empty string.
+    """
+
+    killed_by_out_of_memory: bool | None
+    kernel_log_line: str = ""
 
 
 def run_in_venv(
@@ -126,18 +160,31 @@ sys.exit(0 if success else 1)
 
             # Run validation in virtual environment
             logger.info("Validating algorithm...")
-            result = subprocess.run(
+            oom_kill_count_before = _read_oom_kill_count()
+            with subprocess.Popen(
                 [
                     str(python_exe),
                     str(script_path),
                 ],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-            )
+            ) as validation_process:
+                stdout, stderr = validation_process.communicate()
+
+            failure_description = ""
+            if validation_process.returncode != 0:
+                failure_description = _describe_validation_process_failure(
+                    returncode=validation_process.returncode,
+                    pid=validation_process.pid,
+                    log_path=validation_output_dir / "validate.log",
+                    oom_kill_count_before=oom_kill_count_before,
+                    include_log_tail=storage_handler is None,
+                )
 
             # Extract algo_check and error_msg from subprocess output
             algo_check, error_msg = _parse_validation_results(
-                result.stdout, result.stderr
+                stdout, stderr, failure_description
             )
 
             # Save validation results if storage handler is provided
@@ -164,12 +211,237 @@ sys.exit(0 if success else 1)
     return algo_check, error_msg
 
 
-def _parse_validation_results(stdout: str, stderr: str) -> tuple[AlgorithmCheck, str]:
+def _read_oom_kill_count() -> int | None:
+    """Read the oom_kill counter of the cgroup v2 group this process belongs to.
+
+    Returns:
+        The number of processes the OOM killer stopped in this cgroup, or None
+        when the cgroup memory events are unreadable.
+    """
+    try:
+        for cgroup_line in PROC_SELF_CGROUP.read_text().splitlines():
+            if not cgroup_line.startswith("0::"):
+                continue
+            cgroup_path = cgroup_line.removeprefix("0::").lstrip("/")
+            memory_events_path = CGROUP_ROOT / cgroup_path / "memory.events"
+            for memory_event_line in memory_events_path.read_text().splitlines():
+                counter_name, _, counter_value = memory_event_line.partition(" ")
+                if counter_name == "oom_kill":
+                    return int(counter_value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _read_kernel_log() -> str | None:
+    """Read the kernel ring buffer with dmesg.
+
+    Returns:
+        The kernel log text, or None when dmesg is missing or not permitted.
+    """
+    try:
+        dmesg_result = subprocess.run(
+            ["dmesg"], capture_output=True, text=True, check=True
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return dmesg_result.stdout
+
+
+def _find_out_of_memory_kill_evidence(
+    pid: int, oom_kill_count_before: int | None
+) -> OutOfMemoryKillEvidence:
+    """Look for an out of memory kill of the process in the kernel records.
+
+    Args:
+        pid: Process ID of the killed validation process.
+        oom_kill_count_before: The cgroup oom_kill counter read before the
+            process started, or None when it was unreadable.
+
+    Returns:
+        The kernel log line for the process when present, otherwise the
+        result of comparing the cgroup oom_kill counter before and after.
+    """
+    kernel_log_text = _read_kernel_log()
+    if kernel_log_text is not None:
+        kill_line_pattern = re.compile(rf"Killed process {pid}\b")
+        matching_kernel_log_lines = [
+            kernel_log_line
+            for kernel_log_line in kernel_log_text.splitlines()
+            if kill_line_pattern.search(kernel_log_line)
+        ]
+        if matching_kernel_log_lines:
+            return OutOfMemoryKillEvidence(
+                killed_by_out_of_memory=True,
+                kernel_log_line=matching_kernel_log_lines[-1].strip(),
+            )
+
+    oom_kill_count_after = _read_oom_kill_count()
+    match (oom_kill_count_before, oom_kill_count_after):
+        case (int() as count_before, int() as count_after) if (
+            count_after > count_before
+        ):
+            return OutOfMemoryKillEvidence(killed_by_out_of_memory=True)
+        case (int(), int()):
+            return OutOfMemoryKillEvidence(killed_by_out_of_memory=False)
+        case _ if kernel_log_text is not None:
+            return OutOfMemoryKillEvidence(killed_by_out_of_memory=False)
+        case _:
+            return OutOfMemoryKillEvidence(killed_by_out_of_memory=None)
+
+
+def _describe_forced_stop(evidence: OutOfMemoryKillEvidence) -> str:
+    """Describe a validation process that SIGKILL stopped.
+
+    Args:
+        evidence: What the kernel recorded about an out of memory kill.
+
+    Returns:
+        A message that names out of memory as the cause when the evidence
+        shows it, and tells the user what to change.
+    """
+    match evidence.killed_by_out_of_memory:
+        case True:
+            description = (
+                "Validation failed: it ran out of system RAM, so the system "
+                "stopped it (exit code -9, SIGKILL). Reduce the system RAM your "
+                "model needs, for example by using a smaller model."
+            )
+        case False:
+            description = (
+                "The system stopped validation by force (exit code -9, SIGKILL). "
+                "It recorded no out of memory event, so another process or a "
+                "person stopped it."
+            )
+        case None:
+            description = (
+                "The system stopped validation by force (exit code -9, SIGKILL). "
+                "This usually means validation ran out of system RAM. This machine "
+                "does not allow reading the exact reason."
+            )
+    if evidence.kernel_log_line:
+        description += f"\nKernel log: {evidence.kernel_log_line}"
+    return description
+
+
+def _describe_exit_code(
+    returncode: int, pid: int, oom_kill_count_before: int | None
+) -> str:
+    """Describe in plain words how the validation process ended.
+
+    Args:
+        returncode: Exit code of the validation process. A negative value is
+            the number of the signal that stopped it.
+        pid: Process ID of the validation process.
+        oom_kill_count_before: The cgroup oom_kill counter read before the
+            process started, or None when it was unreadable.
+
+    Returns:
+        A user facing message for the exit code.
+    """
+    match returncode:
+        case SignalExitCode.SIGKILL:
+            return _describe_forced_stop(
+                _find_out_of_memory_kill_evidence(pid, oom_kill_count_before)
+            )
+        case SignalExitCode.SIGSEGV:
+            return (
+                "Validation crashed with a segmentation fault (exit code -11, "
+                "SIGSEGV). This usually comes from native code your model uses, "
+                "such as a CUDA or C++ extension."
+            )
+        case SignalExitCode.SIGABRT:
+            return (
+                "Validation aborted (exit code -6, SIGABRT). Native code your "
+                "model uses, such as a CUDA or C++ library, stopped the process "
+                "after an internal error."
+            )
+        case SignalExitCode.SIGTERM:
+            return (
+                "Validation received a request to stop (exit code -15, SIGTERM), "
+                "for example because its machine shut down. Try validating again."
+            )
+        case negative_returncode if negative_returncode < 0:
+            try:
+                signal_name = signal.Signals(-negative_returncode).name
+            except ValueError:
+                signal_name = "an unknown signal"
+            return (
+                f"Validation stopped on {signal_name} "
+                f"(exit code {negative_returncode})."
+            )
+        case _:
+            return (
+                f"Validation exited with code {returncode} before reporting "
+                "a result."
+            )
+
+
+def _read_log_tail(log_path: Path, max_line_count: int = LOG_TAIL_LINES) -> str:
+    """Read the last lines of the validation log.
+
+    Args:
+        log_path: Path to the validation log file.
+        max_line_count: Maximum number of lines to return.
+
+    Returns:
+        A heading followed by the last lines of the log, or a note when the log
+        holds no lines or is unreadable.
+    """
+    try:
+        with log_path.open(errors="replace") as log_file:
+            last_log_lines = deque(log_file, maxlen=max_line_count)
+    except FileNotFoundError:
+        last_log_lines = deque()
+    except OSError:
+        return "The validation log is unreadable."
+    if not last_log_lines:
+        return "Validation stopped before it wrote any log lines."
+    return (
+        f"Last {len(last_log_lines)} lines of the validation log:\n"
+        + "".join(last_log_lines).rstrip()
+    )
+
+
+def _describe_validation_process_failure(
+    returncode: int,
+    pid: int,
+    log_path: Path,
+    oom_kill_count_before: int | None,
+    include_log_tail: bool,
+) -> str:
+    """Describe a validation process that exited with a nonzero code.
+
+    Args:
+        returncode: Exit code of the validation process.
+        pid: Process ID of the validation process.
+        log_path: Path to the validation log file.
+        oom_kill_count_before: The cgroup oom_kill counter read before the
+            process started, or None when it was unreadable.
+        include_log_tail: Whether to add the last lines of the validation log,
+            for runs whose log reaches no cloud storage.
+
+    Returns:
+        The plain language exit description, followed by the log tail when
+        include_log_tail is set.
+    """
+    exit_code_description = _describe_exit_code(returncode, pid, oom_kill_count_before)
+    if not include_log_tail:
+        return exit_code_description
+    return f"{exit_code_description}\n\n{_read_log_tail(log_path)}"
+
+
+def _parse_validation_results(
+    stdout: str, stderr: str, failure_description: str = ""
+) -> tuple[AlgorithmCheck, str]:
     """Parse validation results from subprocess output.
 
     Args:
         stdout: Standard output from the validation subprocess
         stderr: Standard error from the validation subprocess
+        failure_description: Plain language exit description and log tail of
+            a validation subprocess that exited with a nonzero code, used as
+            the error when the output has no results
 
     Returns:
         Tuple of (algo_check, error_msg)
@@ -201,9 +473,17 @@ def _parse_validation_results(stdout: str, stderr: str) -> tuple[AlgorithmCheck,
                 )
         else:
             # If no markers found, treat as error
-            error_msg = (
-                f"No validation JSON output found. STDOUT: {stdout}, STDERR: {stderr}"
-            )
+            if failure_description:
+                error_msg = failure_description
+                if stdout:
+                    error_msg += f"\n\nValidation output:\n{stdout}"
+                if stderr.strip():
+                    error_msg += f"\n\nValidation errors:\n{stderr.strip()}"
+            else:
+                error_msg = (
+                    "No validation JSON output found. "
+                    f"STDOUT: {stdout}, STDERR: {stderr}"
+                )
 
     except json.JSONDecodeError as e:
         error_msg = (
