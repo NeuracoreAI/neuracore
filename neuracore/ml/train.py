@@ -431,6 +431,65 @@ def _any_rank_failed_to_load_checkpoint(
     return bool(flag.item())
 
 
+def _load_resume_checkpoint(
+    trainer: DistributedTrainer,
+    checkpoint_path: str,
+    rank: int,
+    world_size: int,
+) -> int:
+    """Load a resume checkpoint and return the epoch to start from.
+
+    A failed load aborts the run. With more than one rank, every rank enters
+    the failure collective before any rank raises, so one failure cannot leave
+    the others inside the training loop.
+
+    Args:
+        trainer: Trainer that loads the checkpoint.
+        checkpoint_path: Filesystem path of the checkpoint to resume from.
+        rank: Rank of this process.
+        world_size: Number of processes in the training job.
+
+    Returns:
+        Epoch index to pass to training.
+
+    Raises:
+        RuntimeError: This rank or another rank failed to load the checkpoint,
+            or the ranks could not agree on that status.
+    """
+    load_error: Exception | None = None
+    start_epoch = 0
+    try:
+        checkpoint = trainer.load_checkpoint(checkpoint_path)
+        start_epoch = checkpoint.get("epoch", 0) + 1
+    except Exception as exc:
+        load_error = exc
+
+    if world_size > 1:
+        try:
+            any_rank_failed = _any_rank_failed_to_load_checkpoint(
+                local_failed=load_error is not None,
+                rank=rank,
+            )
+        except Exception as collective_exc:
+            if load_error is None:
+                raise RuntimeError(
+                    "Failed to synchronize resume-checkpoint status for "
+                    f"{checkpoint_path!r}."
+                ) from collective_exc
+        else:
+            if any_rank_failed and load_error is None:
+                load_error = RuntimeError(
+                    "Another rank failed to load the resume checkpoint "
+                    f"{checkpoint_path!r}."
+                )
+
+    if load_error is not None:
+        raise RuntimeError(
+            f"Failed to load resume checkpoint {checkpoint_path!r}."
+        ) from load_error
+    return start_epoch
+
+
 def run_training(
     rank: int,
     world_size: int,
@@ -623,44 +682,16 @@ def run_training(
             validation_rollout_config=validation_rollout_config,
         )
 
-        # Resume from checkpoint if specified. A failed load must abort the run:
-        # continuing would train and save artifacts from unrestored state.
+        # A failed resume load aborts the run. Continuing would train and save
+        # artifacts from unrestored state.
         start_epoch = 0
         if cfg.resume_checkpoint_path is not None:
-            checkpoint_path = cfg.resume_checkpoint_path
-            load_error: Exception | None = None
-            try:
-                checkpoint = trainer.load_checkpoint(checkpoint_path)
-                start_epoch = checkpoint.get("epoch", 0) + 1
-            except Exception as exc:
-                load_error = exc
-
-            if world_size > 1:
-                try:
-                    any_rank_failed = _any_rank_failed_to_load_checkpoint(
-                        local_failed=load_error is not None,
-                        rank=rank,
-                    )
-                except Exception as collective_exc:
-                    if load_error is None:
-                        raise RuntimeError(
-                            "Failed to synchronize resume-checkpoint status for "
-                            f"{checkpoint_path!r}."
-                        ) from collective_exc
-                    raise RuntimeError(
-                        f"Failed to load resume checkpoint {checkpoint_path!r}."
-                    ) from load_error
-                if any_rank_failed and load_error is None:
-                    load_error = RuntimeError(
-                        "Another rank failed to load the resume checkpoint "
-                        f"{checkpoint_path!r}."
-                    )
-
-            if load_error is not None:
-                raise RuntimeError(
-                    f"Failed to load resume checkpoint {checkpoint_path!r}."
-                ) from load_error
-
+            start_epoch = _load_resume_checkpoint(
+                trainer,
+                cfg.resume_checkpoint_path,
+                rank,
+                world_size,
+            )
             logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
 
         # Start training
