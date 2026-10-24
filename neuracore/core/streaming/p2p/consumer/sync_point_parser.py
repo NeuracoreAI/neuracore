@@ -47,8 +47,9 @@ def parse_sync_point(
         data: NCData = data_class.model_validate_json(message_data)
         data = cast(NCDataUnion, data)
 
-        # Decode image data
-        if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
+        # Decode image data. DepthCameraData validation decodes depth frames
+        # to uint16.
+        if data_type == DataType.RGB_IMAGES:
             data.frame = ImageStringEncoder.decode_image(data.frame)
 
         return SynchronizedPoint(
