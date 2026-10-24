@@ -216,10 +216,10 @@ struct VideoChunkState {
     width: u32,
     /// Frame height in pixels (constant across a stream's chunks).
     height: u32,
-    /// Original frame dtype for the in-progress chunk. A [`Envelope::VideoChunkReady`]
-    /// announcement carries exactly one dtype, so — like `width`/`height` — a
-    /// dtype change mid-stream seals the open chunk and reopens at the new
-    /// dtype rather than mixing dtypes inside one chunk.
+    /// Stored dtype of the in-progress chunk (see [`FrameDtype::stored`]). A
+    /// [`Envelope::VideoChunkReady`] announcement carries exactly one dtype, so,
+    /// like `width` and `height`, a change of stored dtype or depth scale
+    /// seals the open chunk and reopens at the new one.
     dtype: FrameDtype,
     /// `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
     spool_dir: PathBuf,
@@ -316,7 +316,7 @@ fn with_video_chunks<R>(operation: impl FnOnce(&mut HashMap<String, VideoChunkSl
 /// One frame handed to the background writer. Owns its raw sample bytes
 /// (copied out of the caller's buffer under the GIL) so the caller can return
 /// immediately. `data` is packed RGB24 for [`FrameDtype::Rgb8`] or raw
-/// little-endian depth samples for a depth `dtype` — the depth-to-RGB24
+/// little-endian depth samples for a depth `dtype`; the depth-to-gray16
 /// conversion happens later, on a compression-pool worker (see
 /// [`compress_worker`]), never on this hot path.
 pub(crate) struct FrameJob {
@@ -740,9 +740,9 @@ impl FrameResult {
 }
 
 /// One frame submitted to the compression pool. `raw` is packed RGB24 for
-/// [`FrameDtype::Rgb8`] or raw depth samples otherwise — [`compress_worker`]
-/// converts depth to RGB24 before PNG-encoding it, so the raw bytes reach the
-/// pool unconverted (the hot `log_frame` path never does that work).
+/// [`FrameDtype::Rgb8`] or raw depth samples otherwise; [`compress_worker`]
+/// converts depth to gray16 before PNG-encoding it, so the raw bytes reach the
+/// pool unconverted and the hot `log_frame` path never does that work.
 struct CompressJob {
     width: u32,
     height: u32,
@@ -785,14 +785,13 @@ impl CompressPool {
 }
 
 /// Compression worker: pull frames FIFO and compress each to PNG, publishing the
-/// result into its one-shot slot. Compression (and, for depth, the RGB24
+/// result into its one-shot slot. Compression (and, for depth, the gray16
 /// conversion ahead of it) is stateless per frame, so any worker can take any
-/// frame — the writer restores per-stream order on collect.
+/// frame; the writer restores per-stream order on collect.
 ///
-/// RGB frames are already packed RGB24 and pass straight to the PNG encoder,
-/// leaving the existing RGB/NUT path unchanged. Depth frames are numerically
-/// converted to RGB24 storage bytes first (see [`crate::depth::depth_to_rgb24`])
-/// — `encode_png_frame` must never see raw depth bytes.
+/// RGB frames are packed RGB24 and become truecolour PNGs. Depth frames become
+/// 16-bit greyscale PNGs of uint16 samples (see
+/// [`crate::depth::depth_to_gray16_be`]).
 fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
     let (lock, cond) = work;
     loop {
@@ -805,13 +804,12 @@ fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
                 queue = cond.wait(queue).unwrap_or_else(|p| p.into_inner());
             }
         };
-        let rgb = match job.dtype {
-            FrameDtype::Rgb8 => job.raw,
-            FrameDtype::DepthF16 | FrameDtype::DepthF32 => {
-                crate::depth::depth_to_rgb24(job.dtype, job.width, job.height, &job.raw)
-            }
+        let png = if job.dtype.is_depth() {
+            let gray = crate::depth::depth_to_gray16_be(job.dtype, job.width, job.height, &job.raw);
+            crate::nut_writer::encode_png_gray16_frame(job.width, job.height, &gray)
+        } else {
+            crate::nut_writer::encode_png_frame(job.width, job.height, &job.raw)
         };
-        let png = crate::nut_writer::encode_png_frame(job.width, job.height, &rgb);
         job.result.set(png);
     }
 }
@@ -2007,16 +2005,17 @@ mod tests {
     }
 
     #[test]
-    fn dtype_change_seals_chunk_and_reopens_at_new_dtype() {
-        // A VideoChunkReady announcement carries exactly one dtype for the
-        // whole chunk, so a mid-stream depth dtype change must seal the open
-        // chunk rather than mixing float16 and float32 frames.
+    fn depth_scale_change_seals_chunk_and_reopens_at_new_scale() {
+        // A VideoChunkReady announcement carries exactly one stored dtype and
+        // depth scale for the whole chunk, so a mid-stream scale change seals
+        // the open chunk rather than mixing frames of two scales.
         let dir = tempfile::tempdir().unwrap();
         let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let grid = FrameDtype::depth_u16(1e-3);
+        let d405 = FrameDtype::depth_u16(1e-4);
 
-        // append_frame_locked receives the already converted PNG/RGB24 payload.
-        // The dtype describes the original depth array, not this stored payload.
-        let png_payload = vec![0u8; 2 * 2 * 3];
+        // append_frame_locked receives the already compressed PNG payload.
+        let png_payload = vec![0u8; 2 * 2 * 2];
 
         let opened = append_frame_locked(
             &mut state,
@@ -2026,17 +2025,17 @@ mod tests {
             "cam",
             2,
             2,
-            FrameDtype::DepthF16,
+            grid,
             &png_payload,
             TEST_PUBLISH_NS,
             1_000,
             0.0,
         );
         assert!(opened.is_empty());
-        assert_eq!(state.dtype, FrameDtype::DepthF16);
+        assert_eq!(state.dtype, grid);
 
-        // Same geometry, but the original depth dtype changes. The float16 chunk
-        // must be sealed before opening a new float32 chunk.
+        // Same geometry, but the depth scale changes. The grid chunk must be
+        // sealed before opening the sensor-unit chunk.
         let sealed = append_frame_locked(
             &mut state,
             "r",
@@ -2045,37 +2044,29 @@ mod tests {
             "cam",
             2,
             2,
-            FrameDtype::DepthF32,
+            d405,
             &png_payload,
             TEST_PUBLISH_NS,
             2_000,
             0.001,
         );
 
-        assert_eq!(sealed.len(), 1, "the dtype change seals the prior chunk");
+        assert_eq!(sealed.len(), 1, "the scale change seals the prior chunk");
 
         match &sealed[0] {
             Envelope::VideoChunkReady {
                 dtype, frame_count, ..
             } => {
-                assert_eq!(
-                    *dtype,
-                    FrameDtype::DepthF16,
-                    "the sealed chunk keeps its original dtype"
-                );
+                assert_eq!(*dtype, grid, "the sealed chunk keeps its scale");
                 assert_eq!(*frame_count, 1);
             }
             other => panic!("expected VideoChunkReady, got {other:?}"),
         }
 
-        assert_eq!(
-            state.dtype,
-            FrameDtype::DepthF32,
-            "state adopts the new dtype"
-        );
+        assert_eq!(state.dtype, d405, "state adopts the new scale");
         assert_eq!(
             state.frame_count, 1,
-            "the new chunk holds the float32 frame"
+            "the new chunk holds the sensor-unit frame"
         );
     }
 
@@ -2083,7 +2074,7 @@ mod tests {
     fn sealed_chunk_announcement_carries_its_dtype() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
-        let frame = vec![0u8; 2 * 2 * 3];
+        let frame = vec![0u8; 2 * 2 * 2];
         append_frame_locked(
             &mut state,
             "r",
@@ -2092,7 +2083,7 @@ mod tests {
             "cam",
             2,
             2,
-            FrameDtype::DepthF32,
+            FrameDtype::depth_u16(1e-4),
             &frame,
             TEST_PUBLISH_NS,
             1_000,
@@ -2102,7 +2093,8 @@ mod tests {
             .expect("open chunk seals");
         match envelope {
             Envelope::VideoChunkReady { dtype, .. } => {
-                assert_eq!(dtype, FrameDtype::DepthF32);
+                assert_eq!(dtype, FrameDtype::depth_u16(1e-4));
+                assert_eq!(dtype.depth_scale_m(), Some(1e-4));
             }
             other => panic!("expected VideoChunkReady, got {other:?}"),
         }
@@ -2111,14 +2103,16 @@ mod tests {
     #[test]
     fn expected_frame_bytes_matches_each_dtype() {
         assert_eq!(expected_frame_bytes(FrameDtype::Rgb8, 4, 4), Some(48));
-        assert_eq!(expected_frame_bytes(FrameDtype::DepthF16, 4, 4), Some(32));
-        assert_eq!(expected_frame_bytes(FrameDtype::DepthF32, 4, 4), Some(64));
+        assert_eq!(
+            expected_frame_bytes(FrameDtype::depth_u16(1e-4), 4, 4),
+            Some(32)
+        );
     }
 
     #[test]
     fn expected_frame_bytes_overflow_is_none_not_a_panic() {
         assert_eq!(
-            expected_frame_bytes(FrameDtype::DepthF32, u32::MAX, u32::MAX),
+            expected_frame_bytes(FrameDtype::depth_u16(1e-4), u32::MAX, u32::MAX),
             None
         );
     }
