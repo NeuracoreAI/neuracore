@@ -78,6 +78,7 @@ cmeel
 CNNMLP
 cnnmlp
 CNNMLPP
+codestreams
 Colab
 colab
 colcon
@@ -258,6 +259,7 @@ jntid
 jntnum
 jobname
 jointbody
+jpegxl
 jsons
 jtps
 keepalive
@@ -281,6 +283,7 @@ libcs
 libgl
 libglew
 libglib
+libjxl
 libosmesa
 libproc
 libx
@@ -487,6 +490,7 @@ seqlen
 serde
 sess
 sessionfinish
+SETFD
 setpriority
 setpts
 setrlimit
@@ -498,6 +502,7 @@ SIGLIP
 Siglip
 siglip
 silu
+skcms
 softmax
 solimp
 solref
@@ -505,6 +510,7 @@ splitn
 sqlalchemy
 sqlx
 squaredcos
+SRGB
 startcode
 startcodes
 STARTPTS
