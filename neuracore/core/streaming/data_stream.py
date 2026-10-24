@@ -230,14 +230,14 @@ class VideoDataStream(DataStream):
     def log(
         self,
         metadata: CameraData,
-        frame: np.ndarray,
+        frame: np.ndarray | None,
         recording_epoch: int | None = None,
     ) -> None:
         """Log video frame data.
 
         Args:
             metadata: Camera metadata including timestamp and calibration
-            frame: Video frame as numpy array
+            frame: Video frame as numpy array, or None for an undecoded PNG
             recording_epoch: Identity of the source's open recording, or None.
         """
         self._enforce_monotonic_timestamp(metadata.timestamp, recording_epoch)

@@ -49,7 +49,6 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
-        storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
@@ -67,7 +66,6 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
-            storage_limit=storage_limit,
             random_sample=random_sample,
             shared=shared,
             debug_target_ee_frame=debug_target_ee_frame,
@@ -198,12 +196,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             )
         finally:
             if not self.dry_run:
-                nc.stop_recording(
-                    robot_name=self.robot_name,
-                    instance=instance,
-                    wait=True,
-                    timestamp=recording_stop_timestamp,
-                )
+                self._stop_recording(recording_stop_timestamp)
 
         self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
 

@@ -12,12 +12,14 @@ use anyhow::{Context, Result};
 
 use crate::api::auth::FileAuthProvider;
 use crate::api::client::{ApiClient, ApiClientOptions};
+use crate::cloud::coordinators::uploader::MAX_CONCURRENT_UPLOADS;
 use crate::cloud::{
     spawn_org_watcher, spawn_progress_reporter, spawn_recording_cancel_notifier,
     spawn_recording_notifications, spawn_recording_start_notifier, spawn_recording_stop_notifier,
     spawn_registration, spawn_status_updater, spawn_uploader, ConfigRx, OrgWatcherHandle,
     RecordingNotificationsHandle, StatusUpdate,
 };
+use crate::config::positive_count;
 use crate::connection::spawn_connection_monitor;
 use crate::pipeline::dispatcher::RecordingCommand;
 use crate::state::{EventBus, SqliteStateStore, TraceWriteHandle};
@@ -93,10 +95,13 @@ pub(crate) fn spawn_cloud_coordinators(
         event_bus.clone(),
         Arc::clone(&client),
         org_rx.clone(),
-        config_rx,
+        config_rx.clone(),
         shutdown_tx.subscribe(),
     );
+    let upload_workers =
+        positive_count(config_rx.borrow().upload_workers).unwrap_or(MAX_CONCURRENT_UPLOADS);
     let uploader = spawn_uploader(
+        upload_workers,
         state_store.clone(),
         trace_writer,
         event_bus.clone(),
