@@ -64,16 +64,25 @@ jobs:
   start-training:
     needs: [discover-algorithms]
     runs-on: ubuntu-24.04
+    # The harness polls for up to 60 minutes while the server waits for a GPU,
+    # then the training run itself.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.discover-algorithms.outputs.matrix) }}
 
     steps:
-    - name: Checkout production test harness
+    - name: Show disk space
+      run: df -h /
+
+    - name: Install system packages
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+
+    - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: ${{ needs.discover-algorithms.outputs.latest_release_tag }}
+        ref: ${{ matrix.test-harness-ref }}
         fetch-depth: 0
     - name: Pull LFS objects
       run: git lfs pull
@@ -89,8 +98,10 @@ jobs:
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v6
+      id: setup-python
       with:
         python-version: ${{ matrix.python-version }}
+        cache: 'pip'
 
     - name: Set up neuracore from PyPI
       uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
@@ -123,7 +134,7 @@ jobs:
           --log-cli-level=INFO \
           --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
           --log-cli-date-format="%H:%M:%S" \
-          -v \
+          -vv \
           "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
 
     - name: Wait for training terminal status
@@ -138,5 +149,9 @@ jobs:
           --log-cli-level=INFO \
           --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
           --log-cli-date-format="%H:%M:%S" \
-          -v \
+          -vv \
           "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /
