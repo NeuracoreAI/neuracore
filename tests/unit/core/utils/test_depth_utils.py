@@ -4,12 +4,15 @@ import re
 from pathlib import Path
 
 import numpy as np
+from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
 
 from neuracore.core.utils import depth_utils
 from neuracore.core.utils.depth_utils import (
     DEPTH_PREVIEW_MAX_M,
     DEPTH_PREVIEW_MIN_M,
     depth_to_log_gray,
+    depth_to_rgb_storage,
+    legacy_rgb_to_depth_units,
     log_gray_to_depth,
 )
 
@@ -32,6 +35,20 @@ DAEMON_LEVELS_AT_0_1_MM = [
     (65500, 255),
     (65535, 255),
 ]
+
+
+def test_legacy_rgb_depth_converts_to_units_of_the_legacy_scale():
+    """Unpack legacy packed RGB depth to within one unit of the stored metres."""
+    metres = np.array([[0.0, 0.0001, 0.5], [1.234, 6.5, 10.0]], dtype=np.float32)
+
+    units = legacy_rgb_to_depth_units(depth_to_rgb_storage(metres))
+
+    assert units.dtype == np.uint16
+    assert units[0, 0] == 0
+    assert units[1, 2] == np.iinfo(np.uint16).max
+    np.testing.assert_allclose(
+        units * LEGACY_DEPTH_SCALE_M, metres, atol=LEGACY_DEPTH_SCALE_M
+    )
 
 
 def test_log_gray_matches_the_daemon_viewer_video_levels():
