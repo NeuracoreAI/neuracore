@@ -42,7 +42,8 @@ PRE_NETWORK_INTEGRITY_CASES = (
         recording_count=1,
         producer_pacing=PACING_SATURATE,
     ),
-    # RGB, depth and joints from one thread — the `float32` depth round trip.
+    # RGB, depth and joints from one thread: the depth round trip in tenths of
+    # a millimeter, as a D405 logs it, holes and a saturated pixel included.
     # Frame identity resolves by sync-iteration order here, the easy direction.
     Synchronous(
         duration_sec=10,
@@ -52,7 +53,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_height=64,
         image_width=64,
         depth_count=1,
-        depth_mode="float32",
+        depth_mode="uint16_tenth_mm",
         producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
@@ -71,7 +72,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
-    # `float16` depth under staggered parallel contexts and live boundaries.
+    # Millimeter depth under staggered parallel contexts and live boundaries.
     # Frame identity cannot lean on capture order, which is the point of it.
     PerThread(
         duration_sec=10,
@@ -86,7 +87,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         parallel_contexts=2,
         mode=MODE_STAGGERED,
         depth_count=1,
-        depth_mode="float16",
+        depth_mode="uint16_mm",
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
@@ -167,7 +168,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_height=64,
         video_fps=30,
         depth_count=1,
-        depth_mode="float16",
+        depth_mode="uint16_tenth_mm",
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
@@ -340,7 +341,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_REALISTIC,
     ),
-    # Two RGBD devices: the depth path costs a `float32` array per frame and an
+    # Two RGBD devices: the depth path costs a `uint16` array per frame and an
     # encode of its own. No other workload logs depth at all.
     PerThread(
         duration_sec=20,
@@ -352,7 +353,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         depth_count=2,
-        depth_mode="float32",
+        depth_mode="uint16_mm",
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
