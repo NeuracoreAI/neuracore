@@ -17,7 +17,7 @@ from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from neuracore.core.utils.depth_utils import depth_to_rgb_visualization
+from neuracore.core.utils.depth_utils import depth_to_log_gray
 from neuracore.ml.core.ml_types import BatchedInferenceInputs
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.datasets.pytorch_neuracore_dataset import (
@@ -416,7 +416,7 @@ def _write_depth_jpeg(frame: torch.Tensor, path: Path) -> None:
     depth = np.squeeze(frame.numpy()).astype(np.float32)
     if depth.ndim != 2:
         raise ValueError(f"Depth frame must be 2D after squeezing, got {depth.shape}.")
-    Image.fromarray(depth_to_rgb_visualization(depth)).save(path, format="JPEG")
+    Image.fromarray(depth_to_log_gray(depth)).save(path, format="JPEG")
 
 
 def _channel_last_image(frame: torch.Tensor) -> torch.Tensor:
