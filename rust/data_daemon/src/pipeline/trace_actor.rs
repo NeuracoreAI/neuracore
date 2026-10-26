@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use data_daemon_shared::FrameDtype;
+use data_daemon_shared::{FrameCalibration, FrameDtype};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::{self, JoinSet};
@@ -323,6 +323,9 @@ pub enum TraceActorMessage {
         skip_frames: u32,
         /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
         frame_timestamps_s: Vec<f64>,
+        /// Per-frame camera calibration for the metadata sidecar, in capture
+        /// order.
+        frame_calibrations: Vec<FrameCalibration>,
         /// Stored dtype of every frame in this chunk. The daemon never
         /// decodes pixels; for depth it selects the depth encode and lands in
         /// the trace's `trace.json` sidecar.
@@ -398,6 +401,8 @@ struct QueuedChunk {
     /// Per-frame `timestamp_s` values in capture order. The first entry also
     /// anchors the batch's inter-chunk duration spans.
     frame_timestamps_s: Vec<f64>,
+    /// Per-frame camera calibration in capture order.
+    frame_calibrations: Vec<FrameCalibration>,
     /// Stored dtype of every frame in this chunk. A batch spans one dtype.
     dtype: FrameDtype,
     /// Frame width in pixels. A batch spans one geometry.
@@ -423,6 +428,8 @@ struct CompletedChunk {
     /// batch's per-chunk vectors, applied to the metadata accumulator at
     /// finalise in chunk-index order.
     frame_timestamps_s: Vec<f64>,
+    /// Per-frame camera calibration, concatenated like `frame_timestamps_s`.
+    frame_calibrations: Vec<FrameCalibration>,
     /// Total frames covered by this entry: the sum over the batch's chunks.
     frame_count: u32,
     /// The segment's real mp4 content extent, as the batch concat list
@@ -487,6 +494,7 @@ pub async fn run(
                 frame_count,
                 skip_frames,
                 frame_timestamps_s,
+                frame_calibrations,
                 dtype,
             } => {
                 state
@@ -500,6 +508,7 @@ pub async fn run(
                         frame_count,
                         skip_frames,
                         frame_timestamps_s,
+                        frame_calibrations,
                         dtype,
                     )
                     .await;
@@ -717,6 +726,7 @@ impl ActorState {
         frame_count: u32,
         skip_frames: u32,
         frame_timestamps_s: Vec<f64>,
+        frame_calibrations: Vec<FrameCalibration>,
         dtype: FrameDtype,
     ) {
         let trace_dir = self.trace_directory(context);
@@ -802,6 +812,7 @@ impl ActorState {
                 frame_count,
                 skip_frames,
                 frame_timestamps_s,
+                frame_calibrations,
                 dtype,
                 width,
                 height,
@@ -1180,11 +1191,17 @@ impl ActorState {
                 let timestamps = completed_chunks
                     .values()
                     .flat_map(|chunk| chunk.frame_timestamps_s.iter());
+                let mut calibrations = completed_chunks
+                    .values()
+                    .flat_map(|chunk| chunk.frame_calibrations.iter());
                 for (index, timestamp_s) in timestamps.enumerate() {
                     let mut entry = serde_json::Map::new();
                     entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
                     entry.insert("width".to_string(), Value::from(width as u64));
                     entry.insert("height".to_string(), Value::from(height as u64));
+                    if let Some(calibration) = calibrations.next() {
+                        insert_calibration(&mut entry, calibration);
+                    }
                     if let Some(depth) = depth {
                         let (offset, length) = depth_ranges[index];
                         entry.insert(
@@ -1540,10 +1557,12 @@ impl EncodeWorker {
                     lossless_bytes = encode.lossless_bytes,
                     "video chunk batch encoded"
                 );
-                let frame_timestamps_s: Vec<f64> = batch
-                    .into_iter()
-                    .flat_map(|chunk| chunk.frame_timestamps_s)
-                    .collect();
+                let mut frame_timestamps_s: Vec<f64> = Vec::new();
+                let mut frame_calibrations: Vec<FrameCalibration> = Vec::new();
+                for chunk in batch {
+                    frame_timestamps_s.extend(chunk.frame_timestamps_s);
+                    frame_calibrations.extend(chunk.frame_calibrations);
+                }
                 EncodeWorkerOutcome::Completed {
                     chunk_index: first_index,
                     completed: CompletedChunk {
@@ -1552,6 +1571,7 @@ impl EncodeWorker {
                         bytes: encode.lossy_bytes.saturating_add(encode.lossless_bytes),
                         depth_frame_lengths: encode.depth_frame_lengths,
                         frame_timestamps_s,
+                        frame_calibrations,
                         frame_count,
                         content_extent_us,
                         dtype,
@@ -1580,6 +1600,25 @@ impl EncodeWorker {
                 }
             }
         }
+    }
+}
+
+/// Add a frame's logged calibration to its `trace.json` entry as nested
+/// row-major `intrinsics` (3x3) and `extrinsics` (4x4) lists.
+fn insert_calibration(entry: &mut serde_json::Map<String, Value>, calibration: &FrameCalibration) {
+    let rows = |values: &[f32], width: usize| -> Value {
+        Value::Array(
+            values
+                .chunks(width)
+                .map(|row| Value::Array(row.iter().map(|v| Value::from(f64::from(*v))).collect()))
+                .collect(),
+        )
+    };
+    if let Some(intrinsics) = &calibration.intrinsics {
+        entry.insert("intrinsics".to_string(), rows(intrinsics, 3));
+    }
+    if let Some(extrinsics) = &calibration.extrinsics {
+        entry.insert("extrinsics".to_string(), rows(extrinsics, 4));
     }
 }
 
@@ -2006,6 +2045,7 @@ mod tests {
                     4,
                     0,
                     frame_timestamps_s,
+                    vec![FrameCalibration::default(); 4],
                     FrameDtype::Rgb8,
                 )
                 .await;
@@ -2088,6 +2128,12 @@ mod tests {
                 })
                 .collect()
         };
+        let logged_calibration = FrameCalibration {
+            intrinsics: Some([300.0, 0.0, 8.0, 0.0, 300.0, 8.0, 0.0, 0.0, 1.0]),
+            extrinsics: Some([
+                1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.25, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 1.0,
+            ]),
+        };
         for chunk_index in 0..2u32 {
             let spool_nut = spool_dir.join(format!("chunk_{chunk_index}.nut"));
             let mut writer = NutWriter::create(
@@ -2116,6 +2162,11 @@ mod tests {
             let frame_timestamps_s: Vec<f64> = (0..3u32)
                 .map(|local| 100.0 + f64::from(chunk_index * 3 + local) / 30.0)
                 .collect();
+            let frame_calibrations = if chunk_index == 0 {
+                vec![logged_calibration; 3]
+            } else {
+                vec![FrameCalibration::default(); 3]
+            };
             state
                 .handle_video(
                     &context,
@@ -2127,6 +2178,7 @@ mod tests {
                     3,
                     0,
                     frame_timestamps_s,
+                    frame_calibrations,
                     dtype,
                 )
                 .await;
@@ -2178,6 +2230,27 @@ mod tests {
             String::from_utf8_lossy(&probe.stdout).trim(),
             "h264,yuv420p,6"
         );
+        // Frames logged with calibration carry it as nested row-major lists;
+        // frames logged without it carry no calibration keys.
+        for entry in &entries[0..3] {
+            assert_eq!(
+                entry["intrinsics"],
+                json!([[300.0, 0.0, 8.0], [0.0, 300.0, 8.0], [0.0, 0.0, 1.0]])
+            );
+            assert_eq!(
+                entry["extrinsics"],
+                json!([
+                    [1.0, 0.0, 0.0, 0.5],
+                    [0.0, 1.0, 0.0, 0.25],
+                    [0.0, 0.0, 1.0, 2.0],
+                    [0.0, 0.0, 0.0, 1.0]
+                ])
+            );
+        }
+        for entry in &entries[3..6] {
+            assert!(entry.get("intrinsics").is_none());
+            assert!(entry.get("extrinsics").is_none());
+        }
     }
 
     #[tokio::test]
@@ -2386,6 +2459,7 @@ mod tests {
                 frame_count,
                 0,
                 frame_timestamps_s,
+                vec![FrameCalibration::default(); frame_count as usize],
                 dtype,
             )
             .await;
@@ -2421,6 +2495,7 @@ mod tests {
                 frame_count: 1,
                 skip_frames: 0,
                 frame_timestamps_s: vec![0.0],
+                frame_calibrations: vec![FrameCalibration::default(); 1],
                 dtype,
                 width: 16,
                 height: 16,
@@ -2467,6 +2542,7 @@ mod tests {
                 frame_count: 1,
                 skip_frames,
                 frame_timestamps_s: vec![0.0],
+                frame_calibrations: vec![FrameCalibration::default(); 1],
                 dtype: FrameDtype::Rgb8,
                 width: 16,
                 height: 16,
@@ -2506,6 +2582,7 @@ mod tests {
                 frame_count: frame_capture_us.len() as u32,
                 skip_frames: 0,
                 frame_timestamps_s: frame_capture_us.iter().map(|us| *us as f64 / 1e6).collect(),
+                frame_calibrations: vec![FrameCalibration::default(); frame_capture_us.len()],
                 dtype: FrameDtype::Rgb8,
                 width: 16,
                 height: 16,
@@ -2840,6 +2917,7 @@ mod tests {
                 2,
                 0,
                 vec![0.1, 0.116683],
+                vec![FrameCalibration::default(); 2],
                 FrameDtype::Rgb8,
             )
             .await;

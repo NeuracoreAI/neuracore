@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 
 use data_daemon_shared::service_name::{MAX_VIDEO_CHUNK_FRAMES, VIDEO_SPOOL_TICKS_PER_SECOND};
 use data_daemon_shared::video_boundary::publish_offset_us;
-use data_daemon_shared::{Envelope, FrameDtype};
+use data_daemon_shared::{Envelope, FrameCalibration, FrameDtype};
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
 use crate::paths::{source_prefix, split_stream_key, spool_chunk_filename, spool_dir, stream_key};
@@ -264,6 +264,8 @@ struct VideoChunkState {
     frame_timestamps_ns: Vec<i64>,
     /// Per-frame `timestamp_s` accumulator for the in-progress chunk.
     frame_timestamps_s: Vec<f64>,
+    /// Per-frame camera calibration accumulator for the in-progress chunk.
+    frame_calibrations: Vec<FrameCalibration>,
     /// Per-frame publish time as µs after `chunk_publish_ns`, which is what
     /// lets the daemon cut this chunk at a boundary inside it.
     frame_publish_offsets_us: Vec<u32>,
@@ -331,13 +333,14 @@ pub(crate) struct FrameJob {
     pub(crate) publish_ns: i64,
     pub(crate) timestamp_ns: i64,
     pub(crate) timestamp_s: f64,
+    pub(crate) calibration: FrameCalibration,
     pub(crate) data: Vec<u8>,
 }
 
 /// Work item for the writer thread.
 pub(crate) enum WriterMsg {
     /// Append one frame to its `(source, sensor)` in-progress chunk.
-    Frame(FrameJob),
+    Frame(Box<FrameJob>),
     /// Stop barrier: drain every frame queued ahead for the source (FIFO), seal
     /// and announce its open chunks, then acknowledge. The caller publishes
     /// `StopRecording` itself once acked. No lifecycle envelope is published
@@ -879,6 +882,7 @@ fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
         pending.job.publish_ns,
         pending.job.timestamp_ns,
         pending.job.timestamp_s,
+        pending.job.calibration,
     ) {
         tracing::warn!(%error, sensor_name = pending.job.sensor_name, "failed to spool video frame");
     }
@@ -931,7 +935,7 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
         let next = queue.pop_timeout(SPOOL_SCAN_INTERVAL);
         match next {
             Some(WriterMsg::Frame(job)) => {
-                submit_frame(pool, &mut in_flight, job);
+                submit_frame(pool, &mut in_flight, *job);
                 // Cap outstanding compressions: block-mux the oldest until the
                 // pipeline has room. This doubles as the queue's backpressure —
                 // the writer stops popping while it waits here.
@@ -1067,6 +1071,7 @@ fn record_video_frame(
     publish_ns: i64,
     timestamp_ns: i64,
     timestamp_s: f64,
+    calibration: FrameCalibration,
 ) -> Result<(), ProducerError> {
     let key = stream_key(robot_id, robot_instance, data_type, sensor_name);
     // Resolve the slot, building the per-stream state (and its spool dir) only
@@ -1098,6 +1103,7 @@ fn record_video_frame(
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
+            frame_calibrations: Vec::new(),
             frame_publish_offsets_us: Vec::new(),
         }));
         registry.streams.insert(key.clone(), slot.clone());
@@ -1132,6 +1138,7 @@ fn record_video_frame(
             publish_ns,
             timestamp_ns,
             timestamp_s,
+            calibration,
         )
     };
 
@@ -1168,6 +1175,7 @@ fn append_frame_locked(
     publish_ns: i64,
     timestamp_ns: i64,
     timestamp_s: f64,
+    calibration: FrameCalibration,
 ) -> Vec<Envelope> {
     let mut announcements: Vec<Envelope> = Vec::new();
     // The caller publishes the collected envelopes outside the lock.
@@ -1319,6 +1327,7 @@ fn append_frame_locked(
     state.frame_count = state.frame_count.saturating_add(1);
     state.frame_timestamps_ns.push(timestamp_ns);
     state.frame_timestamps_s.push(timestamp_s);
+    state.frame_calibrations.push(calibration);
     state
         .frame_publish_offsets_us
         .push(publish_offset_us(state.chunk_publish_ns, publish_ns));
@@ -1355,6 +1364,7 @@ fn flush_chunk_locked(
             state.frame_count = 0;
             state.frame_timestamps_ns.clear();
             state.frame_timestamps_s.clear();
+            state.frame_calibrations.clear();
             state.frame_publish_offsets_us.clear();
             return None;
         }
@@ -1365,6 +1375,7 @@ fn flush_chunk_locked(
     let frame_count = state.frame_count;
     let frame_timestamps_ns = std::mem::take(&mut state.frame_timestamps_ns);
     let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
+    let frame_calibrations = std::mem::take(&mut state.frame_calibrations);
     let frame_publish_offsets_us = std::mem::take(&mut state.frame_publish_offsets_us);
 
     state.frame_count = 0;
@@ -1383,6 +1394,7 @@ fn flush_chunk_locked(
         frame_count,
         frame_timestamps_ns,
         frame_timestamps_s,
+        frame_calibrations,
         dtype: state.dtype,
         frame_publish_offsets_us,
     })
@@ -1691,6 +1703,7 @@ mod tests {
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
+            frame_calibrations: Vec::new(),
             frame_publish_offsets_us: Vec::new(),
         }
     }
@@ -1719,6 +1732,7 @@ mod tests {
             logged_at,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
 
         assert_eq!(
@@ -1763,6 +1777,7 @@ mod tests {
                 publish_ns,
                 timestamp_ns,
                 timestamp_s,
+                FrameCalibration::default(),
             );
             assert!(
                 sealed.is_empty(),
@@ -1808,6 +1823,7 @@ mod tests {
             TEST_PUBLISH_NS,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
 
         assert!(
@@ -1839,6 +1855,7 @@ mod tests {
             TEST_PUBLISH_NS,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
         assert!(sealed.is_empty(), "a fresh chunk is not yet old");
 
@@ -1855,6 +1872,7 @@ mod tests {
             TEST_PUBLISH_NS + CHUNK_MAX_OPEN_NS,
             2_000,
             0.001,
+            FrameCalibration::default(),
         );
 
         match sealed.as_slice() {
@@ -1900,6 +1918,7 @@ mod tests {
             repeated,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
         let first = state.chunk_publish_ns;
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
@@ -1917,6 +1936,7 @@ mod tests {
             repeated,
             2_000,
             0.001,
+            FrameCalibration::default(),
         );
         let second = state.chunk_publish_ns;
 
@@ -1951,6 +1971,7 @@ mod tests {
             TEST_PUBLISH_NS,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
         assert!(
             opened.is_empty(),
@@ -1974,6 +1995,7 @@ mod tests {
             TEST_PUBLISH_NS,
             2_000,
             0.001,
+            FrameCalibration::default(),
         );
         assert_eq!(sealed.len(), 1, "the geometry change seals the prior chunk");
         match &sealed[0] {
@@ -2030,6 +2052,7 @@ mod tests {
             TEST_PUBLISH_NS,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
         assert!(opened.is_empty());
         assert_eq!(state.dtype, grid);
@@ -2049,6 +2072,7 @@ mod tests {
             TEST_PUBLISH_NS,
             2_000,
             0.001,
+            FrameCalibration::default(),
         );
 
         assert_eq!(sealed.len(), 1, "the scale change seals the prior chunk");
@@ -2088,6 +2112,7 @@ mod tests {
             TEST_PUBLISH_NS,
             1_000,
             0.0,
+            FrameCalibration::default(),
         );
         let envelope = flush_chunk_locked("r", 0, "DEPTH_IMAGES", "cam", &mut state)
             .expect("open chunk seals");
@@ -2126,8 +2151,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
         let frame = vec![0u8; 2 * 2 * 3];
+        let calibrations: Vec<FrameCalibration> = (0..3)
+            .map(|i| FrameCalibration {
+                intrinsics: Some([i as f32; 9]),
+                extrinsics: (i != 1).then_some([i as f32; 16]),
+            })
+            .collect();
 
-        for (timestamp_ns, timestamp_s) in [(1_000, 0.0), (2_000, 0.001), (3_000, 0.002)] {
+        for ((timestamp_ns, timestamp_s), calibration) in
+            [(1_000, 0.0), (2_000, 0.001), (3_000, 0.002)]
+                .into_iter()
+                .zip(calibrations.iter().copied())
+        {
             let announcements = append_frame_locked(
                 &mut state,
                 "r",
@@ -2141,6 +2176,7 @@ mod tests {
                 TEST_PUBLISH_NS,
                 timestamp_ns,
                 timestamp_s,
+                calibration,
             );
             assert!(
                 announcements.is_empty(),
@@ -2160,6 +2196,7 @@ mod tests {
                 byte_count,
                 frame_timestamps_ns,
                 frame_timestamps_s,
+                frame_calibrations,
                 ..
             } => {
                 assert_eq!(sensor_name.as_deref(), Some("cam"));
@@ -2168,6 +2205,7 @@ mod tests {
                 assert!(byte_count > 0, "a sealed chunk has a non-zero NUT file");
                 assert_eq!(frame_timestamps_ns, vec![1_000, 2_000, 3_000]);
                 assert_eq!(frame_timestamps_s, vec![0.0, 0.001, 0.002]);
+                assert_eq!(frame_calibrations, calibrations);
             }
             other => panic!("expected VideoChunkReady, got {other:?}"),
         }
@@ -2178,6 +2216,7 @@ mod tests {
         assert_eq!(state.frame_count, 0);
         assert!(state.frame_timestamps_ns.is_empty());
         assert!(state.frame_timestamps_s.is_empty());
+        assert!(state.frame_calibrations.is_empty());
         assert!(state.frame_publish_offsets_us.is_empty());
     }
 
@@ -2204,6 +2243,7 @@ mod tests {
                 TEST_PUBLISH_NS + index as i64 * 33_333_333,
                 capture_ns,
                 capture_ns as f64 / 1e9,
+                FrameCalibration::default(),
             );
         }
 
@@ -2259,6 +2299,7 @@ mod tests {
                 TEST_PUBLISH_NS,
                 timestamp_ns,
                 0.0,
+                FrameCalibration::default(),
             );
         }
         assert_eq!(
@@ -2274,7 +2315,7 @@ mod tests {
 
     /// A minimal video-frame message carrying `bytes` of payload.
     fn frame_msg(bytes: usize) -> WriterMsg {
-        WriterMsg::Frame(FrameJob {
+        WriterMsg::Frame(Box::new(FrameJob {
             robot_id: "robot".to_string(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".to_string(),
@@ -2285,8 +2326,9 @@ mod tests {
             publish_ns: TEST_PUBLISH_NS,
             timestamp_ns: 0,
             timestamp_s: 0.0,
+            calibration: FrameCalibration::default(),
             data: vec![0u8; bytes],
-        })
+        }))
     }
 
     #[test]
@@ -2419,6 +2461,7 @@ mod tests {
             TEST_PUBLISH_NS + timestamp_us * 1_000,
             timestamp_us * 1_000,
             timestamp_us as f64 / 1e6,
+            FrameCalibration::default(),
         )
     }
 

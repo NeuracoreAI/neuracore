@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use dashmap::DashMap;
 use data_daemon_shared::{
-    video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording, Source,
+    video_boundary, BatchedDataItem, Envelope, FrameCalibration, FrameDtype, LiveRecording, Source,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -441,6 +441,7 @@ enum HeldPayload {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        frame_calibrations: Vec<FrameCalibration>,
         dtype: FrameDtype,
         /// Per-frame publish time as µs after the chunk's open stamp
         frame_publish_offsets_us: Vec<u32>,
@@ -674,6 +675,7 @@ impl Dispatcher {
                 frame_count,
                 frame_timestamps_ns,
                 frame_timestamps_s,
+                frame_calibrations,
                 dtype,
                 frame_publish_offsets_us,
             } => {
@@ -694,6 +696,7 @@ impl Dispatcher {
                         byte_count,
                         frame_count,
                         frame_timestamps_s,
+                        frame_calibrations,
                         dtype,
                         frame_publish_offsets_us,
                     },
@@ -1572,6 +1575,7 @@ impl Dispatcher {
                 byte_count,
                 frame_count,
                 frame_timestamps_s,
+                frame_calibrations,
                 dtype,
                 frame_publish_offsets_us,
             } => {
@@ -1587,6 +1591,7 @@ impl Dispatcher {
                     byte_count,
                     frame_count,
                     frame_timestamps_s,
+                    frame_calibrations,
                     dtype,
                     frame_publish_offsets_us,
                 )
@@ -1735,6 +1740,7 @@ impl Dispatcher {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        frame_calibrations: Vec<FrameCalibration>,
         dtype: FrameDtype,
         frame_publish_offsets_us: Vec<u32>,
     ) {
@@ -1797,7 +1803,8 @@ impl Dispatcher {
                      published inside it"
                 );
             }
-            let claimed_timestamps = claim.timestamps(&frame_timestamps_s);
+            let claimed_timestamps = claim.per_frame(&frame_timestamps_s);
+            let claimed_calibrations = claim.per_frame(&frame_calibrations);
 
             let recording_index = window.recording_index;
             let handle = Self::ensure_actor(
@@ -1825,6 +1832,7 @@ impl Dispatcher {
                     frame_count: claim.count,
                     skip_frames: claim.skip,
                     frame_timestamps_s: claimed_timestamps,
+                    frame_calibrations: claimed_calibrations,
                     dtype,
                 })
                 .await
@@ -1936,13 +1944,11 @@ struct ChunkClaim {
 }
 
 impl ChunkClaim {
-    /// This claim's slice of the chunk's per-frame capture timestamps.
-    fn timestamps(&self, frame_timestamps_s: &[f64]) -> Vec<f64> {
-        let start = (self.skip as usize).min(frame_timestamps_s.len());
-        let end = start
-            .saturating_add(self.count as usize)
-            .min(frame_timestamps_s.len());
-        frame_timestamps_s[start..end].to_vec()
+    /// This claim's slice of one of the chunk's per-frame vectors.
+    fn per_frame<T: Clone>(&self, values: &[T]) -> Vec<T> {
+        let start = (self.skip as usize).min(values.len());
+        let end = start.saturating_add(self.count as usize).min(values.len());
+        values[start..end].to_vec()
     }
 }
 
@@ -2583,7 +2589,7 @@ mod tests {
                 skip,
                 count,
             }
-            .timestamps(&stamps)
+            .per_frame(&stamps)
         };
 
         assert_eq!(claim(0, 5), stamps, "an uncut claim keeps every stamp");
@@ -2752,6 +2758,7 @@ mod tests {
             frame_count: publish_offsets_us.len() as u32,
             frame_timestamps_s: capture_stamps.iter().map(|ns| *ns as f64 / 1e9).collect(),
             frame_timestamps_ns: capture_stamps,
+            frame_calibrations: vec![FrameCalibration::default(); publish_offsets_us.len()],
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us: publish_offsets_us.to_vec(),
         }

@@ -230,9 +230,14 @@ pub mod service_name {
     /// Worst-case postcard size of one frame's contribution to a
     /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
     /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
-    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
-    /// `frame_publish_offsets_us` element is a `u32` varint (≤5 bytes).
-    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
+    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, a
+    /// `frame_publish_offsets_us` element is a `u32` varint (≤5 bytes), and a
+    /// `frame_calibrations` element is at most [`FRAME_CALIBRATION_MAX_BYTES`].
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5 + FRAME_CALIBRATION_MAX_BYTES;
+
+    /// Worst-case postcard size of one [`crate::FrameCalibration`]: two option
+    /// tags plus nine and sixteen fixed 4-byte `f32` values.
+    pub const FRAME_CALIBRATION_MAX_BYTES: usize = 1 + 9 * 4 + 1 + 16 * 4;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
     /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
@@ -603,6 +608,9 @@ pub enum Envelope {
         /// Length equals `frame_count`; values round-trip bit-exact through
         /// postcard for the metadata sidecar.
         frame_timestamps_s: Vec<f64>,
+        /// Per-frame camera calibration in arrival order. Length equals
+        /// `frame_count`.
+        frame_calibrations: Vec<FrameCalibration>,
         /// Stored representation of every frame in this chunk (never mixed:
         /// the producer seals and reopens a chunk on a dtype or depth scale
         /// change, like a geometry change). Depth chunks carry
@@ -648,6 +656,19 @@ pub enum Envelope {
         /// [`Envelope::SourceFlushed`] reports under.
         producer_pid: u32,
     },
+}
+
+/// Camera calibration logged with one video frame.
+///
+/// `intrinsics` is the row-major 3x3 pinhole matrix and `extrinsics` the
+/// row-major 4x4 camera pose, both exactly as the caller logged them. The
+/// daemon writes them into the frame's `trace.json` entry as nested lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FrameCalibration {
+    /// Row-major 3x3 intrinsics matrix.
+    pub intrinsics: Option<[f32; 9]>,
+    /// Row-major 4x4 extrinsics matrix.
+    pub extrinsics: Option<[f32; 16]>,
 }
 
 /// Pixel or sample representation of one video-family frame.
@@ -1177,6 +1198,21 @@ mod tests {
                 1_700_000_000.033_333_3,
                 7.0_f64 / 60.0_f64,
             ],
+            frame_calibrations: vec![
+                FrameCalibration {
+                    intrinsics: Some([600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0]),
+                    extrinsics: Some([
+                        1.0, 0.0, 0.0, 0.1, 0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.3, 0.0, 0.0, 0.0,
+                        1.0,
+                    ]),
+                },
+                FrameCalibration {
+                    intrinsics: Some([600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0]),
+                    extrinsics: None,
+                },
+                FrameCalibration::default(),
+                FrameCalibration::default(),
+            ],
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us: vec![0, 16, 33, 50],
         };
@@ -1209,6 +1245,7 @@ mod tests {
                 frame_count: 1,
                 frame_timestamps_ns: vec![1_700_000_000_000_000_000],
                 frame_timestamps_s: vec![1_700_000_000.0],
+                frame_calibrations: vec![FrameCalibration::default()],
                 dtype,
                 frame_publish_offsets_us: vec![0],
             };
@@ -1283,6 +1320,7 @@ mod tests {
             frame_count: frame_timestamps_ns.len() as u32,
             frame_timestamps_ns,
             frame_timestamps_s,
+            frame_calibrations: vec![FrameCalibration::default(); 10_000],
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us,
         };
@@ -1301,11 +1339,18 @@ mod tests {
         // announcement always fits one commands sample. Prove the cap holds at
         // the absolute worst case: every per-frame ns timestamp a full-range
         // i64 (10-byte postcard zigzag varint), every publish offset a
-        // full-range u32 (5-byte varint), and every fixed field maxed out.
+        // full-range u32 (5-byte varint), every frame carrying both
+        // calibration matrices, and every fixed field maxed out.
         // Without the cap a long recording of tiny frames overflows the slice
         // and the whole recording's video announcement fails to publish.
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
         let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
+        let frame_calibrations: Vec<FrameCalibration> = (0..count)
+            .map(|_| FrameCalibration {
+                intrinsics: Some([f32::MAX; 9]),
+                extrinsics: Some([f32::MAX; 16]),
+            })
+            .collect();
         let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
         let frame_publish_offsets_us: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
@@ -1322,6 +1367,7 @@ mod tests {
             frame_count: count as u32,
             frame_timestamps_ns,
             frame_timestamps_s,
+            frame_calibrations,
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us,
         };
