@@ -533,6 +533,7 @@ tlsv
 tmpfs
 tobytes
 tolist
+tomli
 torchdynamo
 torchserve
 torchvision

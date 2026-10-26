@@ -17,11 +17,20 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
-from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
+from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
+
+DIFFUSION_POLICY_ALGORITHM_DIR = (
+    Path(__file__).resolve().parents[4] / "neuracore/ml/algorithms/diffusion_policy"
+)
+AlgorithmLoader(DIFFUSION_POLICY_ALGORITHM_DIR).install_requirements()
+
+from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import (  # noqa: E402
+    DiffusionPolicy,
+)
 
 BS = 2
 DEVICE = get_default_device()

@@ -91,7 +91,7 @@ def create_nc_archive(
     algorithm_file = Path(inspect.getfile(model.__class__))
     algorithm_loader = AlgorithmLoader(algorithm_file.parent)
     algo_files = algorithm_loader.get_all_files()
-    requirements_file_path = algorithm_loader.algorithm_dir / "requirements.txt"
+    dependency_file = algorithm_loader.find_dependency_file()
 
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -207,9 +207,12 @@ def create_nc_archive(
                     rel_path = algo_file.relative_to(algorithm_loader.algorithm_dir)
                     zip_file.write(algo_file, f"algorithm/{rel_path}")
 
-                # Add requirements file if it exists
-                if requirements_file_path.exists():
-                    zip_file.write(requirements_file_path, "algorithm/requirements.txt")
+                # Add the dependency file if it exists
+                if dependency_file is not None:
+                    rel_path = dependency_file.relative_to(
+                        algorithm_loader.algorithm_dir
+                    )
+                    zip_file.write(dependency_file, f"algorithm/{rel_path}")
 
             os.replace(staging_path, archive_path)
         except BaseException:
