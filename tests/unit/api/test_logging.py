@@ -81,6 +81,81 @@ def test_log_with_extrinsics_intrinsics(
     )
 
 
+VALID_INTRINSICS = np.array([[500.0, 0.0, 50.0], [0.0, 500.0, 50.0], [0.0, 0.0, 1.0]])
+
+
+def _extrinsics_with_rotation(rotation: np.ndarray) -> np.ndarray:
+    extrinsics = np.eye(4)
+    extrinsics[:3, :3] = rotation
+    extrinsics[:3, 3] = (0.5, -0.25, 1.0)
+    return extrinsics
+
+
+@pytest.mark.parametrize(
+    ("extrinsics", "intrinsics", "message"),
+    [
+        pytest.param(
+            np.where(np.eye(4) == 1, np.nan, 0.0),
+            None,
+            "Extrinsics must hold only finite values",
+            id="extrinsics_nan",
+        ),
+        pytest.param(
+            None,
+            np.where(VALID_INTRINSICS == 500.0, np.inf, VALID_INTRINSICS),
+            "Intrinsics must hold only finite values",
+            id="intrinsics_inf",
+        ),
+        pytest.param(
+            _extrinsics_with_rotation(np.eye(3)) + np.diag([0, 0, 0, 1.0]),
+            None,
+            r"Extrinsics bottom row must be \[0, 0, 0, 1\]",
+            id="extrinsics_bottom_row",
+        ),
+        pytest.param(
+            _extrinsics_with_rotation(1.1 * np.eye(3)),
+            None,
+            "Extrinsics rotation must be orthonormal",
+            id="scaled_rotation",
+        ),
+        pytest.param(
+            _extrinsics_with_rotation(np.diag([1.0, 1.0, -1.0])),
+            None,
+            "Extrinsics rotation must be orthonormal with determinant",
+            id="reflection",
+        ),
+        pytest.param(
+            None,
+            VALID_INTRINSICS * np.array([1.0, 1.0, 2.0])[:, None],
+            r"Intrinsics bottom row must be \[0, 0, 1\]",
+            id="intrinsics_bottom_row",
+        ),
+        pytest.param(
+            None,
+            VALID_INTRINSICS * np.array([-1.0, 1.0, 1.0])[:, None],
+            "Intrinsics focal lengths fx and fy must be positive",
+            id="negative_fx",
+        ),
+        pytest.param(
+            None,
+            np.where(np.arange(9).reshape(3, 3) == 4, 0.0, VALID_INTRINSICS),
+            "Intrinsics focal lengths fx and fy must be positive",
+            id="zero_fy",
+        ),
+    ],
+)
+def test_log_rgb_rejects_invalid_calibration(extrinsics, intrinsics, message):
+    """Reject calibration that is malformed or non-finite."""
+    with pytest.raises(ValueError, match=message):
+        nc.log_rgb(
+            "camera",
+            np.zeros((2, 2, 3), dtype=np.uint8),
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            dry_run=True,
+        )
+
+
 def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
     temp_config_dir,
     mock_auth_requests,
