@@ -12,7 +12,8 @@
 //! daemon-relinked NUT chunks for ffmpeg-side transcoding into MP4 segments
 //! (one batch of up to [`ENCODE_BATCH_MAX_CHUNKS`] queued chunks per
 //! invocation under backlog), then on finalise stitch the segments into the
-//! final `lossy.mp4` / `lossless.mp4` and flush the
+//! final `lossy.mp4` and `lossless.mp4` (or `lossless.bin` for depth) and
+//! flush the
 //! [`VideoMetadataAccumulator`] sidecar.
 //!
 //! `TraceWriterKind::Video` owns the `completed_chunks` map, the worker
@@ -70,9 +71,9 @@ use crate::config::DaemonConfig;
 use crate::encoding::json_trace::JsonTraceError;
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
 use crate::encoding::video_encoder::{
-    batch_content_extent_us, declared_batch_span_us, declared_span_with_extent_us,
-    BatchEncodeRequest, BatchNutInput, LossyVideoCodec, VideoEncodeError, VideoEncoder,
-    ENCODE_THREADS_PER_OUTPUT,
+    batch_content_extent_us, concat_depth_frames, declared_batch_span_us,
+    declared_span_with_extent_us, BatchEncodeRequest, BatchNutInput, DepthEncode, LossyVideoCodec,
+    VideoEncodeError, VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
 };
 use crate::pipeline::json_writer::JsonWriteHandle;
 use crate::state::{TraceErrorCode, TraceWriteHandle};
@@ -322,9 +323,9 @@ pub enum TraceActorMessage {
         skip_frames: u32,
         /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
         frame_timestamps_s: Vec<f64>,
-        /// Original dtype of every frame in this chunk. The daemon never
-        /// decodes pixels — this is threaded straight into the completed
-        /// chunk and, for depth, the trace's `trace.json` sidecar.
+        /// Stored dtype of every frame in this chunk. The daemon never
+        /// decodes pixels; for depth it selects the depth encode and lands in
+        /// the trace's `trace.json` sidecar.
         dtype: FrameDtype,
     },
     /// The recording window has closed and its holdback has drained: finalise
@@ -397,8 +398,12 @@ struct QueuedChunk {
     /// Per-frame `timestamp_s` values in capture order. The first entry also
     /// anchors the batch's inter-chunk duration spans.
     frame_timestamps_s: Vec<f64>,
-    /// Original dtype of every frame in this chunk. A batch spans one dtype.
+    /// Stored dtype of every frame in this chunk. A batch spans one dtype.
     dtype: FrameDtype,
+    /// Frame width in pixels. A batch spans one geometry.
+    width: u32,
+    /// Frame height in pixels.
+    height: u32,
 }
 
 /// One successfully encoded batch of one or more chunks, keyed by its first
@@ -406,8 +411,12 @@ struct QueuedChunk {
 struct CompletedChunk {
     /// `chunk_NNNN_lossy.mp4` segment path (first index of the batch).
     lossy_segment: PathBuf,
-    /// `chunk_NNNN_lossless.mp4` segment path (first index of the batch).
+    /// `chunk_NNNN_lossless.mp4` segment path, or the `chunk_NNNN_lossless.bin`
+    /// depth frames segment (first index of the batch).
     lossless_segment: PathBuf,
+    /// Byte length of each JPEG-XL frame in a depth frames segment, in frame
+    /// order. Empty for RGB.
+    depth_frame_lengths: Vec<u64>,
     /// Sum of both segments' on-disk byte counts.
     bytes: u64,
     /// Per-frame `timestamp_s` values, the in-order concatenation of the
@@ -421,9 +430,8 @@ struct CompletedChunk {
     /// segment never starts inside this one's content, which a replay of the
     /// announced stamps cannot guarantee for a synthesized-PTS batch.
     content_extent_us: i64,
-    /// The batch's original frame dtype — stored per batch (not once for the
-    /// whole trace) so each batch's metadata entries get their own dtype even
-    /// if it somehow differs between chunks of one trace.
+    /// The batch's stored frame dtype, kept per batch so each batch's
+    /// metadata entries carry their own dtype and depth scale.
     dtype: FrameDtype,
 }
 
@@ -795,6 +803,8 @@ impl ActorState {
                 skip_frames,
                 frame_timestamps_s,
                 dtype,
+                width,
+                height,
             });
         unencoded_chunks.fetch_add(1, Ordering::Relaxed);
 
@@ -1062,7 +1072,12 @@ impl ActorState {
 
                 let trace_dir = self.trace_directory(context);
                 let lossy_out = trace_dir.join(paths::LOSSY_VIDEO_FILENAME);
-                let lossless_out = trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME);
+                let depth = depth_encode_for(&completed_chunks, width, height)?;
+                let lossless_out = trace_dir.join(if depth.is_some() {
+                    paths::LOSSLESS_DEPTH_FILENAME
+                } else {
+                    paths::LOSSLESS_VIDEO_FILENAME
+                });
 
                 // BTreeMap iteration is sorted by chunk_index, so the concat
                 // segment lists are guaranteed in producer-arrival order
@@ -1089,26 +1104,6 @@ impl ActorState {
                     .zip(completed_chunks.values().skip(1))
                     .map(|(segment, next)| declared_finalise_span_us(segment, next))
                     .collect();
-
-                // Build the metadata accumulator in the same chunk-index
-                // order so per-frame entries appear in capture order. Each
-                // chunk applies its own stored dtype (not just the first
-                // chunk's) to its frame entries. A depth chunk's entries gain
-                // a `"depth_scale_m"` field; RGB chunks add nothing, keeping the
-                // existing RGB `trace.json` schema byte-for-byte unchanged.
-                let mut metadata = VideoMetadataAccumulator::new();
-                for chunk in completed_chunks.values() {
-                    for timestamp_s in &chunk.frame_timestamps_s {
-                        let mut entry = serde_json::Map::new();
-                        entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
-                        entry.insert("width".to_string(), Value::from(width as u64));
-                        entry.insert("height".to_string(), Value::from(height as u64));
-                        if let Some(depth_scale_m) = chunk.dtype.depth_scale_m() {
-                            entry.insert("depth_scale_m".to_string(), Value::from(depth_scale_m));
-                        }
-                        metadata.record_frame(entry);
-                    }
-                }
 
                 // Concat is stream-copy: cheap relative to encode but still
                 // bounded by an ffmpeg permit so a tail-stitch storm
@@ -1138,8 +1133,37 @@ impl ActorState {
                     .video_encoder
                     .concat_segments(&lossy_segments, &segment_spans_us, &lossy_out)
                     .await?;
+                let mut depth_ranges: Vec<(u64, u64)> = Vec::new();
                 let lossless_bytes = if lossy_only {
                     0
+                } else if depth.is_some() {
+                    let frames = completed_chunks
+                        .values()
+                        .map(|chunk| chunk.frame_timestamps_s.len())
+                        .sum();
+                    let segments: Vec<(PathBuf, Vec<u64>)> = completed_chunks
+                        .values()
+                        .map(|chunk| {
+                            (
+                                chunk.lossless_segment.clone(),
+                                chunk.depth_frame_lengths.clone(),
+                            )
+                        })
+                        .collect();
+                    let out = lossless_out.clone();
+                    depth_ranges = tokio::task::spawn_blocking(move || {
+                        concat_depth_frames(&segments, frames, &out)
+                    })
+                    .await
+                    .map_err(|join_error| VideoEncodeError::Io {
+                        path: lossless_out.clone(),
+                        source: std::io::Error::other(format!(
+                            "depth concat join failed: {join_error}"
+                        )),
+                    })??;
+                    depth_ranges
+                        .last()
+                        .map_or(0, |(offset, length)| offset + length)
                 } else {
                     context
                         .video_encoder
@@ -1148,6 +1172,30 @@ impl ActorState {
                         .bytes
                 };
                 drop(permit);
+
+                // Per-frame entries in capture order. Each depth entry also
+                // carries its scale and the byte range of its frame in
+                // lossless.bin.
+                let mut metadata = VideoMetadataAccumulator::new();
+                let timestamps = completed_chunks
+                    .values()
+                    .flat_map(|chunk| chunk.frame_timestamps_s.iter());
+                for (index, timestamp_s) in timestamps.enumerate() {
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
+                    entry.insert("width".to_string(), Value::from(width as u64));
+                    entry.insert("height".to_string(), Value::from(height as u64));
+                    if let Some(depth) = depth {
+                        let (offset, length) = depth_ranges[index];
+                        entry.insert(
+                            "depth_scale_m".to_string(),
+                            Value::from(depth.depth_scale_m),
+                        );
+                        entry.insert("offset".to_string(), Value::from(offset));
+                        entry.insert("length".to_string(), Value::from(length));
+                    }
+                    metadata.record_frame(entry);
+                }
 
                 // Unlink per-chunk segments now that the final outputs are
                 // sealed. Best-effort: a leftover segment is wasted disk
@@ -1332,6 +1380,11 @@ impl EncodeWorker {
     async fn encode_batch(&self, batch: Vec<QueuedChunk>) -> EncodeWorkerOutcome {
         let first_index = batch[0].chunk_index;
         let dtype = batch[0].dtype;
+        let depth = dtype.depth_scale_m().map(|depth_scale_m| DepthEncode {
+            depth_scale_m,
+            width: batch[0].width,
+            height: batch[0].height,
+        });
         let raw_nuts: Vec<PathBuf> = batch
             .iter()
             .map(|chunk| {
@@ -1417,10 +1470,13 @@ impl EncodeWorker {
             lossy_out: self
                 .trace_dir
                 .join(paths::chunk_lossy_filename(first_index)),
-            lossless_out: self
-                .trace_dir
-                .join(paths::chunk_lossless_filename(first_index)),
+            lossless_out: self.trace_dir.join(if depth.is_some() {
+                paths::chunk_lossless_depth_filename(first_index)
+            } else {
+                paths::chunk_lossless_filename(first_index)
+            }),
             codec: self.codec,
+            depth,
         };
 
         // Size this encode's thread pool to the cores the rest of the fleet
@@ -1494,6 +1550,7 @@ impl EncodeWorker {
                         lossy_segment: request.lossy_out,
                         lossless_segment: request.lossless_out,
                         bytes: encode.lossy_bytes.saturating_add(encode.lossless_bytes),
+                        depth_frame_lengths: encode.depth_frame_lengths,
                         frame_timestamps_s,
                         frame_count,
                         content_extent_us,
@@ -1557,18 +1614,45 @@ fn declared_finalise_span_us(segment: &CompletedChunk, next: &CompletedChunk) ->
     )
 }
 
+/// Depth encode parameters for a finished trace, `None` for an RGB trace.
+///
+/// One depth frames file carries one scale, so a trace whose chunks were stored
+/// at different depth scales fails here instead of mislabelling frames.
+fn depth_encode_for(
+    completed_chunks: &BTreeMap<u32, CompletedChunk>,
+    width: u32,
+    height: u32,
+) -> Result<Option<DepthEncode>, VideoEncodeError> {
+    let mut scales = completed_chunks
+        .values()
+        .map(|chunk| chunk.dtype.depth_scale_m());
+    let Some(Some(depth_scale_m)) = scales.next() else {
+        return Ok(None);
+    };
+    if scales.any(|scale| scale != Some(depth_scale_m)) {
+        return Err(VideoEncodeError::Io {
+            path: PathBuf::from(paths::LOSSLESS_DEPTH_FILENAME),
+            source: std::io::Error::other("depth scale changed within one trace"),
+        });
+    }
+    Ok(Some(DepthEncode {
+        depth_scale_m,
+        width,
+        height,
+    }))
+}
+
 /// Take up to [`ENCODE_BATCH_MAX_CHUNKS`] descriptors from the queue front,
-/// stopping early at a dtype change and before a chunk whose declared span
+/// stopping early at a dtype or geometry change and before a chunk whose declared span
 /// exceeds [`ENCODE_BATCH_MAX_SPAN_US`]. A stopped-at chunk stays at the
 /// front for the worker its own arrival spawned.
 fn drain_encode_batch(queue: &mut VecDeque<QueuedChunk>) -> Vec<QueuedChunk> {
     let mut batch: Vec<QueuedChunk> = Vec::new();
     while batch.len() < ENCODE_BATCH_MAX_CHUNKS {
         let Some(front) = queue.front() else { break };
-        if batch
-            .first()
-            .is_some_and(|first| first.dtype != front.dtype)
-        {
+        if batch.first().is_some_and(|first| {
+            first.dtype != front.dtype || (first.width, first.height) != (front.width, front.height)
+        }) {
             break;
         }
         if batch.last().is_some_and(|last| {
@@ -1964,14 +2048,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn depth_chunks_record_their_own_scale_in_metadata_sidecar() {
-        // Depth frame entries carry "depth_scale_m" per chunk, and a later
-        // chunk with a different scale applies its own scale to its own
-        // entries, not the first chunk's.
+    async fn depth_trace_writes_jpeg_xl_frames_and_a_log_grey_viewer_video() {
+        // A uint16 depth trace finalises into lossless.bin (every frame as a
+        // JPEG-XL codestream), a log-curve grey lossy.mp4, and a trace.json
+        // whose every entry carries the scale and its frame's byte range.
         if !ffmpeg_available() {
-            eprintln!("ffmpeg not on PATH — skipping depth metadata sidecar test.");
+            eprintln!("ffmpeg not on PATH, skipping depth trace test.");
             return;
         }
+        use data_daemon_bridge::nut_writer::{encode_png_gray16_frame, NutVideoConfig, NutWriter};
 
         let tempdir = TempDir::new().unwrap();
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
@@ -1988,39 +2073,58 @@ mod tests {
         let spool_dir = tempdir.path().join("spool");
         std::fs::create_dir_all(&spool_dir).unwrap();
 
-        let dtypes = [FrameDtype::depth_u16(1e-4), FrameDtype::depth_u16(1e-3)];
-        for (chunk_index, dtype) in dtypes.into_iter().enumerate() {
-            let chunk_index = chunk_index as u32;
+        let (width, height) = (32u32, 24u32);
+        let scale = 1e-4;
+        let dtype = FrameDtype::depth_u16(scale);
+        let frame = |index: u32| -> Vec<u16> {
+            (0..width * height)
+                .map(|pixel| {
+                    let (x, y) = (pixel % width, pixel / width);
+                    if (x + y + index).is_multiple_of(9) {
+                        0
+                    } else {
+                        (2_000 + x * 700 + y * 300 + index * 50) as u16
+                    }
+                })
+                .collect()
+        };
+        for chunk_index in 0..2u32 {
             let spool_nut = spool_dir.join(format!("chunk_{chunk_index}.nut"));
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                ])
-                .arg("testsrc=duration=2:size=16x16:rate=1")
-                .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
-                .arg(&spool_nut)
-                .status()
-                .expect("synth status");
-            assert!(status.success(), "synth NUT failed");
+            let mut writer = NutWriter::create(
+                &spool_nut,
+                NutVideoConfig {
+                    width,
+                    height,
+                    time_base_num: 1,
+                    time_base_den: 1_000_000,
+                },
+            )
+            .unwrap();
+            for local in 0..3u32 {
+                let samples = frame(chunk_index * 3 + local);
+                let be: Vec<u8> = samples.iter().flat_map(|v| v.to_be_bytes()).collect();
+                writer
+                    .write_frame_precompressed(
+                        u64::from(local) * 33_333,
+                        &encode_png_gray16_frame(width, height, &be),
+                    )
+                    .unwrap();
+            }
+            writer.finish().unwrap();
 
             let byte_count = spool_nut.metadata().unwrap().len();
-            let frame_timestamps_s: Vec<f64> =
-                (0..2u32).map(|i| (chunk_index * 2 + i) as f64).collect();
+            let frame_timestamps_s: Vec<f64> = (0..3u32)
+                .map(|local| 100.0 + f64::from(chunk_index * 3 + local) / 30.0)
+                .collect();
             state
                 .handle_video(
                     &context,
                     chunk_index,
                     spool_nut,
-                    16,
-                    16,
+                    width,
+                    height,
                     byte_count,
-                    2,
+                    3,
                     0,
                     frame_timestamps_s,
                     dtype,
@@ -2031,20 +2135,49 @@ mod tests {
         state.finalise_trace(&context).await;
         context.trace_writer.flush().await;
 
+        assert!(!trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME).exists());
+        let frames = std::fs::read(trace_dir.join(paths::LOSSLESS_DEPTH_FILENAME)).unwrap();
         let sidecar: Value = serde_json::from_slice(
             &std::fs::read(trace_dir.join(paths::TRACE_JSON_FILENAME)).unwrap(),
         )
         .unwrap();
         let entries = sidecar.as_array().unwrap();
-        assert_eq!(entries.len(), 4, "two chunks of two frames each");
-        for entry in &entries[0..2] {
-            assert_eq!(entry["depth_scale_m"], json!(1e-4));
+        assert_eq!(entries.len(), 6);
+        let mut next_offset = 0u64;
+        for (index, entry) in entries.iter().enumerate() {
+            assert_eq!(entry["frame_idx"], json!(index));
+            assert_eq!(entry["depth_scale_m"], json!(scale));
+            assert!(entry.get("dtype").is_none(), "{entry}");
+            let offset = entry["offset"].as_u64().unwrap();
+            let length = entry["length"].as_u64().unwrap();
+            assert_eq!(offset, next_offset, "frames are back to back");
+            next_offset = offset + length;
+            assert!(
+                frames[offset as usize..].starts_with(b"\0\0\0\x0cJXL \r\n\x87\n"),
+                "frame {index} is not a JPEG XL stream"
+            );
         }
-        for entry in &entries[2..4] {
-            assert_eq!(entry["depth_scale_m"], json!(1e-3));
-        }
-        assert_eq!(entries[0]["width"], json!(16));
-        assert_eq!(entries[0]["height"], json!(16));
+        assert_eq!(next_offset, frames.len() as u64);
+
+        let lossy = trace_dir.join(paths::LOSSY_VIDEO_FILENAME);
+        let probe = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,pix_fmt,nb_frames",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&lossy)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&probe.stdout).trim(),
+            "h264,yuv420p,6"
+        );
     }
 
     #[tokio::test]
@@ -2289,6 +2422,8 @@ mod tests {
                 skip_frames: 0,
                 frame_timestamps_s: vec![0.0],
                 dtype,
+                width: 16,
+                height: 16,
             }
         }
         fn indices(batch: &[QueuedChunk]) -> Vec<u32> {
@@ -2333,6 +2468,8 @@ mod tests {
                 skip_frames,
                 frame_timestamps_s: vec![0.0],
                 dtype: FrameDtype::Rgb8,
+                width: 16,
+                height: 16,
             }
         }
         fn indices(batch: &[QueuedChunk]) -> Vec<u32> {
@@ -2370,6 +2507,8 @@ mod tests {
                 skip_frames: 0,
                 frame_timestamps_s: frame_capture_us.iter().map(|us| *us as f64 / 1e6).collect(),
                 dtype: FrameDtype::Rgb8,
+                width: 16,
+                height: 16,
             }
         }
         fn indices(batch: &[QueuedChunk]) -> Vec<u32> {

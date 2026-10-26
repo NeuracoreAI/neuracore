@@ -4,6 +4,8 @@
 //! works directly off the wire string so an unrecognised data type still
 //! registers (as JSON) rather than being refused.
 
+use std::path::Path;
+
 use crate::api::models::CloudFile;
 
 // The artefact filenames are wire-critical and owned by `storage::paths`, where
@@ -11,9 +13,13 @@ use crate::api::models::CloudFile;
 // single source of truth — two copies could silently drift and break the
 // upload↔disk filename contract.
 pub use crate::storage::paths::{
-    LOSSLESS_VIDEO_FILENAME as LOSSLESS_VIDEO_NAME, LOSSY_VIDEO_FILENAME as LOSSY_VIDEO_NAME,
-    TRACE_JSON_FILENAME as TRACE_FILE,
+    LOSSLESS_DEPTH_FILENAME as LOSSLESS_DEPTH_NAME, LOSSLESS_VIDEO_FILENAME as LOSSLESS_VIDEO_NAME,
+    LOSSY_VIDEO_FILENAME as LOSSY_VIDEO_NAME, TRACE_JSON_FILENAME as TRACE_FILE,
 };
+
+const MIME_MP4: &str = "video/mp4";
+const MIME_OCTET_STREAM: &str = "application/octet-stream";
+const MIME_JSON: &str = "application/json";
 
 /// Wire-side classification used to build the cloud-file list. The set of
 /// data types that produce video is small and stable, so a hard-coded match
@@ -22,7 +28,8 @@ pub use crate::storage::paths::{
 enum ContentKind {
     /// JSON-only payload (scalar / sensor / event traces).
     Json,
-    /// RGB video payload: lossy + lossless mp4 plus a JSON sidecar.
+    /// Camera payload: a lossy mp4 and a lossless archive plus a JSON
+    /// sidecar. RGB keeps a lossless mp4; depth keeps its JPEG-XL frames.
     Rgb,
 }
 
@@ -30,10 +37,9 @@ enum ContentKind {
 ///
 /// Anything not recognised is treated as JSON.
 ///
-/// `DEPTH_IMAGES` is intentionally mapped to `Rgb`: the upload pipeline uses
-/// the same `lossy.mp4` + `lossless.mp4` artefact pair to carry depth frames
-/// packed into RGB channels. Diverging here would register a different
-/// cloud-file set than the backend expects and break wire compatibility.
+/// `DEPTH_IMAGES` maps to `Rgb` because both camera types register a lossy
+/// viewer video, a lossless archive and a sidecar; [`cloud_file_list`] picks
+/// the depth frames name (`lossless.bin`) for depth.
 ///
 /// This is the video-family artefact predicate; it is deliberately broader than
 /// the lossy-codec predicate ([`crate::encoding::video_encoder::LossyVideoCodec::for_trace`]),
@@ -59,13 +65,14 @@ pub fn is_video_family(data_type: &str) -> bool {
 /// The MIME content-type the daemon registers (and re-acquires session URIs)
 /// for an artefact, keyed off its filename suffix. The single source of truth
 /// for the mapping, shared by [`cloud_file_list`] and the uploader's session
-/// refresh so the two can't disagree. Only the `.mp4` video artefacts are
-/// `video/mp4`; everything else (the JSON trace / sidecar) is `application/json`.
+/// refresh so the two can't disagree. `.mp4` videos are `video/mp4`, the
+/// `.bin` depth frames are `application/octet-stream`, and everything else
+/// (the JSON trace and sidecar) is `application/json`.
 pub fn content_type_for_filename(filename: &str) -> &'static str {
-    if filename.ends_with(".mp4") {
-        "video/mp4"
-    } else {
-        "application/json"
+    match Path::new(filename).extension().and_then(|ext| ext.to_str()) {
+        Some("mp4") => MIME_MP4,
+        Some("bin") => MIME_OCTET_STREAM,
+        _ => MIME_JSON,
     }
 }
 
@@ -80,7 +87,8 @@ pub fn content_type_for_filename(filename: &str) -> &'static str {
 /// derives `lossy_only` from the resolved codec — the same source and predicate
 /// the encoder uses (see [`crate::encoding::video_encoder::LossyVideoCodec::for_trace`]);
 /// because the codec is fixed for a recording (set before start), the file list
-/// matches what the encoder produces. `lossy_only` is ignored for non-RGB content.
+/// matches what the encoder produces. `lossy_only` is ignored for non-RGB content:
+/// depth always registers `lossy.mp4` and `lossless.bin`.
 ///
 /// The decision is NOT taken from disk: registration runs *while the recording
 /// is still writing* ("pre-registration", see the module docs on the
@@ -95,7 +103,9 @@ pub fn cloud_file_list(
     let mut filenames = Vec::with_capacity(3);
     if matches!(content_type_for(data_type), ContentKind::Rgb) {
         filenames.push(LOSSY_VIDEO_NAME);
-        if !lossy_only {
+        if data_type == "DEPTH_IMAGES" {
+            filenames.push(LOSSLESS_DEPTH_NAME);
+        } else if !lossy_only {
             filenames.push(LOSSLESS_VIDEO_NAME);
         }
     }
@@ -118,7 +128,7 @@ mod tests {
         let files = cloud_file_list("JOINT_POSITIONS", Some("arm0"), false);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filepath, "JOINT_POSITIONS/arm0/trace.json");
-        assert_eq!(files[0].content_type, "application/json");
+        assert_eq!(files[0].content_type, MIME_JSON);
     }
 
     #[test]
@@ -133,9 +143,9 @@ mod tests {
                 "RGB_IMAGES/cam_0/trace.json",
             ]
         );
-        assert_eq!(files[0].content_type, "video/mp4");
-        assert_eq!(files[1].content_type, "video/mp4");
-        assert_eq!(files[2].content_type, "application/json");
+        assert_eq!(files[0].content_type, MIME_MP4);
+        assert_eq!(files[1].content_type, MIME_MP4);
+        assert_eq!(files[2].content_type, MIME_JSON);
     }
 
     #[test]
@@ -164,10 +174,11 @@ mod tests {
             paths,
             vec![
                 "DEPTH_IMAGES/cam_0/lossy.mp4",
-                "DEPTH_IMAGES/cam_0/lossless.mp4",
+                "DEPTH_IMAGES/cam_0/lossless.bin",
                 "DEPTH_IMAGES/cam_0/trace.json",
             ]
         );
+        assert_eq!(files[1].content_type, MIME_OCTET_STREAM);
     }
 
     #[test]
@@ -205,6 +216,6 @@ mod tests {
         );
         assert!(registered("DEPTH_IMAGES", Some("h264_medium"))
             .iter()
-            .any(|path| path.ends_with("lossless.mp4")));
+            .any(|path| path.ends_with("lossless.bin")));
     }
 }
