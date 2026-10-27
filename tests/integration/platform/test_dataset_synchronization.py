@@ -1,6 +1,6 @@
 """Integration tests: dataset synchronization success / param-error / missing-data.
 
-Four independent tests drive a freshly collected dataset through
+Six independent tests drive a freshly collected dataset through
 synchronization to exercise the backend's permanent-failure handling and
 post-mutation re-sync:
 
@@ -13,10 +13,13 @@ post-mutation re-sync:
   removing and replacing half the recordings, and
 * :func:`test_recording_pagination_forward_and_backward` — forward and backward
   ``Dataset`` traversal agree on a dataset spanning more than one page.
+* :func:`test_recording_tags_add_and_remove`: user tags and the deprecated
+  status calls change the tags of a saved recording.
 
-Each scenario drives the high-level ``Dataset.synchronize()``: success returns a
-``SynchronizedDataset``, while the two failure classes raise a ``DatasetError``
-whose message carries the backend's per-recording failure reason.
+Each synchronization scenario drives the high-level ``Dataset.synchronize()``:
+success returns a ``SynchronizedDataset``, while the two failure classes raise a
+``DatasetError`` whose message carries the backend's per-recording failure
+reason.
 
 Target environment
 ------------------
@@ -40,10 +43,16 @@ from collections.abc import Iterator
 
 import numpy as np
 import pytest
-from neuracore_types import DataType
+from neuracore_types import (
+    FLAGGED_TAG_NAME,
+    DataType,
+    RecordingStatus,
+    RecordingTagSource,
+)
 
 import neuracore as nc
 from neuracore.core.data.dataset import PAGE_SIZE, Dataset
+from neuracore.core.data.recording import Recording
 from neuracore.core.exceptions import DatasetError
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -494,3 +503,31 @@ def test_recording_pagination_forward_and_backward() -> None:
         assert (
             forward_dataset._recordings_cache is not backward_dataset._recordings_cache
         )
+
+
+def _user_tag_names(recording: Recording) -> set[str]:
+    return {tag.name for tag in recording.tags if tag.source == RecordingTagSource.USER}
+
+
+def test_recording_tags_add_and_remove() -> None:
+    """Tag changes from the SDK reach the dataset entry on a live backend."""
+    with _collected_dataset("recording_tags_it", count=1) as dataset:
+        recording = next(iter(nc.get_dataset(dataset.name)))
+        assert _user_tag_names(recording) == set()
+
+        recording.add_tag("Needs Review")
+        assert _user_tag_names(recording) == {"needs-review"}
+
+        recording.remove_tag("needs-review")
+        assert _user_tag_names(recording) == set()
+
+        with pytest.warns(DeprecationWarning):
+            recording.set_status(RecordingStatus.FLAGGED)
+        assert _user_tag_names(recording) == {FLAGGED_TAG_NAME}
+
+        stored = next(iter(nc.get_dataset(dataset.name)))
+        assert _user_tag_names(stored) == {FLAGGED_TAG_NAME}
+
+        with pytest.warns(DeprecationWarning):
+            recording.set_status(RecordingStatus.NORMAL)
+        assert _user_tag_names(recording) == set()
