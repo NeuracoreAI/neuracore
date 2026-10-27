@@ -12,6 +12,7 @@ Open-World Generalization." arXiv preprint
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -52,6 +53,23 @@ action_normalizer = QuantileNormalizer
 IMAGE_RESIZE_SHAPE = (224, 224)
 
 
+class GemmaVariant(str, Enum):
+    """Gemma model size. gemma_tiny is a test-scale model."""
+
+    GEMMA_300M = "gemma_300m"
+    GEMMA_2B = "gemma_2b"
+    GEMMA_TINY = "gemma_tiny"
+
+
+class CompileMode(str, Enum):
+    """torch.compile mode."""
+
+    DEFAULT = "default"
+    REDUCE_OVERHEAD = "reduce-overhead"
+    MAX_AUTOTUNE = "max-autotune"
+    MAX_AUTOTUNE_NO_CUDAGRAPHS = "max-autotune-no-cudagraphs"
+
+
 class Pi05(NeuracoreModel):
     """Vision-language-action flow model for robot manipulation.
 
@@ -70,8 +88,8 @@ class Pi05(NeuracoreModel):
         vlm_max_text_tokens: int = 200,
         num_inference_steps: int = 10,
         dtype: Literal["bfloat16", "float32"] = "bfloat16",
-        paligemma_variant: str = "gemma_2b",
-        action_expert_variant: str = "gemma_300m",
+        paligemma_variant: GemmaVariant = GemmaVariant.GEMMA_2B,
+        action_expert_variant: GemmaVariant = GemmaVariant.GEMMA_300M,
         use_pretrained_weights: bool = True,
         pretrained_name_or_path: str | None = "lerobot/pi05_base",
         time_sampling_beta_alpha: float = 1.5,
@@ -82,7 +100,7 @@ class Pi05(NeuracoreModel):
         max_period: float = 4.0,
         gradient_checkpointing: bool = True,
         compile_model: bool = False,
-        compile_mode: str = "max-autotune",
+        compile_mode: CompileMode = CompileMode.MAX_AUTOTUNE,
         optimizer_lr: float = 2.5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
         optimizer_eps: float = 1e-8,

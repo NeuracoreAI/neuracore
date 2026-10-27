@@ -7,6 +7,7 @@ and outputs entire action sequences.
 """
 
 import os
+from enum import Enum
 from functools import partial
 from typing import Any, cast
 
@@ -67,6 +68,16 @@ PROPRIO_DATA_TYPES = [
     DataType.JOINT_TORQUES,
     DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
 ]
+
+
+class ImageBackbone(str, Enum):
+    """ResNet offered as the image encoder backbone."""
+
+    RESNET18 = "resnet18"
+    RESNET34 = "resnet34"
+    RESNET50 = "resnet50"
+    RESNET101 = "resnet101"
+    RESNET152 = "resnet152"
 
 
 class CNNMLP(NeuracoreModel):
@@ -150,7 +161,7 @@ class CNNMLP(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        image_backbone: str = "resnet18",
+        image_backbone: ImageBackbone = ImageBackbone.RESNET18,
         use_resnet_stats: bool = True,
         hidden_dim: int = 512,
         cnn_output_dim: int = 512,

@@ -1,6 +1,7 @@
 """Diffusion Policy: Visuomotor Policy Learning via Action Diffusion."""
 
 import logging
+from enum import Enum
 from typing import Any, cast
 
 import torch
@@ -41,6 +42,50 @@ RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
 
 
+class ProcessType(str, Enum):
+    """Generative process the policy is trained with."""
+
+    DIFFUSION = "diffusion"
+    FLOW_MATCHING = "flow_matching"
+
+
+class NoiseSchedulerType(str, Enum):
+    """Diffusers noise scheduler."""
+
+    DDPM = "DDPM"
+    DDIM = "DDIM"
+
+
+class PredictionType(str, Enum):
+    """Target the diffusion model predicts."""
+
+    EPSILON = "epsilon"
+    SAMPLE = "sample"
+
+
+class BetaSchedule(str, Enum):
+    """Noise schedule, limited to those both DDPM and DDIM accept."""
+
+    LINEAR = "linear"
+    SCALED_LINEAR = "scaled_linear"
+    SQUAREDCOS_CAP_V2 = "squaredcos_cap_v2"
+
+
+class LRSchedulerType(str, Enum):
+    """Diffusers learning rate scheduler.
+
+    piecewise_constant is left out because it needs step rules that this
+    model does not pass.
+    """
+
+    LINEAR = "linear"
+    COSINE = "cosine"
+    COSINE_WITH_RESTARTS = "cosine_with_restarts"
+    POLYNOMIAL = "polynomial"
+    CONSTANT = "constant"
+    CONSTANT_WITH_WARMUP = "constant_with_warmup"
+
+
 class DiffusionPolicy(NeuracoreModel):
     """Implementation of Diffusion Policy for visuomotor policy learning.
 
@@ -64,13 +109,14 @@ class DiffusionPolicy(NeuracoreModel):
         unet_use_film_scale_modulation: bool = True,
         use_pretrained_weights: bool = True,
         use_resnet_stats: bool = True,
-        process_type: str = "diffusion",
-        noise_scheduler_type: str = "DDPM",  # diffusion only
+        process_type: ProcessType = ProcessType.DIFFUSION,
+        # diffusion only
+        noise_scheduler_type: NoiseSchedulerType = NoiseSchedulerType.DDPM,
         num_train_timesteps: int = 100,  # diffusion only
         num_inference_steps: int = 100,
         beta_start: float = 0.0001,  # diffusion only
         beta_end: float = 0.02,  # diffusion only
-        beta_schedule: str = "squaredcos_cap_v2",  # diffusion only
+        beta_schedule: BetaSchedule = BetaSchedule.SQUAREDCOS_CAP_V2,  # diffusion only
         clip_sample: bool = True,
         clip_sample_range: float = 1.0,
         lr: float = 1e-4,
@@ -79,8 +125,8 @@ class DiffusionPolicy(NeuracoreModel):
         weight_decay: float = 1e-6,
         optimizer_betas: tuple[float, float] = (0.9, 0.999),
         optimizer_eps: float = 1e-8,
-        prediction_type: str = "epsilon",  # diffusion only
-        lr_scheduler_type: str = "cosine",
+        prediction_type: PredictionType = PredictionType.EPSILON,  # diffusion only
+        lr_scheduler_type: LRSchedulerType = LRSchedulerType.COSINE,
         lr_scheduler_num_warmup_steps: int = 500,
     ):
         """Initialize the Diffusion Policy model.
