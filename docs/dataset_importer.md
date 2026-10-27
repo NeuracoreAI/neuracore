@@ -166,7 +166,7 @@ The importer supports the following data types:
       - name: depth_gripper
         source_name: depth_gripper
   ```
-  Every depth image holds integer units of `depth_scale_m` meters. The importer stores the values exactly as uint16 with that unit. Values must fit uint16, and 0 means no return.
+  Every depth image holds integer units of `depth_scale_m` meters. The importer stores the values exactly as uint16 with that unit. Values must fit uint16, and 0 means no return. MCAP messages that embed depth as float metres together with a per-message `depth_scale_m` field (as the MCAP exporter does) are converted back to uint16 sensor units during import.
 
 - **POINT_CLOUDS**: 3D point clouds (N×3 arrays) with distance unit configuration
   

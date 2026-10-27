@@ -1080,35 +1080,81 @@ def read_image_data(
     if data_type not in {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES}:
         return data
 
+    array: np.ndarray | None
     if isinstance(data, np.ndarray):
-        return _drop_alpha_channel(data_type, data, logger=logger)
-
-    if _is_raw_image_message(message):
-        return _decode_raw_image(data_type, data, message, logger=logger)
-
-    if _is_compressed_image_message(message):
-        return _decode_compressed_image(
+        array = _drop_alpha_channel(data_type, data, logger=logger)
+    elif _is_raw_image_message(message):
+        array = _decode_raw_image(data_type, data, message, logger=logger)
+    elif _is_compressed_image_message(message):
+        array = _decode_compressed_image(
             data_type,
             message,
             logger=logger,
             image_context=image_context,
         )
-
-    if isinstance(data, (list, tuple)) and data and not _is_byte_list(data):
+    elif isinstance(data, (list, tuple)) and data and not _is_byte_list(data):
         array = np.array(data)
-        if array.ndim >= 2:
-            return _drop_alpha_channel(data_type, array, logger=logger)
-
-    if isinstance(data, (bytes, bytearray, memoryview, str)) or _is_byte_list(data):
+        if array.ndim < 2:
+            array = None
+    elif isinstance(data, (bytes, bytearray, memoryview, str)) or _is_byte_list(data):
         try:
-            return __decode_compressed_image_bytes(data_type, data, logger=logger)
+            array = __decode_compressed_image_bytes(data_type, data, logger=logger)
         except ImportError:
-            pass
+            array = None
+    else:
+        array = None
 
-    raise ImportError(
-        "Image mapping resolved to unsupported payload type "
-        f"{type(data).__name__}. Configure mapping to point to image bytes/data."
+    if array is None:
+        raise ImportError(
+            "Image mapping resolved to unsupported payload type "
+            f"{type(data).__name__}. Configure mapping to point to image bytes/data."
+        )
+
+    return _depth_frame_units(data_type, array, message=message, logger=logger)
+
+
+def _depth_frame_units(
+    data_type: DataType,
+    array: np.ndarray,
+    *,
+    message: Any,
+    logger: logging.Logger,
+) -> np.ndarray:
+    """Convert float-metre depth frames carrying their scale to uint16 units.
+
+    The MCAP exporter embeds depth as float TIFF in metres and keeps the
+    frame's ``depth_scale_m`` in the message. Converting here keeps the
+    imported frame in Neuracore's uint16 sensor-unit format without requiring
+    every depth producer to pre-scale its payload.
+    """
+    if data_type != DataType.DEPTH_IMAGES or not np.issubdtype(
+        array.dtype, np.floating
+    ):
+        return array
+
+    scale_value = _read_field(message, "depth_scale_m")
+    if scale_value is None:
+        return array
+    try:
+        scale = float(scale_value)
+    except (TypeError, ValueError) as exc:
+        raise ImportError(
+            f"Invalid depth_scale_m in depth message: {scale_value!r}"
+        ) from exc
+    if not np.isfinite(scale) or scale <= 0:
+        raise ImportError(f"Invalid depth_scale_m in depth message: {scale_value!r}")
+
+    units = np.rint(array.astype(np.float64) / scale)
+    limit = np.iinfo(np.uint16).max
+    if units.size and (units.min() < 0 or units.max() > limit):
+        raise ImportError(
+            "Depth in metres does not fit uint16 sensor units at "
+            f"depth_scale_m={scale}: range {units.min()} to {units.max()}."
+        )
+    logger.debug(
+        "Converted depth from metres to uint16 units using depth_scale_m=%s", scale
     )
+    return units.astype(np.uint16)
 
 
 def __decode_compressed_image_bytes(

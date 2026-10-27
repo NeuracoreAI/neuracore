@@ -265,9 +265,11 @@ def test_second_recording_failure_retains_completed_file(dataset, recording, tmp
 def test_image_samples_are_readable_without_attachment_support(kind):
     import logging
 
+    from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
+
     from neuracore.core.utils.depth_utils import (
         depth_to_rgb_storage,
-        rgb_to_depth_storage,
+        legacy_rgb_to_depth_units,
     )
     from neuracore.importer.mcap.utils import read_image_data
 
@@ -286,7 +288,11 @@ def test_image_samples_are_readable_without_attachment_support(kind):
     decoded = read_image_data(
         kind, samples[0], samples[0], logger=logging.getLogger(__name__)
     )
-    expected = rgb_to_depth_storage(pixels) if kind == DataType.DEPTH_IMAGES else pixels
+    if kind == DataType.DEPTH_IMAGES:
+        assert samples[0]["depth_scale_m"] == pytest.approx(LEGACY_DEPTH_SCALE_M)
+        expected = legacy_rgb_to_depth_units(pixels)
+    else:
+        expected = pixels
     np.testing.assert_array_equal(decoded, expected)
 
 
@@ -324,8 +330,11 @@ def test_legacy_depth_recording_exports_its_lossless_video(
 
 
 def test_depth_frames_samples_are_float_metres(depth_frames_fn):
-    """Inline depth from a frames file is float TIFF in metres with holes at 0."""
+    """Inline depth is float TIFF in metres yet imports as uint16 units."""
+    import base64
     import logging
+
+    from PIL import Image
 
     from neuracore.importer.mcap.utils import read_image_data
 
@@ -349,19 +358,24 @@ def test_depth_frames_samples_are_float_metres(depth_frames_fn):
     samples = list(McapExporter._samples(trace, DataType.DEPTH_IMAGES, media))
 
     for sample, frame in zip(samples, frames, strict=True):
-        decoded = read_image_data(
+        with Image.open(io.BytesIO(base64.b64decode(sample["data"]))) as image:
+            metres = np.array(image)
+        assert metres.dtype == np.float32
+        np.testing.assert_array_equal(
+            metres, frame.astype(np.float32) * np.float32(1e-4)
+        )
+
+        imported = read_image_data(
             DataType.DEPTH_IMAGES, sample, sample, logger=logging.getLogger(__name__)
         )
-        assert decoded.dtype == np.float32
-        np.testing.assert_array_equal(
-            decoded, frame.astype(np.float32) * np.float32(1e-4)
-        )
+        assert imported.dtype == np.uint16
+        np.testing.assert_array_equal(imported, frame)
 
 
-def test_depth_recording_with_frames_file_exports_float_metres(
+def test_depth_recording_with_frames_file_roundtrip_uint16(
     dataset, recording, tmp_path, depth_frames_fn
 ):
-    """Export a depth trace.json and its frames file as metres per frame."""
+    """Export a depth trace and frames file, then read it back as uint16 units."""
     import logging
 
     from neuracore.importer.mcap.utils import read_image_data
@@ -402,9 +416,8 @@ def test_depth_recording_with_frames_file_exports_float_metres(
         decoded = read_image_data(
             DataType.DEPTH_IMAGES, payload, payload, logger=logging.getLogger(__name__)
         )
-        np.testing.assert_array_equal(
-            decoded, frame.astype(np.float32) * np.float32(1e-4)
-        )
+        assert decoded.dtype == np.uint16
+        np.testing.assert_array_equal(decoded, frame)
 
 
 def test_camera_frame_count_mismatch_fails():

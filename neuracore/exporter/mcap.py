@@ -13,6 +13,7 @@ import av
 import numpy as np
 import requests
 from neuracore_types import DataType
+from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
 from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 
@@ -105,7 +106,8 @@ class McapExporter(DatasetExporter):
         Original videos and depth frames files remain attachments. Inline PNG (RGB)
         and float TIFF (depth in meters) let message-based importers read every
         image without needing Neuracore-specific attachment handling. Depth in a
-        video is legacy packed RGB depth.
+        video is legacy packed RGB depth; its samples carry the legacy scale so
+        importers can convert the metres back to sensor units.
         """
         if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
             yield from trace
@@ -130,10 +132,13 @@ class McapExporter(DatasetExporter):
                     image_format = "TIFF"
                 with io.BytesIO() as encoded:
                     Image.fromarray(pixels).save(encoded, format=image_format)
-                    yield {
+                    sample = {
                         **item,
                         "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
                     }
+                    if data_type == DataType.DEPTH_IMAGES:
+                        sample.setdefault("depth_scale_m", float(LEGACY_DEPTH_SCALE_M))
+                    yield sample
             if next(frames, None) is not None:
                 raise ValueError(f"Unreferenced video frames in {media[0]}.")
 
