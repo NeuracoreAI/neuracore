@@ -18,6 +18,8 @@ from neuracore_types.nc_data import (
     DATA_TYPE_TO_NC_DATA_IMPORT_CONFIG_CLASS,
     DatasetImportConfig,
 )
+from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
+from neuracore_types.utils.name_utils import to_safe_name
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
@@ -28,9 +30,24 @@ ORG_NAME = "Service Account's Project"  # Enter your organization name.
 DATASET_NAME = "Data Upload Integrity Check"
 
 
+def _depth_scale_m(recording) -> float:
+    """Return the scale the source depth traces record, or the legacy default."""
+
+    for kind, names in recording.sensor_manifest.items():
+        if DataType(kind) != DataType.DEPTH_IMAGES:
+            continue
+        for name in names:
+            prefix = f"{DataType.DEPTH_IMAGES.value}/{to_safe_name(name)}"
+            trace = json.loads(recording.download(f"{prefix}/trace.json"))
+            if trace and trace[0].get("depth_scale_m") is not None:
+                return float(trace[0]["depth_scale_m"])
+    return float(LEGACY_DEPTH_SCALE_M)
+
+
 def _import_config(recording, dataset_name: str, robot_name: str):
     """Map every exported sensor to its raw value; never omit a modality."""
 
+    depth_scale_m = _depth_scale_m(recording)
     fields = {
         DataType.JOINT_POSITIONS: "value",
         DataType.JOINT_TARGET_POSITIONS: "value",
@@ -62,6 +79,8 @@ def _import_config(recording, dataset_name: str, robot_name: str):
                 for name in names
             ]
         }
+        if DataType(kind) == DataType.DEPTH_IMAGES:
+            mappings[kind.value]["format"] = {"depth_scale_m": depth_scale_m}
     for kind in (DataType.POSES, DataType.END_EFFECTOR_POSES):
         if kind.value in mappings:
             mappings[kind.value]["format"] = {

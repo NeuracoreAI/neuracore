@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 import struct
 import time
@@ -526,6 +527,84 @@ def test_read_image_data_decodes_bigendian_mono16():
 
     assert result.dtype == np.uint16
     np.testing.assert_array_equal(result, np.array([[1000, 2000]], dtype=np.uint16))
+
+
+def _float_depth_tiff(metres: np.ndarray) -> bytes:
+    """Encode depth metres as the float TIFF the MCAP exporter writes."""
+    buffer = io.BytesIO()
+    Image.fromarray(metres.astype(np.float32)).save(buffer, format="TIFF")
+    return buffer.getvalue()
+
+
+def test_read_image_data_converts_metre_depth_with_message_scale():
+    """A float-metre depth message with its scale imports as uint16 units."""
+    message = {
+        "data": _float_depth_tiff(
+            np.array([[0.0, 0.05], [1.0, 6.5535]], dtype=np.float32)
+        ),
+        "depth_scale_m": 1e-4,
+    }
+
+    result = read_image_data(
+        DataType.DEPTH_IMAGES,
+        message["data"],
+        message,
+        logger=logging.getLogger(__name__),
+    )
+
+    assert result.dtype == np.uint16
+    np.testing.assert_array_equal(
+        result, np.array([[0, 500], [10000, 65535]], dtype=np.uint16)
+    )
+
+
+def test_read_image_data_keeps_float_depth_without_message_scale():
+    """Without a scale the reader leaves float depth for validation to reject."""
+    metres = np.array([[0.0, 1.0]], dtype=np.float32)
+    message = {"data": _float_depth_tiff(metres)}
+
+    result = read_image_data(
+        DataType.DEPTH_IMAGES,
+        message["data"],
+        message,
+        logger=logging.getLogger(__name__),
+    )
+
+    assert result.dtype == np.float32
+    np.testing.assert_array_equal(result, metres)
+
+
+@pytest.mark.parametrize("scale", [0.0, -1e-4, float("nan")])
+def test_read_image_data_rejects_invalid_message_depth_scale(scale):
+    """A depth message scale must be finite and positive."""
+    message = {
+        "data": _float_depth_tiff(np.array([[1.0]], dtype=np.float32)),
+        "depth_scale_m": scale,
+    }
+
+    with pytest.raises(ImportError, match="Invalid depth_scale_m"):
+        read_image_data(
+            DataType.DEPTH_IMAGES,
+            message["data"],
+            message,
+            logger=logging.getLogger(__name__),
+        )
+
+
+def test_read_image_data_rejects_metre_depth_outside_uint16():
+    """Metres that do not fit uint16 at the declared scale raise."""
+    message = {
+        "data": _float_depth_tiff(np.array([[100.0]], dtype=np.float32)),
+        "depth_scale_m": 1e-4,
+    }
+
+    with pytest.raises(ImportError, match="does not fit uint16"):
+        read_image_data(
+            DataType.DEPTH_IMAGES,
+            message["data"],
+            message,
+            logger=logging.getLogger(__name__),
+        )
 
 
 def test_read_image_data_raises_on_unsupported_encoding():
