@@ -16,3 +16,5 @@ Download checkpoints from cloud training runs. `neuracore training list-checkpoi
 A recording started from the web no longer takes the frames logged before its start.
 
 Fixed-choice hyperparameters of the built-in algorithms are now string enums, so the training wizard can offer them as dropdowns: Diffusion Policy's `process_type`, `noise_scheduler_type`, `prediction_type`, `beta_schedule` and `lr_scheduler_type`, CNNMLP's `image_backbone`, Pi0 and Pi05's `paligemma_variant`, `action_expert_variant` (including the test-scale `gemma_tiny`) and `compile_mode`, and Groot's `torch_compile_mode`. Defaults are unchanged and plain string values still work. Custom algorithms can declare their own; see the contribution guide.
+
+The built-in CNNMLP, DiffusionPolicy, Groot, Pi0 and Pi05 algorithms no longer list the H100 GPU, which is no longer offered. Groot, Pi0 and Pi05 now train on the A100 80GB only.

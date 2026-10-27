@@ -65,7 +65,7 @@ def test_validate_gpu_to_algorithm_rejects_unsupported_gpu():
         ValueError,
         match=(
             "GPU NVIDIA_TESLA_T4 is not supported by algorithm Pi05.*"
-            "NVIDIA_A100_80GB, NVIDIA_H100_80GB"
+            "NVIDIA_A100_80GB, NVIDIA_TESLA_A100"
         ),
     ):
         _validate_gpu_to_algorithm(
@@ -74,7 +74,7 @@ def test_validate_gpu_to_algorithm_rejects_unsupported_gpu():
             [{
                 "name": "Pi05",
                 "supported_gpus": [
-                    "NVIDIA_H100_80GB",
+                    "NVIDIA_TESLA_A100",
                     "NVIDIA_A100_80GB",
                 ],
             }],

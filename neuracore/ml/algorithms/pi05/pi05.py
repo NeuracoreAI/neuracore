@@ -902,6 +902,5 @@ class Pi05(NeuracoreModel):
     def get_supported_gpus() -> frozenset[GPUType]:
         """Get the GPU types recommended for training this model."""
         return frozenset({
-            GPUType.NVIDIA_H100_80GB,
             GPUType.NVIDIA_A100_80GB,
         })

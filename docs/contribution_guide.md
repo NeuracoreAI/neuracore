@@ -266,7 +266,6 @@ Your model must implement these methods:
 `get_supported_gpus` must be a static method that returns a `frozenset` of
 `GPUType` members. The supported values are:
 
-- `GPUType.NVIDIA_H100_80GB`
 - `GPUType.NVIDIA_A100_80GB`
 - `GPUType.NVIDIA_TESLA_A100`
 - `GPUType.NVIDIA_TESLA_V100`
