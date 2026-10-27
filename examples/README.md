@@ -163,7 +163,7 @@ This example shows you how to:
   - Tags 
 - Edit Recording metadata
   - Its Notes
-  - Its Status e.g. flagged
+  - Its Tags e.g. flagged
 
 ```bash
 python example_flag_data.py
