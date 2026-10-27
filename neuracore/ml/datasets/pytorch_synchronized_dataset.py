@@ -17,7 +17,6 @@ from neuracore_types import (
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
 )
-from neuracore_types.nc_data.nc_data import DataItemStats
 
 import neuracore as nc
 from neuracore.core.const import DEFAULT_CACHE_DIR
@@ -178,9 +177,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             max_ram_utilization=0.8, max_gpu_utilization=1.0, gpu_id=None
         )
         self._mem_check_counter = 0
-        self._num_samples_excluding_last = self._get_num_training_observations() - len(
-            self.synchronized_dataset
-        )
 
         (
             self.episode_indices,
@@ -191,6 +187,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self._episode_recording_ids,
             self._episode_robot_ids,
         ) = self._get_sample_to_episode_mapping()
+        # Counted from the episodes rather than a data type's statistics,
+        # which only cover the robots that record that data type.
+        self._num_samples_excluding_last = len(self.episode_indices)
         self._logged_in = False
 
         # Only the worker-side half runs here. Device-side methods are applied
@@ -260,22 +259,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     highest_index.get(data_type, 0), *indexed_names, 0
                 )
         return {data_type: highest + 1 for data_type, highest in highest_index.items()}
-
-    def _get_num_training_observations(self) -> int:
-        # The count attribute of the stats should give total number of training
-        # observations and should be same across all data types
-        first_data_type = next(iter(self._dataset_statistics["input"]))
-        data_stats_of_unknown_nc_data = self._dataset_statistics["input"][
-            first_data_type
-        ][0]
-        # Loop over all attributes until we find one of type DataItemStats
-        for attr_name, attr_value in vars(data_stats_of_unknown_nc_data).items():
-            if isinstance(attr_value, DataItemStats):
-                return attr_value.count.item()
-        raise ValueError(
-            "Could not find DataItemStats in dataset "
-            "statistics to get number of training observations."
-        )
 
     def _validate_cross_embodiment_specs(
         self,
@@ -414,13 +397,15 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             timestep = self._get_timestep(episode_length)
 
         robot_id = synced_recording.robot_id
+        robot_input_description = self.input_cross_embodiment_description[robot_id]
+        robot_output_description = self.output_cross_embodiment_description[robot_id]
         input_sync_point = synced_recording.get_sync_point(
-            timestep, self.input_cross_embodiment_description[robot_id]
+            timestep, robot_input_description
         )
         output_sync_points = synced_recording.get_sync_points(
             timestep,
             timestep + 1 + self.output_prediction_horizon,
-            self.output_cross_embodiment_description[robot_id],
+            robot_output_description,
         )
         recording_name = getattr(synced_recording, "name", "recording")
 
@@ -428,16 +413,17 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         inputs: dict[DataType, list[BatchedNCData]] = {}
         inputs_mask: dict[DataType, torch.Tensor] = {}
 
-        for data_type in self.input_cross_embodiment_description[robot_id]:
+        # Every sample carries every data type any robot uses, so samples from
+        # robots with different sensors collate into one batch. A data type
+        # this robot lacks is padded throughout and masked out.
+        for data_type, max_items_trained_on in self._max_items_per_input_type.items():
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             inputs[data_type] = []
 
-            max_items_trained_on = self._max_items_per_input_type[data_type]
+            input_names = robot_input_description.get(data_type, {})
             input_mask_values: list[float] = [0.0] * max_items_trained_on
             for index in range(max_items_trained_on):
-                name = self.input_cross_embodiment_description[robot_id][data_type].get(
-                    index
-                )
+                name = input_names.get(index)
 
                 if name is None:
                     # Pad missing data with zeros.
@@ -464,11 +450,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         outputs: dict[DataType, list[BatchedNCData]] = {}
         outputs_mask: dict[DataType, torch.Tensor] = {}
-        for data_type in self.output_cross_embodiment_description[robot_id]:
+        for data_type, max_items_trained_on in self._max_items_per_output_type.items():
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             outputs[data_type] = []
 
-            max_items_trained_on = self._max_items_per_output_type[data_type]
             aligned_output_sync_points = self._output_sync_points_for_data_type(
                 output_sync_points,
                 data_type,
@@ -476,11 +461,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 timestep=timestep,
                 recording_name=recording_name,
             )
+            output_names = robot_output_description.get(data_type, {})
             output_mask_values: list[float] = [0.0] * max_items_trained_on
             for index in range(max_items_trained_on):
-                name = self.output_cross_embodiment_description[robot_id][
-                    data_type
-                ].get(index)
+                name = output_names.get(index)
 
                 if name is None:
                     # Pad missing data with zeros.

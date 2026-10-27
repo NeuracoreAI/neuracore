@@ -17,21 +17,36 @@ from neuracore.core.utils.embodiment_description_utils import is_robot_id
 
 def _validate_per_recording_data_types(
     dataset: Dataset,
-    requested_input_types: set[DataType],
+    input_cross_embodiment_description: CrossEmbodimentDescription,
 ) -> None:
-    """Validate every recording has all requested input datatypes.
+    """Validate every recording has the input datatypes requested for its robot.
+
+    A recording is only checked against its own robot's entry, so robots with
+    different sensors, such as one with cameras and one without, can be trained
+    together. A recording whose robot has no entry is checked against every
+    requested input datatype.
 
     Args:
         dataset: Dataset whose recordings will be inspected.
-        requested_input_types: DataTypes that every recording must contain.
+        input_cross_embodiment_description: Input cross-embodiment description
+            keyed by robot ID.
 
     Raises:
         ValueError: If any recording is missing a requested type, with a
             grouped message listing affected recording names per type.
     """
+    all_requested_types: set[DataType] = {
+        dt
+        for robot_data in input_cross_embodiment_description.values()
+        for dt in robot_data.keys()
+    }
     missing_per_type: dict[DataType, list[str]] = defaultdict(list)
     for recording in dataset:
-        for data_type in requested_input_types - recording.data_types:
+        robot_data = input_cross_embodiment_description.get(recording.robot_id)
+        requested_types = (
+            set(robot_data.keys()) if robot_data is not None else all_requested_types
+        )
+        for data_type in requested_types - recording.data_types:
             missing_per_type[data_type].append(recording.name)
 
     if not missing_per_type:
@@ -284,7 +299,7 @@ def validate_training_params(
     }
     if not requested_input_types:
         raise ValueError("Failed to start training run: no input datatypes specified.")
-    _validate_per_recording_data_types(dataset, requested_input_types)
+    _validate_per_recording_data_types(dataset, input_cross_embodiment_description)
 
     _validate_cross_embodiment_description(
         dataset=dataset,

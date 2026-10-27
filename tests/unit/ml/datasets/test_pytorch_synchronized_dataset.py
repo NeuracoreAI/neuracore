@@ -1685,6 +1685,152 @@ class TestIntegrationWithPyTorchDataLoader:
                 assert isinstance(batch.inputs[data_type], list)
 
 
+class TestMixedSensorEmbodiments:
+    """Train a robot with cameras alongside one without."""
+
+    @staticmethod
+    def _recording(
+        robot_id: str, sync_point: SynchronizedPoint
+    ) -> SynchronizedRecording:
+        class MixedSensorRecording(SynchronizedRecording):
+            def __init__(self) -> None:
+                self.sync_points = [sync_point] * NUM_OBSERVATIONS_PER_EPISODE
+                self.robot_id = robot_id
+                self.id = f"{robot_id}_recording"
+                self.name = f"{robot_id}_recording"
+
+            def __len__(self) -> int:
+                return len(self.sync_points)
+
+            def get_sync_point(self, timestep, embodiment_description):
+                # Mirror the real recording, which rejects a data type it lacks.
+                for data_type in embodiment_description:
+                    if data_type not in self.sync_points[timestep].data:
+                        raise ValueError(f"Missing required data type: {data_type}")
+                return self.sync_points[timestep]
+
+        return MixedSensorRecording()
+
+    @pytest.fixture
+    def mixed_dataset(
+        self,
+        synchronization_point: SynchronizedPoint,
+        dataset_statistics: dict[str, dict[DataType, list[NCDataStats]]],
+    ) -> PytorchSynchronizedDataset:
+        camera_less_point = SynchronizedPoint(
+            robot_id=MISSING_ROBOT_ID,
+            timestamp=synchronization_point.timestamp,
+            data={
+                data_type: nc_data_by_name
+                for data_type, nc_data_by_name in synchronization_point.data.items()
+                if data_type != DataType.RGB_IMAGES
+            },
+        )
+        recordings = [
+            self._recording(ROBOT_ID, synchronization_point),
+            self._recording(MISSING_ROBOT_ID, camera_less_point),
+        ]
+        # Only the camera robot's frames count towards the image statistics.
+        for stat in dataset_statistics["input"][DataType.RGB_IMAGES]:
+            for attr_value in vars(stat).values():
+                if isinstance(attr_value, DataItemStats):
+                    attr_value.count[0] = NUM_OBSERVATIONS_PER_EPISODE
+
+        class MixedSensorDataset(SynchronizedDataset):
+            def __init__(self) -> None:
+                self.id = "mixed_sensor_dataset"
+                self.dataset = MagicMock()
+                self.dataset.data_types = list(synchronization_point.data)
+                self.dataset.get_full_embodiment_description.side_effect = (
+                    lambda robot_id: (
+                        _full_embodiment_description()
+                        if robot_id == ROBOT_ID
+                        else {
+                            data_type: names
+                            for data_type, names in (
+                                _full_embodiment_description().items()
+                            )
+                            if data_type != DataType.RGB_IMAGES
+                        }
+                    )
+                )
+
+            def calculate_statistics(
+                self,
+                input_cross_embodiment_description: CrossEmbodimentDescription,
+                output_cross_embodiment_description: CrossEmbodimentDescription,
+            ) -> SynchronizedDatasetStatistics:
+                return SynchronizedDatasetStatistics(
+                    synchronized_dataset_id=self.id,
+                    input_cross_embodiment_description=(
+                        input_cross_embodiment_description
+                    ),
+                    output_cross_embodiment_description=(
+                        output_cross_embodiment_description
+                    ),
+                    dataset_statistics=dataset_statistics,
+                )
+
+            def __len__(self) -> int:
+                return len(recordings)
+
+            def __getitem__(self, idx: int) -> SynchronizedRecording:
+                return recordings[idx]
+
+            def __iter__(self):
+                return iter(recordings)
+
+        joint_positions = _indexed_names(DataType.JOINT_POSITIONS, 2)
+        joint_targets = _indexed_names(DataType.JOINT_TARGET_POSITIONS, 2)
+        return PytorchSynchronizedDataset(
+            synchronized_dataset=MixedSensorDataset(),
+            input_cross_embodiment_description={
+                ROBOT_ID: {
+                    DataType.JOINT_POSITIONS: joint_positions,
+                    DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 2),
+                },
+                MISSING_ROBOT_ID: {DataType.JOINT_POSITIONS: joint_positions},
+            },
+            output_cross_embodiment_description={
+                ROBOT_ID: {DataType.JOINT_TARGET_POSITIONS: joint_targets},
+                MISSING_ROBOT_ID: {DataType.JOINT_TARGET_POSITIONS: joint_targets},
+            },
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
+            sample_cache=False,
+        )
+
+    def test_len_counts_samples_from_both_robots(self, mixed_dataset):
+        assert len(mixed_dataset) == 2 * (NUM_OBSERVATIONS_PER_EPISODE - 1)
+
+    @patch("neuracore.login")
+    def test_camera_less_robot_pads_and_masks_images(self, mock_login, mixed_dataset):
+        with patch.object(mixed_dataset, "_memory_monitor"):
+            sample = mixed_dataset.load_sample(episode_idx=1, timestep=0)
+
+        assert len(sample.inputs[DataType.RGB_IMAGES]) == 2
+        assert torch.equal(sample.inputs_mask[DataType.RGB_IMAGES], torch.zeros(2))
+        assert torch.equal(sample.inputs_mask[DataType.JOINT_POSITIONS], torch.ones(2))
+
+    @patch("neuracore.login")
+    def test_batch_mixes_robots_with_and_without_cameras(
+        self, mock_login, mixed_dataset
+    ):
+        with patch.object(mixed_dataset, "_memory_monitor"):
+            samples = [
+                mixed_dataset.load_sample(episode_idx=0, timestep=0),
+                mixed_dataset.load_sample(episode_idx=1, timestep=0),
+            ]
+        batch = mixed_dataset.collate_fn(samples)
+
+        assert batch.inputs[DataType.RGB_IMAGES][0].frame.shape[0] == 2
+        assert torch.equal(
+            batch.inputs_mask[DataType.RGB_IMAGES],
+            torch.tensor([[1.0, 1.0], [0.0, 0.0]]),
+        )
+
+
 class TestDatasetStatistics:
     """Test dataset statistics functionality."""
 

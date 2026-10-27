@@ -13,6 +13,7 @@ from neuracore.core.utils.training_input_args_validation import (
 )
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a1"
+SECOND_TEST_ROBOT_ID = "6c1f3e52-8d4a-4b7e-9f21-3a5b0c7d9e84"
 
 
 def _indexed_names(*names: str) -> dict[int, str]:
@@ -160,12 +161,20 @@ def test_validate_cross_embodiment_description_rejects_missing_data_type(
 # ---------------------------------------------------------------------------
 
 
-def _make_recording(name: str, data_types: set[DataType]) -> Recording:
+def _make_recording(
+    name: str, data_types: set[DataType], robot_id: str = TEST_ROBOT_ID
+) -> Recording:
     """Return a minimal mock Recording with the given name and data_types."""
     rec = MagicMock(spec=Recording)
     rec.name = name
     rec.data_types = data_types
+    rec.robot_id = robot_id
     return rec
+
+
+def _requesting(*data_types: DataType, robot_id: str = TEST_ROBOT_ID) -> dict:
+    """Return an input description requesting data_types for one robot."""
+    return {robot_id: {data_type: _indexed_names("s0") for data_type in data_types}}
 
 
 def _dataset_with_recordings(recordings: list) -> Dataset:
@@ -180,7 +189,7 @@ def test_validate_per_recording_data_types_passes_when_all_present():
         _make_recording("rec_b", {DataType.JOINT_POSITIONS, DataType.RGB_IMAGES}),
     ])
     _validate_per_recording_data_types(
-        ds, {DataType.JOINT_POSITIONS, DataType.RGB_IMAGES}
+        ds, _requesting(DataType.JOINT_POSITIONS, DataType.RGB_IMAGES)
     )
 
 
@@ -192,12 +201,12 @@ def test_validate_per_recording_data_types_passes_with_superset():
             {DataType.JOINT_POSITIONS, DataType.RGB_IMAGES, DataType.JOINT_VELOCITIES},
         ),
     ])
-    _validate_per_recording_data_types(ds, {DataType.JOINT_POSITIONS})
+    _validate_per_recording_data_types(ds, _requesting(DataType.JOINT_POSITIONS))
 
 
 def test_validate_per_recording_data_types_passes_empty_requested():
     ds = _dataset_with_recordings([_make_recording("rec_a", set())])
-    _validate_per_recording_data_types(ds, set())
+    _validate_per_recording_data_types(ds, {})
 
 
 def test_validate_per_recording_data_types_raises_grouped_error():
@@ -208,7 +217,7 @@ def test_validate_per_recording_data_types_raises_grouped_error():
     ])
     with pytest.raises(ValueError) as exc_info:
         _validate_per_recording_data_types(
-            ds, {DataType.JOINT_POSITIONS, DataType.RGB_IMAGES}
+            ds, _requesting(DataType.JOINT_POSITIONS, DataType.RGB_IMAGES)
         )
     msg = str(exc_info.value)
     assert "Failed to start training run" in msg
@@ -228,12 +237,77 @@ def test_validate_per_recording_data_types_error_lists_all_missing_types():
     with pytest.raises(ValueError) as exc_info:
         _validate_per_recording_data_types(
             ds,
-            {DataType.JOINT_POSITIONS, DataType.JOINT_VELOCITIES, DataType.RGB_IMAGES},
+            _requesting(
+                DataType.JOINT_POSITIONS,
+                DataType.JOINT_VELOCITIES,
+                DataType.RGB_IMAGES,
+            ),
         )
     msg = str(exc_info.value)
     assert "Missing JOINT_POSITIONS" in msg
     assert "Missing JOINT_VELOCITIES" in msg
     assert msg.count("- partial") == 2
+
+
+def test_validate_per_recording_data_types_checks_each_recording_against_its_robot():
+    """A robot without cameras may train alongside one that has them."""
+    ds = _dataset_with_recordings([
+        _make_recording("camera_rec", {DataType.JOINT_POSITIONS, DataType.RGB_IMAGES}),
+        _make_recording(
+            "no_camera_rec", {DataType.JOINT_POSITIONS}, SECOND_TEST_ROBOT_ID
+        ),
+    ])
+    _validate_per_recording_data_types(
+        ds,
+        {
+            TEST_ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names("j0"),
+                DataType.RGB_IMAGES: _indexed_names("front"),
+            },
+            SECOND_TEST_ROBOT_ID: {DataType.JOINT_POSITIONS: _indexed_names("j0")},
+        },
+    )
+
+
+def test_validate_per_recording_data_types_rejects_recording_missing_its_robots_type():
+    """A recording still needs every type requested for its own robot."""
+    ds = _dataset_with_recordings([
+        _make_recording("camera_rec", {DataType.JOINT_POSITIONS}),
+        _make_recording(
+            "no_camera_rec", {DataType.JOINT_POSITIONS}, SECOND_TEST_ROBOT_ID
+        ),
+    ])
+    with pytest.raises(ValueError) as exc_info:
+        _validate_per_recording_data_types(
+            ds,
+            {
+                TEST_ROBOT_ID: {
+                    DataType.JOINT_POSITIONS: _indexed_names("j0"),
+                    DataType.RGB_IMAGES: _indexed_names("front"),
+                },
+                SECOND_TEST_ROBOT_ID: {DataType.JOINT_POSITIONS: _indexed_names("j0")},
+            },
+        )
+    msg = str(exc_info.value)
+    assert "Missing RGB_IMAGES" in msg
+    assert "- camera_rec" in msg
+    assert "no_camera_rec" not in msg
+
+
+def test_validate_per_recording_data_types_checks_unlisted_robot_against_all_types():
+    """A recording whose robot has no entry needs every requested type."""
+    ds = _dataset_with_recordings([
+        _make_recording(
+            "unlisted_rec", {DataType.JOINT_POSITIONS}, SECOND_TEST_ROBOT_ID
+        ),
+    ])
+    with pytest.raises(ValueError) as exc_info:
+        _validate_per_recording_data_types(
+            ds, _requesting(DataType.JOINT_POSITIONS, DataType.RGB_IMAGES)
+        )
+    msg = str(exc_info.value)
+    assert "Missing RGB_IMAGES" in msg
+    assert "- unlisted_rec" in msg
 
 
 # ---------------------------------------------------------------------------
