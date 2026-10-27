@@ -1,17 +1,12 @@
 """Tests for Recording class."""
 
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 import requests_mock
 from neuracore_types import DataType, QAFailureReason, QAFinding
 from neuracore_types import Recording as RecordingModel
-from neuracore_types import (
-    RecordingMetadata,
-    RecordingStatus,
-    RecordingTag,
-    RecordingTagSource,
-)
+from neuracore_types import RecordingMetadata, RecordingTag, RecordingTagSource
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -180,10 +175,6 @@ class TestRecording:
             ]
         )
 
-    @staticmethod
-    def _query(url: str) -> dict[str, list[str]]:
-        return parse_qs(urlparse(url).query)
-
     def test_tags_reads_the_metadata(self, recording: Recording):
         finding = QAFinding(
             reason=QAFailureReason.NEVER_MOVED, start_time=0, end_time=1
@@ -259,63 +250,6 @@ class TestRecording:
             recording.add_tag("bad-grip")
 
         assert recording.tags == []
-
-    def test_set_status_flagged_adds_the_flagged_tag(
-        self,
-        recording: Recording,
-        entry_url: str,
-        mock_data_requests: requests_mock.Mocker,
-    ):
-        flagged = self._metadata_with_tags("flagged")
-        tags_request = mock_data_requests.post(
-            f"{entry_url}/tags", json=self._entry_response(recording, flagged)
-        )
-
-        with pytest.warns(
-            DeprecationWarning,
-            match=(
-                r"^Function set_status is deprecated\. "
-                r"Use add_tag or remove_tag with the 'flagged' tag\.$"
-            ),
-        ):
-            recording.set_status(RecordingStatus.FLAGGED)
-
-        assert tags_request.last_request.json() == {"name": "flagged"}
-        assert recording.metadata.status == RecordingStatus.FLAGGED
-
-    def test_set_status_normal_removes_the_flagged_tag(
-        self,
-        recording: Recording,
-        entry_url: str,
-        mock_data_requests: requests_mock.Mocker,
-    ):
-        recording.metadata = self._metadata_with_tags("flagged")
-        unflagged = self._metadata_with_tags()
-        tags_request = mock_data_requests.delete(
-            f"{entry_url}/tags", json=self._entry_response(recording, unflagged)
-        )
-
-        with pytest.warns(DeprecationWarning):
-            recording.set_status(RecordingStatus.NORMAL)
-
-        assert self._query(tags_request.last_request.url) == {"name": ["flagged"]}
-        assert recording.metadata.status == RecordingStatus.NORMAL
-
-    def test_set_status_qa_flagged_raises_without_a_request(
-        self,
-        recording: Recording,
-        entry_url: str,
-        mock_data_requests: requests_mock.Mocker,
-    ):
-        tags_request = mock_data_requests.post(f"{entry_url}/tags")
-
-        with (
-            pytest.warns(DeprecationWarning),
-            pytest.raises(ValueError, match="^Only QA can set QA_FLAGGED$"),
-        ):
-            recording.set_status(RecordingStatus.QA_FLAGGED)
-
-        assert not tags_request.called
 
     def test_set_notes_sends_only_the_name_and_notes(
         self,
