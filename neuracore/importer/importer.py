@@ -22,6 +22,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
 from neuracore.core.robot import Robot, list_organization_robots
+from neuracore.importer.core.daemon_settings import ImporterDaemonConfig
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -165,7 +166,7 @@ def _run_import(
     skip_on_error: str = "episode",
     suppress_validation_warnings: bool = False,
     max_workers: int | None = 1,
-    storage_limit: int = 5 * 1024**3,
+    daemon_config: ImporterDaemonConfig = ImporterDaemonConfig(),
     random_sample: int | None = None,
     debug_target_ee_frame: str | None = None,
 ) -> None:
@@ -181,7 +182,6 @@ def _run_import(
         no_validation_warnings=suppress_validation_warnings,
         max_workers=max_workers,
         random_sample=random_sample,
-        storage_limit=storage_limit,
         debug_target_ee_frame=debug_target_ee_frame,
     )
 
@@ -275,6 +275,8 @@ def _run_import(
         logger.warning("Both URDF and MJCF files found. Using URDF file.")
         mjcf_path = None
 
+    # Before connect_robot, which starts the daemon. Workers inherit the env.
+    daemon_config.apply_to_environment()
     robot_existed_before = _robot_exists(robot_config.name)
     robot = nc.connect_robot(
         robot_name=robot_config.name,
@@ -383,7 +385,6 @@ def _run_dataset_import(
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
-            storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
             robot_id=robot.id,
@@ -404,7 +405,6 @@ def _run_dataset_import(
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
-            storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
             robot_id=robot.id,
@@ -425,7 +425,6 @@ def _run_dataset_import(
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
-            storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
             robot_id=robot.id,
@@ -446,7 +445,6 @@ def _run_dataset_import(
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
-            storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
             robot_id=robot.id,

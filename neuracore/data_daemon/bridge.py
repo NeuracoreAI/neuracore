@@ -272,6 +272,30 @@ class RecordingContext:
         except native.LoggingStalledError as error:
             raise LoggingStalledError(str(error)) from error
 
+    def log_rgb_png(
+        self, name: str, payload: bytes | memoryview, timestamp: float
+    ) -> None:
+        """Forward one RGB frame that is already an 8-bit RGB PNG to the daemon.
+
+        Args:
+            name: the camera name e.g. left_wrist_camera.
+            payload: PNG bytes, 8-bit RGB and not interlaced.
+            timestamp: the Unix timestamp of the sample.
+        """
+        robot_id = self._require_source("log_rgb_png")
+        native = _load_native()
+        try:
+            native.log_rgb_png(
+                robot_id,
+                self._robot_instance,
+                name,
+                payload,
+                int(timestamp * 1_000_000_000),
+                timestamp,
+            )
+        except native.LoggingStalledError as error:
+            raise LoggingStalledError(str(error)) from error
+
     def log_json(
         self,
         data_type: str,

@@ -110,6 +110,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     importer.dry_run = False
     importer.logger = MagicMock()
     importer._error_queue = MagicMock()
+    importer._recording_queue = MagicMock()
     importer._log_worker_error = MagicMock()
     importer._emit_progress = MagicMock()
     importer._iter_episode_steps = MagicMock(
@@ -128,6 +129,10 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         patch(
             "neuracore.importer.lerobot_importer.nc.stop_recording"
         ) as stop_recording,
+        patch(
+            "neuracore.importer.lerobot_importer.nc.get_cloud_recording_id",
+            return_value="rec-1",
+        ),
     ):
         importer.import_item(ImportItem(index=0))
 
@@ -156,7 +161,8 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     stop_kwargs = stop_recording.call_args.kwargs
     assert stop_kwargs["robot_name"] == "test_robot"
     assert stop_kwargs["instance"] == 2
-    assert stop_kwargs["wait"] is True
+    assert stop_kwargs["wait"] is False
+    importer._recording_queue.put.assert_called_once_with("rec-1")
     assert stop_kwargs["timestamp"] == pytest.approx(100.3)
 
 

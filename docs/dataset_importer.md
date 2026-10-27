@@ -50,7 +50,17 @@ neuracore importer import \
 - `--shared`: Create the output dataset as shared (only available for administrators)
 - `--max-workers`: Maximum number of worker processes to use (default: `1`, minimum: `1`)
 - `--random-sample`: If set, import only this many episodes, chosen at random (useful for sampling subsets)
-- `--storage-limit`: Pause the import when disk usage reaches this limit. Accepts a size with unit: `kb`, `mb`, or `gb` (for example `10gb`, `500mb`). Default: `5gb`
+- `--spool-limit`: Cap on the data daemon video spool. `auto` uses 25% of the free disk on the recordings root (minimum 2 GiB). A large spool prevents most stalls. It stays below the daemon's default `storage_limit` (50% of free disk): when the recordings root goes above `storage_limit`, the daemon drops frames. If you set a lower `storage_limit`, also set `--spool-limit` below it. Accepts `auto` or a size with unit: `kb`, `mb`, or `gb` (for example `200gb`). Default: `auto`
+- `--daemon-transcode-workers`: Number of concurrent daemon video transcodes. Default: half the CPU cores, minimum 2
+- `--daemon-upload-workers`: Number of concurrent daemon uploads. Default: `16`
+- `--video-codec`: Daemon RGB video codec: `h264_fast`, `h264_medium` or `h264_lossless`. Default: the daemon profile value (`h264_medium`)
+
+The daemon worker and codec options apply only when the import starts the daemon. The daemon keeps them after the import, until it restarts. If the daemon is already running, stop it first (`neuracore data-daemon stop`).
+
+
+RGB frames that are 8-bit RGB PNGs go to the daemon without a decode (`nc.log_rgb_png`), if the RGB transforms do not change the pixels. This removes the PNG decode in the importer and the PNG encode in the daemon bridge. Other images are decoded as before.
+
+Workers do not wait for each episode to upload. They start the next episode immediately. When all episodes are recorded, the importer waits for all uploads to complete. The import fails if no upload completes within 15 minutes for each recording that is still pending.
 
 ### Configuration File
 

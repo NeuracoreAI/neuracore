@@ -260,8 +260,61 @@ fn log_frame(
         timestamp_ns,
         timestamp_s: resolved_timestamp_s,
         data,
+        precompressed: false,
     };
+    enqueue_frame(py, job)
+}
 
+/// Log one RGB frame that is already a PNG, skipping the producer's PNG encode.
+///
+/// The PNG must be 8-bit RGB and not interlaced, the format the spool stores,
+/// so it is muxed as is. Returns the frame's `(width, height)`.
+#[pyfunction]
+#[pyo3(signature = (robot_id, robot_instance, name, payload, timestamp_ns, timestamp_s = None))]
+fn log_rgb_png(
+    py: Python<'_>,
+    robot_id: &str,
+    robot_instance: i64,
+    name: &str,
+    payload: PyBuffer<u8>,
+    timestamp_ns: i64,
+    timestamp_s: Option<f64>,
+) -> PyResult<(u32, u32)> {
+    if robot_id.is_empty() || name.is_empty() {
+        return Err(PyValueError::new_err("robot_id and name must not be empty"));
+    }
+    if !payload.is_c_contiguous() {
+        return Err(PyValueError::new_err("PNG buffer must be C-contiguous"));
+    }
+    crate::paths::recordings_root()
+        .map_err(|message| PyRuntimeError::new_err(message.to_string()))?;
+    // SAFETY: as in `log_frame`: GIL held, validated `u8` C-contiguous buffer,
+    // read-only copy.
+    let data = unsafe {
+        std::slice::from_raw_parts(payload.buf_ptr() as *const u8, payload.item_count())
+            .to_vec()
+    };
+    let (width, height) = png_rgb8_dimensions(&data).map_err(PyValueError::new_err)?;
+    let job = FrameJob {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+        data_type: "RGB_IMAGES".to_string(),
+        sensor_name: name.to_string(),
+        width,
+        height,
+        dtype: FrameDtype::Rgb8,
+        publish_ns: now_ns(),
+        timestamp_ns,
+        timestamp_s: timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0),
+        data,
+        precompressed: true,
+    };
+    enqueue_frame(py, job)?;
+    Ok((width, height))
+}
+
+/// Hand a frame to the writer queue, raising `LoggingStalledError` on a stall.
+fn enqueue_frame(py: Python<'_>, job: FrameJob) -> PyResult<()> {
     // Hand off to the writer with the GIL released: enqueuing only blocks under
     // sustained overload (the byte caps), and blocking there while holding the
     // GIL would stall every Python thread in the process. A frame that cannot be
@@ -616,6 +669,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
+    module.add_function(wrap_pyfunction!(log_rgb_png, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
@@ -630,6 +684,40 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<LoggingStalledError>(),
     )?;
     Ok(())
+}
+
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+const PNG_IHDR: &[u8; 8] = b"\x00\x00\x00\x0dIHDR";
+const PNG_IEND: &[u8; 12] = b"\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+const PNG_COLOR_TYPE_RGB: u8 = 2;
+
+/// Read `(width, height)` from a PNG that the spool can store as is.
+///
+/// Accepts only 8-bit RGB, non-interlaced PNGs: the format of the producer's
+/// own encoded frames.
+fn png_rgb8_dimensions(png: &[u8]) -> Result<(u32, u32), String> {
+    // Signature (8) + IHDR length (4) + type (4) + IHDR data (13), and a
+    // trailing IEND so a truncated frame never reaches the spool.
+    if png.len() < 29 + PNG_IEND.len()
+        || &png[..8] != PNG_SIGNATURE
+        || &png[8..16] != PNG_IHDR
+        || !png.ends_with(PNG_IEND)
+    {
+        return Err("payload is not a whole PNG".to_string());
+    }
+    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    let (bit_depth, color_type, interlace) = (png[24], png[25], png[28]);
+    if width == 0 || height == 0 {
+        return Err("PNG width and height must be non-zero".to_string());
+    }
+    if bit_depth != 8 || color_type != PNG_COLOR_TYPE_RGB || interlace != 0 {
+        return Err(format!(
+            "PNG must be 8-bit RGB and not interlaced; got bit depth {bit_depth}, \
+             color type {color_type}, interlace {interlace}"
+        ));
+    }
+    Ok((width, height))
 }
 
 /// Validate a `log_frame` payload against its declared dtype and geometry.
@@ -665,6 +753,45 @@ fn validate_frame_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png_header(width: u32, height: u32, bit_depth: u8, color_type: u8, interlace: u8) -> Vec<u8> {
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&width.to_be_bytes());
+        png.extend_from_slice(&height.to_be_bytes());
+        png.extend_from_slice(&[bit_depth, color_type, 0, 0, interlace]);
+        png.extend_from_slice(&[0; 4]); // IHDR CRC, unchecked.
+        png.extend_from_slice(PNG_IEND);
+        png
+    }
+
+    #[test]
+    fn png_rgb8_dimensions_reads_own_encoded_frame() {
+        let png = crate::nut_writer::encode_png_frame(3, 2, &[7u8; 3 * 2 * 3]);
+        assert_eq!(png_rgb8_dimensions(&png), Ok((3, 2)));
+    }
+
+    #[test]
+    fn png_rgb8_dimensions_rejects_unsupported_formats() {
+        assert!(png_rgb8_dimensions(&png_header(4, 4, 16, 2, 0)).is_err());
+        assert!(png_rgb8_dimensions(&png_header(4, 4, 8, 6, 0)).is_err());
+        assert!(png_rgb8_dimensions(&png_header(4, 4, 8, 3, 0)).is_err());
+        assert!(png_rgb8_dimensions(&png_header(4, 4, 8, 2, 1)).is_err());
+        assert!(png_rgb8_dimensions(&png_header(0, 4, 8, 2, 0)).is_err());
+    }
+
+    #[test]
+    fn png_rgb8_dimensions_rejects_non_png() {
+        assert!(png_rgb8_dimensions(b"not a png at all, just bytes!").is_err());
+        assert!(png_rgb8_dimensions(&[]).is_err());
+    }
+
+    #[test]
+    fn png_rgb8_dimensions_rejects_truncated_png() {
+        let png = crate::nut_writer::encode_png_frame(3, 2, &[7u8; 3 * 2 * 3]);
+        assert!(png_rgb8_dimensions(&png[..png.len() - 1]).is_err());
+    }
 
     #[test]
     fn valid_rgb_uint8_frame_is_accepted() {

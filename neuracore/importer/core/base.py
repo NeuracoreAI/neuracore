@@ -10,7 +10,6 @@ import os
 import random
 import re
 import threading
-import time
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
@@ -44,8 +43,9 @@ from scipy.spatial.transform import Rotation as R
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo, Robot
-from neuracore.data_daemon.const import DEFAULT_RECORDING_ROOT_PATH
+from neuracore.importer.core.png_frame import PNGFrame, keeps_uint8_rgb_unchanged
 from neuracore.importer.core.robot_utils import RobotUtils
+from neuracore.importer.core.upload_wait import wait_for_uploads
 from neuracore.importer.core.validation import (
     JOINT_DATA_TYPES,
     validate_depth_images,
@@ -111,7 +111,6 @@ def get_shared_console() -> Console:
 class NeuracoreDatasetImporter(ABC):
     """Importer workflow that manages workers and Neuracore session setup."""
 
-    DISK_CHECK_INTERVAL_SECS: float = 10.0
     _instance_base: int = 0
 
     def __init__(
@@ -128,7 +127,6 @@ class NeuracoreDatasetImporter(ABC):
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
-        storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
@@ -150,8 +148,6 @@ class NeuracoreDatasetImporter(ABC):
             ik_init_config: Optional initial joint configuration for IK.
             dry_run: If True, skip actual recording (validation only).
             suppress_warnings: If True, suppress warning messages.
-            storage_limit: Pause workers when disk usage (used bytes)
-                on the recording filesystem reaches this value (bytes).
             random_sample: If set, import only this many items chosen at random.
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
@@ -186,7 +182,6 @@ class NeuracoreDatasetImporter(ABC):
         self.pre_check_joint_positions: dict[str, list[float]] = {}
         self.pre_check_joint_target_positions: dict[str, list[float]] = {}
         self.suppress_warnings = suppress_warnings
-        self.storage_limit = storage_limit
         self.random_sample = random_sample
         self.debug_target_ee_frame = (debug_target_ee_frame or "").strip() or None
         self.worker_errors: list[WorkerError] = []
@@ -196,6 +191,9 @@ class NeuracoreDatasetImporter(ABC):
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
+        self._recording_queue: mp.Queue[str] | None = None
+        # Cloud IDs of the recordings the last worker run stopped.
+        self._recording_ids: list[str] = []
         self._worker_id: int = -1
         # Resolved in import_all before workers spawn (collision-safe allocation).
         self._instance_base: int = 0
@@ -590,6 +588,17 @@ class NeuracoreDatasetImporter(ABC):
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
+        if isinstance(source_data, PNGFrame):
+            if keeps_uint8_rgb_unchanged(item.transforms):
+                self._log_png_frame(
+                    source_data,
+                    item.name,
+                    timestamp,
+                    extrinsics=extrinsics,
+                    intrinsics=intrinsics,
+                )
+                return
+            source_data = source_data.decode()
         ik_requested = (
             data_type == DataType.JOINT_POSITIONS
             and format.joint_position_input_type
@@ -820,6 +829,31 @@ class NeuracoreDatasetImporter(ABC):
             timestamp = math.nextafter(previous, math.inf)
         self._last_logged_timestamps[key] = timestamp
         return timestamp
+
+    def _log_png_frame(
+        self,
+        frame: PNGFrame,
+        name: str,
+        timestamp: float,
+        *,
+        extrinsics: np.ndarray | None = None,
+        intrinsics: np.ndarray | None = None,
+    ) -> None:
+        """Log an RGB frame as its PNG, with no decode."""
+        timestamp = self._strictly_increasing_timestamp(
+            data_type=DataType.RGB_IMAGES, name=name, timestamp=timestamp
+        )
+        instance = self.robot_instance(self._worker_id)
+        nc.log_rgb_png(
+            name=name,
+            png=frame.data,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            robot_name=self.dataset_config.robot.name,
+            instance=instance,
+            timestamp=timestamp,
+            dry_run=self.dry_run,
+        )
 
     def _log_transformed_data(
         self,
@@ -1134,8 +1168,24 @@ class NeuracoreDatasetImporter(ABC):
 
             if self.worker_errors and self.skip_on_error == "all":
                 raise ImporterError("Import aborted due to worker errors.")
+            wait_for_uploads(self._recording_ids, logger=self.logger)
         finally:
             self._cleanup_worker_instances(max_workers_used)
+
+    def _stop_recording(self, timestamp: float) -> None:
+        """Stop the worker's recording; the parent waits for its upload."""
+        instance = self.robot_instance(self._worker_id)
+        recording_id = nc.get_cloud_recording_id(
+            robot_name=self.robot_name, instance=instance
+        )
+        nc.stop_recording(
+            robot_name=self.robot_name,
+            instance=instance,
+            wait=False,
+            timestamp=timestamp,
+        )
+        if recording_id and self._recording_queue is not None:
+            self._recording_queue.put(recording_id)
 
     def _run_import_workers(
         self,
@@ -1152,7 +1202,7 @@ class NeuracoreDatasetImporter(ABC):
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
         progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
         completed_queue: mp.Queue[str] = ctx.Queue()
-        pause_event = ctx.Event()  # when set, workers pause at next item boundary
+        recording_queue: mp.Queue[str] = ctx.Queue()
         precheck_result_queue: mp.Queue[bool] | None = (
             ctx.Queue() if use_precheck_result_queue else None
         )
@@ -1171,15 +1221,15 @@ class NeuracoreDatasetImporter(ABC):
                     progress_queue,
                     completed_queue,
                     ready_barrier,
-                    pause_event,
                     precheck_result_queue,
+                    recording_queue,
                 ),
             )
             process.start()
             processes.append(process)
 
-        self._monitor_progress(
-            processes, progress_queue, len(items), pause_event, completed_queue
+        self._recording_ids = self._monitor_progress(
+            processes, progress_queue, len(items), completed_queue, recording_queue
         )
 
         for process in processes:
@@ -1188,6 +1238,8 @@ class NeuracoreDatasetImporter(ABC):
         progress_queue.join_thread()
         completed_queue.close()
         completed_queue.join_thread()
+        recording_queue.close()
+        recording_queue.join_thread()
 
         return (
             self._collect_errors(error_queue),
@@ -1232,21 +1284,21 @@ class NeuracoreDatasetImporter(ABC):
         progress_queue: mp.Queue | None,
         completed_queue: mp.Queue[str] | None,
         ready_barrier: mp.synchronize.Barrier | None = None,
-        pause_event: mp.synchronize.Event | None = None,
         precheck_result_queue: mp.Queue[bool] | None = None,
+        recording_queue: mp.Queue[str] | None = None,
     ) -> None:
         """Worker body that wraps import with error capture.
 
         All workers prepare first, then synchronise on *ready_barrier*
         before any of them starts importing items.  If any worker fails
         during preparation it aborts the barrier so the remaining workers
-        can exit promptly. When *pause_event* is set (e.g. low disk),
-        workers block at item boundaries until it is cleared.
+        can exit promptly.
         When *precheck_result_queue* is provided and pre_check is True,
         the result of _determine_skip_joint_target_positions() is put on the queue.
         """
         self._worker_id = worker_id
         self._progress_queue = progress_queue
+        self._recording_queue = recording_queue
 
         try:
             sig = inspect.signature(self.prepare_worker)
@@ -1276,8 +1328,6 @@ class NeuracoreDatasetImporter(ABC):
                 return
 
         for idx, item in enumerate(chunk):
-            while pause_event is not None and pause_event.is_set():
-                time.sleep(1)
             try:
                 self._step(
                     item,
@@ -1490,60 +1540,25 @@ class NeuracoreDatasetImporter(ABC):
         except Exception:  # noqa: BLE001 - best-effort progress updates
             self.logger.debug("Failed to emit progress update.", exc_info=True)
 
-    @staticmethod
-    def _format_bytes(num_bytes: int | float) -> str:
-        """Format a byte count into a human-readable string."""
-        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-            if abs(num_bytes) < 1024:
-                return f"{num_bytes:.1f} {unit}"
-            num_bytes /= 1024
-        return f"{num_bytes:.1f} PiB"
-
-    def _get_disk_check_path(self) -> Path:
-        """Return the filesystem path to monitor for disk/folder usage.
-
-        Defaults to the daemon recording directory.
-        """
-        return DEFAULT_RECORDING_ROOT_PATH
-
-    def _get_disk_usage(self) -> int:
-        """Return total size in bytes of the monitored folder."""
-        path = self._get_disk_check_path()
-        if not path.exists():
-            return 0
-        total_size = 0
-        if path.is_file():
-            return path.stat().st_size
-        for dirpath, dirnames, filenames in os.walk(path):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                try:
-                    total_size += os.path.getsize(fp)
-                except (OSError, FileNotFoundError):
-                    pass  # Skip files that disappear or can't be accessed
-        return total_size
-
     def _monitor_progress(
         self,
         processes: Sequence[mp.context.SpawnProcess],
         progress_queue: mp.Queue[ProgressUpdate],
         total_items: int,
-        pause_event: mp.synchronize.Event | None = None,
         completed_queue: mp.Queue[str] | None = None,
-    ) -> None:
+        recording_queue: mp.Queue[str] | None = None,
+    ) -> list[str]:
         """Render a progress bar by aggregating all worker updates.
 
-        Workers are paused when disk usage reaches storage_limit until
-        usage drops below it. Completed item keys from completed_queue
-        are appended to the resume file periodically.
+        Completed item keys from completed_queue are appended to the resume
+        file periodically. Returns the recording IDs the workers stopped.
         """
+        recording_ids: list[str] = []
         if not processes:
-            return
+            return recording_ids
 
         completed_items: set[int] = set()
         worker_states: dict[int, ProgressUpdate] = {}
-        last_disk_check = 0.0
-        workers_paused = False
 
         def flush_completed_queue() -> None:
             if completed_queue is None:
@@ -1556,6 +1571,13 @@ class NeuracoreDatasetImporter(ABC):
                 pass
             if batch:
                 self._append_completed_item_keys(batch)
+            if recording_queue is None:
+                return
+            try:
+                while True:
+                    recording_ids.append(recording_queue.get_nowait())
+            except Empty:
+                pass
 
         with Progress(
             SpinnerColumn(style="cyan"),
@@ -1572,55 +1594,6 @@ class NeuracoreDatasetImporter(ABC):
 
             while True:
                 flush_completed_queue()
-
-                now = time.monotonic()
-                if now - last_disk_check >= self.DISK_CHECK_INTERVAL_SECS:
-                    last_disk_check = now
-                    try:
-                        used_bytes = self._get_disk_usage()
-                        pct_used = used_bytes / self.storage_limit * 100
-                        used_str = self._format_bytes(used_bytes)
-                        limit_str = self._format_bytes(self.storage_limit)
-
-                        if used_bytes >= self.storage_limit:
-                            if pause_event is not None and not workers_paused:
-                                workers_paused = True
-                                pause_event.set()
-                                self.logger.warning(
-                                    "Local cache limit exceeded "
-                                    f"({used_str} of {limit_str}). "
-                                    "Pausing workers until usage drops below limit."
-                                )
-                            progress.update(
-                                overall_task,
-                                description=(
-                                    f"Paused ({pct_used:.0f}% of local cache used: "
-                                    f"{used_str} / {limit_str}). "
-                                    "Waiting for recordings to upload to cloud "
-                                    "and free up local cache."
-                                ),
-                            )
-                            time.sleep(self.DISK_CHECK_INTERVAL_SECS)
-                            continue
-                        else:
-                            if workers_paused and pause_event is not None:
-                                workers_paused = False
-                                pause_event.clear()
-                                self.logger.info(
-                                    "Local cache usage below limit "
-                                    f"({used_str} of {limit_str}). "
-                                    "Resuming import."
-                                )
-                            progress.update(
-                                overall_task,
-                                description=(
-                                    f"Importing episodes "
-                                    f"({pct_used:.0f}% of local cache used: "
-                                    f"{used_str} / {limit_str})."
-                                ),
-                            )
-                    except Exception:  # noqa: BLE001 - best-effort disk check
-                        pass
 
                 any_alive = any(proc.is_alive() for proc in processes)
                 timeout = 0.1 if any_alive else 0
@@ -1653,7 +1626,7 @@ class NeuracoreDatasetImporter(ABC):
                         )
                     flush_completed_queue()
                     progress.update(overall_task, completed=total_items)
-                    return
+                    return recording_ids
 
     def _apply_progress_update(
         self,

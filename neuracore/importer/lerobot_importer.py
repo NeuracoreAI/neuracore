@@ -57,7 +57,6 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
-        storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
@@ -79,7 +78,6 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
             random_sample: If set, import only this many episodes chosen at random.
-            storage_limit: If set, pause when disk usage reaches this (bytes).
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector poses for debugging.
@@ -97,7 +95,6 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
             random_sample=random_sample,
-            storage_limit=storage_limit,
             shared=shared,
             debug_target_ee_frame=debug_target_ee_frame,
             robot_id=robot_id,
@@ -203,12 +200,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=str(episode_id),
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name,
-                instance=self.robot_instance(self._worker_id),
-                wait=True,
-                timestamp=recording_stop_timestamp,
-            )
+            self._stop_recording(recording_stop_timestamp)
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _convert_v21_to_v30(self) -> None:

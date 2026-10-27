@@ -332,6 +332,8 @@ pub(crate) struct FrameJob {
     pub(crate) timestamp_ns: i64,
     pub(crate) timestamp_s: f64,
     pub(crate) data: Vec<u8>,
+    /// `data` is already a spool-ready PNG, so it skips the compression pool.
+    pub(crate) precompressed: bool,
 }
 
 /// Work item for the writer thread.
@@ -839,6 +841,13 @@ fn expected_frame_bytes(dtype: FrameDtype, width: u32, height: u32) -> Option<us
 /// dropped here (the pre-split inline encode rejected it the same way) rather
 /// than handed to a worker.
 fn submit_frame(pool: &CompressPool, in_flight: &mut VecDeque<PendingFrame>, mut job: FrameJob) {
+    if job.precompressed {
+        // Queued behind any frame still compressing, so stream order holds.
+        let result = FrameResult::new();
+        result.set(std::mem::take(&mut job.data));
+        in_flight.push_back(PendingFrame { job, result });
+        return;
+    }
     let expected = expected_frame_bytes(job.dtype, job.width, job.height);
     if expected != Some(job.data.len()) {
         tracing::warn!(
@@ -2286,7 +2295,40 @@ mod tests {
             timestamp_ns: 0,
             timestamp_s: 0.0,
             data: vec![0u8; bytes],
+            precompressed: false,
         })
+    }
+
+    fn frame_job(width: u32, height: u32, data: Vec<u8>, precompressed: bool) -> FrameJob {
+        FrameJob {
+            robot_id: "robot".to_string(),
+            robot_instance: 0,
+            data_type: "RGB_IMAGES".to_string(),
+            sensor_name: "camera".to_string(),
+            width,
+            height,
+            dtype: FrameDtype::Rgb8,
+            publish_ns: TEST_PUBLISH_NS,
+            timestamp_ns: 0,
+            timestamp_s: 0.0,
+            data,
+            precompressed,
+        }
+    }
+
+    #[test]
+    fn precompressed_frame_skips_pool_and_waits_behind_compressing_frame() {
+        // No workers: the raw frame never compresses, so it stays at the front.
+        let pool = CompressPool::new(0);
+        let mut in_flight = VecDeque::new();
+        submit_frame(&pool, &mut in_flight, frame_job(2, 2, vec![0u8; 12], false));
+        submit_frame(&pool, &mut in_flight, frame_job(2, 2, b"png".to_vec(), true));
+
+        drain_ready(&mut in_flight);
+
+        assert_eq!(in_flight.len(), 2, "the PNG frame must not overtake");
+        assert_eq!(pool.work.0.lock().unwrap().len(), 1, "only the raw frame is pooled");
+        assert_eq!(in_flight[1].result.try_take().as_deref(), Some(&b"png"[..]));
     }
 
     #[test]
