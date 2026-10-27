@@ -1,5 +1,5 @@
-"""This example demonstrates how you can programmatically add flags to a datasets
-and recordings.
+"""This example demonstrates how you can programmatically edit dataset metadata
+and tag recordings.
 
 See the `example_data_collection_bigym.py` example for how to create a dataset first.
 """
@@ -9,7 +9,7 @@ import argparse
 from tqdm import tqdm
 
 import neuracore as nc
-from neuracore.core.data.recording import Recording, RecordingStatus
+from neuracore.core.data.recording import Recording
 
 
 def is_bad_recording_heuristic(recording: Recording) -> bool:
@@ -40,10 +40,10 @@ def main(
     print("Updating dataset Recordings ...", end=None)
     for recording in tqdm(dataset):
         if is_bad_recording_heuristic(recording):
-            recording.set_status(RecordingStatus.FLAGGED)
+            recording.add_tag("flagged")
             recording.set_notes("Bad recording")
         else:
-            recording.set_status(RecordingStatus.NORMAL)
+            recording.remove_tag("flagged")
             recording.set_notes("Good recording")
 
 
