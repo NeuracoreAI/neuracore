@@ -12,3 +12,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 <!-- Append your summary here -->
 
 Download checkpoints from cloud training runs. `neuracore training list-checkpoints -t <run>` lists a run's checkpoints and `neuracore training download-checkpoint -t <run> [--epoch N] [-o DIR] [--force]` downloads one (latest by default). The same is available in Python as `nc.list_training_checkpoints(job_id)` and `nc.download_training_checkpoint(job_id, epoch=None, output_dir=".", overwrite=False)`.
+
+A recording started from the web no longer takes the frames logged before its start.
