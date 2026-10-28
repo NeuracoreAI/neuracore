@@ -28,8 +28,14 @@ DIFFUSION_POLICY_ALGORITHM_DIR = (
 )
 AlgorithmLoader(DIFFUSION_POLICY_ALGORITHM_DIR).install_requirements()
 
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler  # noqa: E402
+
 from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import (  # noqa: E402
+    BetaSchedule,
     DiffusionPolicy,
+    LRSchedulerType,
+    NoiseSchedulerType,
+    PredictionType,
 )
 
 BS = 2
@@ -215,6 +221,48 @@ def test_flow_matching_forward_backward(
         if param.requires_grad:
             assert param.grad is not None, f"Gradient for {name} is None"
             assert torch.isfinite(param.grad).all()
+
+
+@pytest.mark.parametrize(
+    "choices",
+    [
+        {
+            "noise_scheduler_type": "DDIM",
+            "prediction_type": "sample",
+            "beta_schedule": "linear",
+            "lr_scheduler_type": "constant_with_warmup",
+        },
+        {
+            "noise_scheduler_type": NoiseSchedulerType.DDIM,
+            "prediction_type": PredictionType.SAMPLE,
+            "beta_schedule": BetaSchedule.LINEAR,
+            "lr_scheduler_type": LRSchedulerType.CONSTANT_WITH_WARMUP,
+        },
+    ],
+    ids=["plain_strings", "enum_members"],
+)
+def test_fixed_choice_parameters_accept_plain_strings_and_members(
+    pytorch_dummy_dataset: PytorchDummyDataset, model_config: dict, choices: dict
+):
+    """Training configs pass plain strings, which act like the enum members."""
+    description = ModelInitDescription(
+        input_data_types=OrderedSet([DataType.JOINT_POSITIONS]),
+        output_data_types=OrderedSet([DataType.JOINT_TARGET_POSITIONS]),
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+
+    model = DiffusionPolicy(
+        model_init_description=description, **{**model_config, **choices}
+    )
+
+    assert isinstance(model.noise_scheduler, DDIMScheduler)
+    assert model.noise_scheduler.config.prediction_type == "sample"
+    assert model.noise_scheduler.config.beta_schedule == "linear"
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    (scheduler,) = model.configure_schedulers([optimizer], num_training_steps=10)
+    assert isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR)
 
 
 def test_run_validation(tmp_path: Path, mock_login):

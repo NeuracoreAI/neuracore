@@ -101,6 +101,7 @@ CREAT
 ctrllimited
 ctrlrange
 cuda
+cudagraphs
 cudnn
 daemonising
 daemonization

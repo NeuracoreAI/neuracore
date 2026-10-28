@@ -31,6 +31,7 @@ import inspect
 import logging
 import math
 import warnings
+from enum import Enum
 from typing import Any, cast
 
 import torch
@@ -74,6 +75,15 @@ logger = logging.getLogger(__name__)
 # Normalizer types for proprioception and actions
 proprio_normalizer = MeanStdNormalizer
 action_normalizer = MeanStdNormalizer
+
+
+class CompileMode(str, Enum):
+    """torch.compile mode."""
+
+    DEFAULT = "default"
+    REDUCE_OVERHEAD = "reduce-overhead"
+    MAX_AUTOTUNE = "max-autotune"
+    MAX_AUTOTUNE_NO_CUDAGRAPHS = "max-autotune-no-cudagraphs"
 
 
 class Groot(NeuracoreModel):
@@ -124,7 +134,7 @@ class Groot(NeuracoreModel):
         backbone_embedding_dim: int = 2048,
         gradient_checkpointing: bool = True,
         use_torch_compile: bool = False,
-        torch_compile_mode: str = "default",
+        torch_compile_mode: CompileMode = CompileMode.DEFAULT,
         state_dropout_prob: float = 0.0,
         state_noise_scale: float = 0.0,
         load_backbone_bf16: bool = False,

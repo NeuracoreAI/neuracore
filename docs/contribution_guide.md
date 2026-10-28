@@ -281,6 +281,36 @@ training run.
 
 1. **`configure_schedulers`**: Define what optimization schedulers to use for training
 
+#### Fixed-choice hyperparameters
+
+When a hyperparameter only accepts a fixed set of strings, declare it as a string enum and the training wizard shows it as a dropdown instead of a text box:
+
+```python
+from enum import Enum
+
+
+class Backbone(str, Enum):
+    RESNET18 = "resnet18"
+    RESNET50 = "resnet50"
+
+
+class MyCustomAlgorithm(NeuracoreModel):
+    def __init__(
+        self,
+        model_init_description: ModelInitDescription,
+        backbone: Backbone = Backbone.RESNET18,
+    ):
+        ...
+```
+
+- Derive the enum from both `str` and `Enum`. Neuracore supports Python 3.10, so use `(str, Enum)` rather than `StrEnum`.
+- Define the enum at the top level of the file that contains your `NeuracoreModel` subclass. The choices are read from that file's source when the algorithm is uploaded, without running it, so an enum imported from another module is not found and the parameter is left out of the configurable parameters.
+- Give every member a string literal value. The values are what users pick from, in the order you declare them.
+- Use a member as the default (`Backbone.RESNET18`), or annotate the parameter with the enum and give a plain string default.
+- Your model receives the chosen value as a plain string, so compare it with `==`, or convert it with `Backbone(backbone)`. Do not rely on `str(member)` or f-strings to get the value: from Python 3.11 they give `Backbone.RESNET18`.
+
+Training jobs that set the parameter to anything other than one of its values are rejected. Algorithms uploaded before fixed-choice parameters were supported have no recorded choices: upload them again to get the dropdowns.
+
 ### Step 4: File Organization
 
 For a basic algorithm, a single Python file containing your model class is sufficient. For more complex algorithms:
