@@ -51,6 +51,8 @@ from neuracore.data_daemon.video_codec import set_active_profile_video_codec
 
 logger = logging.getLogger(__name__)
 
+CAMERA_CALIBRATION_ATOL = 1e-4
+
 
 class ExperimentalPointCloudWarning(UserWarning):
     """Warning for experimental point cloud features."""
@@ -380,17 +382,46 @@ def _validate_extrinsics_intrinsics(
         Tuple of validated (extrinsics, intrinsics) matrices as float32
 
     Raises:
-        ValueError: If matrices have incorrect shapes
+        ValueError: If a matrix has the wrong shape, holds a non-finite value,
+            or is not a valid pose or pinhole matrix
     """
     if extrinsics is not None:
         if not isinstance(extrinsics, np.ndarray) or extrinsics.shape != (4, 4):
             raise ValueError("Extrinsics must be a numpy array of shape (4, 4)")
-        extrinsics = extrinsics.astype(np.float32)
+        extrinsics = _require_finite_matrix(extrinsics, "Extrinsics")
+        if not np.allclose(
+            extrinsics[3], [0.0, 0.0, 0.0, 1.0], atol=CAMERA_CALIBRATION_ATOL
+        ):
+            raise ValueError("Extrinsics bottom row must be [0, 0, 0, 1]")
+        rotation = extrinsics[:3, :3]
+        if (
+            not np.allclose(
+                rotation.T @ rotation, np.eye(3), atol=CAMERA_CALIBRATION_ATOL
+            )
+            or np.linalg.det(rotation) <= 0
+        ):
+            raise ValueError(
+                "Extrinsics rotation must be orthonormal with determinant +1"
+            )
     if intrinsics is not None:
         if not isinstance(intrinsics, np.ndarray) or intrinsics.shape != (3, 3):
             raise ValueError("Intrinsics must be a numpy array of shape (3, 3)")
-        intrinsics = intrinsics.astype(np.float32)
+        intrinsics = _require_finite_matrix(intrinsics, "Intrinsics")
+        if not np.allclose(
+            intrinsics[2], [0.0, 0.0, 1.0], atol=CAMERA_CALIBRATION_ATOL
+        ):
+            raise ValueError("Intrinsics bottom row must be [0, 0, 1]")
+        if intrinsics[0, 0] <= 0 or intrinsics[1, 1] <= 0:
+            raise ValueError("Intrinsics focal lengths fx and fy must be positive")
     return extrinsics, intrinsics
+
+
+def _require_finite_matrix(matrix: np.ndarray, label: str) -> np.ndarray:
+    """Return the matrix as float32, raising if any value is NaN or infinite."""
+    matrix_float32 = matrix.astype(np.float32)
+    if not np.all(np.isfinite(matrix_float32)):
+        raise ValueError(f"{label} must hold only finite values")
+    return matrix_float32
 
 
 def _flatten_matrix(matrix: np.ndarray | None) -> list[float] | None:
