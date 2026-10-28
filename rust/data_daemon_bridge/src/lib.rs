@@ -52,7 +52,7 @@ mod query;
 mod recording_state_cache;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameDtype};
+use data_daemon_shared::{Envelope, FrameCalibration, FrameDtype};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -196,7 +196,7 @@ pyo3::create_exception!(
 /// boundary; every internal Rust component downstream works with the strongly
 /// typed [`FrameDtype`].
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None, depth_scale_m = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None, depth_scale_m = None, intrinsics = None, extrinsics = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
@@ -211,6 +211,8 @@ fn log_frame(
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
     depth_scale_m: Option<f64>,
+    intrinsics: Option<Vec<f32>>,
+    extrinsics: Option<Vec<f32>>,
 ) -> PyResult<()> {
     if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
@@ -219,6 +221,8 @@ fn log_frame(
     }
     let frame_dtype =
         parse_frame_dtype(data_type, dtype, depth_scale_m).map_err(PyValueError::new_err)?;
+    let calibration =
+        parse_frame_calibration(intrinsics, extrinsics).map_err(PyValueError::new_err)?;
     let actual_bytes = payload.item_count();
     validate_frame_payload(frame_dtype, width, height, actual_bytes)
         .map_err(PyValueError::new_err)?;
@@ -259,6 +263,7 @@ fn log_frame(
         publish_ns: now_ns(),
         timestamp_ns,
         timestamp_s: resolved_timestamp_s,
+        calibration,
         data,
     };
 
@@ -269,7 +274,7 @@ fn log_frame(
     // than being silently dropped, so the caller learns the daemon has stalled.
     py.detach(move || {
         note_video_activity(&job.robot_id, job.robot_instance, job.publish_ns);
-        writer_queue().push(WriterMsg::Frame(job))
+        writer_queue().push(WriterMsg::Frame(Box::new(job)))
     })
     .map_err(|_| {
         LoggingStalledError::new_err(
@@ -472,6 +477,31 @@ fn cancel_recording(
         })?;
         recording_state_cache::note_local_end(&robot_id, robot_instance);
         Ok(())
+    })
+}
+
+/// Build a frame's calibration from flattened row-major matrices.
+///
+/// Intrinsics must hold 9 values (3x3) and extrinsics 16 values (4x4).
+fn parse_frame_calibration(
+    intrinsics: Option<Vec<f32>>,
+    extrinsics: Option<Vec<f32>>,
+) -> Result<FrameCalibration, String> {
+    let intrinsics = intrinsics
+        .map(|values| {
+            <[f32; 9]>::try_from(values.as_slice())
+                .map_err(|_| format!("intrinsics must hold 9 values (3x3), got {}", values.len()))
+        })
+        .transpose()?;
+    let extrinsics = extrinsics
+        .map(|values| {
+            <[f32; 16]>::try_from(values.as_slice())
+                .map_err(|_| format!("extrinsics must hold 16 values (4x4), got {}", values.len()))
+        })
+        .transpose()?;
+    Ok(FrameCalibration {
+        intrinsics,
+        extrinsics,
     })
 }
 
@@ -725,6 +755,27 @@ mod tests {
         assert_eq!(FrameDtype::from_wire_label("float64", None), None);
         let error = parse_frame_dtype("DEPTH_IMAGES", "float32", None).unwrap_err();
         assert!(error.contains("unsupported"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn frame_calibration_keeps_flattened_matrices() {
+        let intrinsics: Vec<f32> = (0..9).map(|i| i as f32).collect();
+        let extrinsics: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let calibration =
+            parse_frame_calibration(Some(intrinsics.clone()), Some(extrinsics.clone()))
+                .expect("valid calibration");
+        assert_eq!(calibration.intrinsics.map(|m| m.to_vec()), Some(intrinsics));
+        assert_eq!(calibration.extrinsics.map(|m| m.to_vec()), Some(extrinsics));
+        assert_eq!(
+            parse_frame_calibration(None, None),
+            Ok(FrameCalibration::default())
+        );
+    }
+
+    #[test]
+    fn frame_calibration_with_wrong_length_is_rejected() {
+        assert!(parse_frame_calibration(Some(vec![0.0; 8]), None).is_err());
+        assert!(parse_frame_calibration(None, Some(vec![0.0; 12])).is_err());
     }
 
     #[test]

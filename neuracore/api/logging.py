@@ -377,7 +377,7 @@ def _validate_extrinsics_intrinsics(
         intrinsics: Optional intrinsics matrix as numpy array
 
     Returns:
-        Tuple of validated (intrinsics, extrinsics) matrices
+        Tuple of validated (extrinsics, intrinsics) matrices as float32
 
     Raises:
         ValueError: If matrices have incorrect shapes
@@ -385,12 +385,19 @@ def _validate_extrinsics_intrinsics(
     if extrinsics is not None:
         if not isinstance(extrinsics, np.ndarray) or extrinsics.shape != (4, 4):
             raise ValueError("Extrinsics must be a numpy array of shape (4, 4)")
-        extrinsics = extrinsics.astype(np.float16)
+        extrinsics = extrinsics.astype(np.float32)
     if intrinsics is not None:
         if not isinstance(intrinsics, np.ndarray) or intrinsics.shape != (3, 3):
             raise ValueError("Intrinsics must be a numpy array of shape (3, 3)")
-        intrinsics = intrinsics.astype(np.float16)
+        intrinsics = intrinsics.astype(np.float32)
     return extrinsics, intrinsics
+
+
+def _flatten_matrix(matrix: np.ndarray | None) -> list[float] | None:
+    """Return a calibration matrix as a flat row-major list of floats."""
+    if matrix is None:
+        return None
+    return matrix.reshape(-1).tolist()
 
 
 def _log_camera_data(
@@ -472,6 +479,8 @@ def _log_camera_data(
         memoryview(contiguous).cast("B"),
         camera_data_without_frame.timestamp,
         depth_scale_m,
+        intrinsics=_flatten_matrix(camera_data_without_frame.intrinsics),
+        extrinsics=_flatten_matrix(camera_data_without_frame.extrinsics),
     )
 
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)

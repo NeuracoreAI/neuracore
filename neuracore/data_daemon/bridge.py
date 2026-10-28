@@ -236,6 +236,8 @@ class RecordingContext:
         payload: bytes | memoryview,
         timestamp: float,
         depth_scale_m: float | None = None,
+        intrinsics: list[float] | None = None,
+        extrinsics: list[float] | None = None,
     ) -> None:
         """Forward one video frame to the daemon.
 
@@ -251,6 +253,10 @@ class RecordingContext:
             payload: Raw video frame bytes.
             timestamp: the Unix timestamp of the sample.
             depth_scale_m: Meters per sensor unit, required for uint16 depth.
+            intrinsics: Optional row-major 3x3 camera intrinsics, flattened to
+                9 values.
+            extrinsics: Optional row-major 4x4 camera extrinsics, flattened to
+                16 values.
         """
         robot_id = self._require_source("log_frame")
         timestamp_ns = int(timestamp * 1_000_000_000)
@@ -268,6 +274,8 @@ class RecordingContext:
                 timestamp_ns,
                 timestamp,
                 depth_scale_m,
+                intrinsics,
+                extrinsics,
             )
         except native.LoggingStalledError as error:
             raise LoggingStalledError(str(error)) from error

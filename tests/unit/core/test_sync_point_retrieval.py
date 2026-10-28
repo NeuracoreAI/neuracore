@@ -131,8 +131,8 @@ def setup_test_config():
             expected_value=lambda data: {
                 data["name"]: {
                     "frame": data["image"],
-                    "extrinsics": data["extrinsics"].astype(np.float16),
-                    "intrinsics": data["intrinsics"].astype(np.float16),
+                    "extrinsics": data["extrinsics"],
+                    "intrinsics": data["intrinsics"],
                 }
             },
         ),
@@ -149,8 +149,8 @@ def setup_test_config():
                 data["name"]: {
                     "frame": data["image"],
                     "depth_scale_m": data["depth_scale_m"],
-                    "extrinsics": data["extrinsics"].astype(np.float16),
-                    "intrinsics": data["intrinsics"].astype(np.float16),
+                    "extrinsics": data["extrinsics"],
+                    "intrinsics": data["intrinsics"],
                 }
             },
         ),

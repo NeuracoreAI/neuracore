@@ -168,6 +168,55 @@ def test_log_depth_uint16_reaches_the_bridge_unchanged_with_its_scale(
     robot.id = None
 
 
+def test_log_rgb_forwards_camera_calibration_to_the_daemon(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """Forward log_rgb calibration to the daemon as flat row-major lists."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    robot = _get_robot(None, 0)
+    monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: "rec-1")
+
+    intrinsics = np.array([[300.0, 0.0, 320.0], [0.0, 300.0, 240.0], [0.0, 0.0, 1.0]])
+    extrinsics = np.eye(4)
+    extrinsics[:3, 3] = [0.5, -0.25, 1.0]
+    rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+    nc.log_rgb("calibrated", rgb, extrinsics=extrinsics, intrinsics=intrinsics)
+    nc.log_rgb("uncalibrated", rgb)
+
+    calibrated, uncalibrated = native.log_frame.call_args_list
+    assert calibrated.args[11] == intrinsics.reshape(-1).tolist()
+    assert calibrated.args[12] == extrinsics.reshape(-1).tolist()
+    assert uncalibrated.args[11] is None
+    assert uncalibrated.args[12] is None
+
+    depth = np.zeros((2, 2), dtype=np.uint16)
+    nc.log_depth(
+        "calibrated_depth",
+        depth,
+        depth_scale_m=0.001,
+        extrinsics=extrinsics,
+        intrinsics=intrinsics,
+    )
+
+    depth_call = native.log_frame.call_args
+    assert depth_call.args[11] == intrinsics.reshape(-1).tolist()
+    assert depth_call.args[12] == extrinsics.reshape(-1).tolist()
+
+
 def test_log_frame_forwards_dtype_derived_from_the_array(
     temp_config_dir,
     mock_auth_requests,
