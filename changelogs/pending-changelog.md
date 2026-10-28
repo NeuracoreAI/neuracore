@@ -20,3 +20,5 @@ Fixed-choice hyperparameters of the built-in algorithms are now string enums, so
 The built-in CNNMLP, DiffusionPolicy, Groot, Pi0 and Pi05 algorithms no longer list the H100 GPU, which is no longer offered. Groot, Pi0 and Pi05 now train on the A100 80GB only.
 
 Requires neuracore_types 13, which no longer has `GPUType.NVIDIA_H100_80GB`.
+
+Sensor names in bucket paths are now URL-encoded the way ROS escapes topic names, so `camera_left/rgb` is stored under `camera_left%2Frgb` instead of `camera_left\rgb`, and cameras and point clouds whose names contain `/` or `.` can be downloaded for training. LeRobot exports name such cameras the same way. Requires neuracore_types 14.

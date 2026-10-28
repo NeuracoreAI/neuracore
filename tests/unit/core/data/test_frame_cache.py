@@ -24,6 +24,7 @@ from neuracore.core.data.frame_cache import (
     get_camera_data_filenames,
     lock_file_for,
     read_depth_frame,
+    staged_camera_data_name,
     wait_for_lock_release,
 )
 
@@ -325,6 +326,13 @@ class TestDepthFrames:
 
         with pytest.raises(ValueError, match="decodes as"):
             read_depth_frame(tmp_path, 0, len(payload))
+
+
+def test_staged_camera_data_name_escapes_the_camera_name():
+    assert (
+        staged_camera_data_name(DataType.RGB_IMAGES, "camera_left/rgb")
+        == "camera_left%2FrgbRGB_IMAGES.mp4"
+    )
 
 
 def test_cache_camera_frames_rejects_other_data_types(tmp_path: Path):

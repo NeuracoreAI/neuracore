@@ -27,7 +27,9 @@ def _response(status_code: int, url: str | None = None) -> MagicMock:
 
 
 def _call_get_camera_data_url(
-    session: MagicMock, camera_type: DataType = DataType.RGB_IMAGES
+    session: MagicMock,
+    camera_type: DataType = DataType.RGB_IMAGES,
+    camera_id: str = "cam",
 ) -> str:
     fake_self = SimpleNamespace(id="rec-1", dataset=SimpleNamespace(org_id="org-1"))
     fake_self._get_recording_file_url = MethodType(
@@ -39,7 +41,9 @@ def _call_get_camera_data_url(
         patch(f"{MODULE}.thread_local_session", return_value=session),
         patch(f"{MODULE}.get_auth", return_value=auth),
     ):
-        return SynchronizedRecording._get_camera_data_url(fake_self, camera_type, "cam")
+        return SynchronizedRecording._get_camera_data_url(
+            fake_self, camera_type, camera_id
+        )
 
 
 def test_falls_back_to_lossy_when_lossless_missing() -> None:
@@ -61,6 +65,21 @@ def test_falls_back_to_lossy_when_lossless_missing() -> None:
         "RGB_IMAGES/cam/lossless.mp4",
         "RGB_IMAGES/cam/lossy.mp4",
     ]
+
+
+def test_escapes_a_camera_name_with_a_slash() -> None:
+    requested: list[str] = []
+
+    def fake_get(url, params=None, headers=None):
+        requested.append(params["filepath"])
+        return _response(200, url="https://example.com/lossless.mp4")
+
+    session = MagicMock()
+    session.get.side_effect = fake_get
+
+    _call_get_camera_data_url(session, camera_id="camera_left/rgb.v2")
+
+    assert requested == ["RGB_IMAGES/camera_left%2Frgb%2Ev2/lossless.mp4"]
 
 
 def test_uses_lossless_when_present() -> None:

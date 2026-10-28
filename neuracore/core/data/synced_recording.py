@@ -49,6 +49,7 @@ from neuracore.core.data.frame_cache import (
     staged_camera_data_name,
     wait_for_lock_release,
 )
+from neuracore.core.data.sensor_paths import sensor_directory
 from neuracore.core.data.serialized_synchronized_episode import (
     SerializedSynchronizedEpisode,
 )
@@ -387,7 +388,7 @@ class SynchronizedRecording:
         for filename in preferred_filenames:
             try:
                 return self._get_recording_file_url(
-                    f"{camera_type.value}/{camera_id}/{filename}"
+                    f"{sensor_directory(camera_type, camera_id)}/{filename}"
                 )
             except requests.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 404:
@@ -410,7 +411,7 @@ class SynchronizedRecording:
             URL string for downloading the trace file.
         """
         return self._get_recording_file_url(
-            f"{DataType.POINT_CLOUDS.value}/{sensor_id}/{filename}"
+            f"{sensor_directory(DataType.POINT_CLOUDS, sensor_id)}/{filename}"
         )
 
     def _download_rgb_video_and_cache_frames_to_disk(
@@ -506,7 +507,9 @@ class SynchronizedRecording:
         result = {}
         for cam_id, cam_data in camera_data.items():
             frames_dir = (
-                self.cache_dir / f"{self.id}" / DataType.RGB_IMAGES.value / cam_id
+                self.cache_dir
+                / f"{self.id}"
+                / sensor_directory(DataType.RGB_IMAGES, cam_id)
             )
             wait_for_lock_release(lock_file_for(frames_dir), frames_dir)
 
@@ -546,7 +549,9 @@ class SynchronizedRecording:
                 )
             legacy_depth = cam_data.offset is None
             frames_dir = (
-                self.cache_dir / f"{self.id}" / DataType.DEPTH_IMAGES.value / cam_id
+                self.cache_dir
+                / f"{self.id}"
+                / sensor_directory(DataType.DEPTH_IMAGES, cam_id)
             )
             wait_for_lock_release(lock_file_for(frames_dir), frames_dir)
 
@@ -612,7 +617,9 @@ class SynchronizedRecording:
         result: dict[str, PointCloudData] = {}
         for sensor_id, pc_data in point_cloud_data.items():
             sensor_root = (
-                self.cache_dir / f"{self.id}" / DataType.POINT_CLOUDS.value / sensor_id
+                self.cache_dir
+                / f"{self.id}"
+                / sensor_directory(DataType.POINT_CLOUDS, sensor_id)
             )
             lock_file = point_cloud_lock_file_for(sensor_root)
             wait_for_lock_release(lock_file, sensor_root)

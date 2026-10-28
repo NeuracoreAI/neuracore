@@ -24,6 +24,7 @@ from neuracore_types import (
     SynchronizedEpisode,
     SynchronizedPoint,
 )
+from neuracore_types.utils.name_utils import to_safe_name
 
 from neuracore.core.const import API_URL
 
@@ -183,7 +184,8 @@ def mock_prefetch_transport(monkeypatch):
                 f"/recording/{target.recording_id}/download_url",
                 params={
                     "filepath": (
-                        f"{target.data_type.value}/{target.camera_id}/{filename}"
+                        f"{target.data_type.value}/{to_safe_name(target.camera_id)}"
+                        f"/{filename}"
                     )
                 },
                 headers=get_auth().get_headers(),
