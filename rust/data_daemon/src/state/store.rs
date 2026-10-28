@@ -5,6 +5,7 @@
 //! coordinator rely on.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -544,6 +545,7 @@ impl CoalescedTraceWrite {
 pub struct SqliteStateStore {
     read_pool: SqlitePool,
     write_pool: SqlitePool,
+    daemon_id: Arc<str>,
 }
 
 impl SqliteStateStore {
@@ -587,10 +589,20 @@ impl SqliteStateStore {
         // Migrations are writes — run them on the write connection.
         MIGRATOR.run(&write_pool).await?;
 
+        let daemon_id: String =
+            sqlx::query_scalar("SELECT daemon_id FROM daemon_identity WHERE id = 1")
+                .fetch_one(&write_pool)
+                .await?;
+
         Ok(SqliteStateStore {
             read_pool,
             write_pool,
+            daemon_id: daemon_id.into(),
         })
+    }
+
+    pub fn daemon_id(&self) -> &str {
+        &self.daemon_id
     }
 
     /// Borrow the read pool, e.g. for diagnostics in tests.
@@ -1806,6 +1818,36 @@ mod tests {
         assert_eq!(row.recording_id, None, "cloud id starts NULL");
         assert_eq!(row.robot_id.as_deref(), Some("robot-1"));
         assert_eq!(row.robot_instance, Some(0));
+    }
+
+    #[tokio::test]
+    async fn the_daemon_id_is_a_uuid_with_a_reset_suffix() {
+        let (store, _tempdir) = open_store().await;
+        let (uuid, suffix) = store.daemon_id().rsplit_once('-').unwrap();
+        assert_eq!(suffix, "0");
+        let uuid = uuid::Uuid::parse_str(uuid).unwrap();
+        assert_eq!(uuid.get_version_num(), 4);
+        assert_eq!(uuid.get_variant(), uuid::Variant::RFC4122);
+        assert_eq!(uuid.to_string(), store.daemon_id().trim_end_matches("-0"));
+    }
+
+    #[tokio::test]
+    async fn the_daemon_id_survives_reopening_the_store() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let first = SqliteStateStore::open(&path).await.unwrap();
+        let daemon_id = first.daemon_id().to_string();
+        drop(first);
+
+        let reopened = SqliteStateStore::open(&path).await.unwrap();
+        assert_eq!(reopened.daemon_id(), daemon_id);
+    }
+
+    #[tokio::test]
+    async fn every_store_gets_its_own_daemon_id() {
+        let (first, _first_dir) = open_store().await;
+        let (second, _second_dir) = open_store().await;
+        assert_ne!(first.daemon_id(), second.daemon_id());
     }
 
     #[tokio::test]

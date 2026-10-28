@@ -201,7 +201,7 @@ async fn report_expected_trace_count(
         }),
     );
     match client
-        .put_expected_trace_count(org_id, recording_id, count)
+        .put_expected_trace_count(org_id, recording_id, count, store.daemon_id())
         .await
     {
         Ok(()) => {
@@ -448,6 +448,57 @@ mod tests {
         let mut options = ApiClientOptions::new(server.uri());
         options.max_backoff = Duration::from_millis(10);
         Arc::new(ApiClient::new(options, auth).unwrap())
+    }
+
+    #[tokio::test]
+    async fn expected_trace_count_names_the_daemon() {
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_recording(&store, "rec-1").await;
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .and(body_json(serde_json::json!({
+                "expected_trace_count": 1,
+                "daemon_id": store.daemon_id()
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        store
+            .create_trace(recording_index, "t-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
+
+        sweep_once(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &client(&server),
+            &org_rx(Some("org-1")),
+        )
+        .await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert_eq!(recording.expected_trace_count_reported, 1);
     }
 
     #[tokio::test]

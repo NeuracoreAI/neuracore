@@ -428,14 +428,17 @@ impl ApiClient {
         org_id: &str,
         recording_id: &str,
         expected_trace_count: i64,
+        daemon_id: &str,
     ) -> Result<(), ApiClientError> {
         let path = format!("/org/{org_id}/recording/{recording_id}/expected-trace-count");
         #[derive(Serialize)]
-        struct Body {
+        struct Body<'a> {
             expected_trace_count: i64,
+            daemon_id: &'a str,
         }
         let body = Body {
             expected_trace_count,
+            daemon_id,
         };
         let _ = self
             .send_with_retry(Method::PUT, &path, |builder| builder.json(&body))
@@ -583,7 +586,7 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::encoding::video_encoder::LossyVideoCodec;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn options(base_url: String) -> ApiClientOptions {
@@ -653,10 +656,32 @@ mod tests {
             trace_id: "trace-1".to_string(),
             cloud_files: vec![],
             codec: Some(LossyVideoCodec::LosslessPlusPreview),
+            daemon_id: "daemon-1".to_string(),
         }];
         let outcome = client.batch_register("org-1", &traces).await.unwrap();
         assert_eq!(outcome.registered_traces.len(), 1);
         assert_eq!(outcome.registered_traces[0].trace_id, "trace-1");
+    }
+
+    #[tokio::test]
+    async fn expected_trace_count_body_carries_the_daemon_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .and(body_json(serde_json::json!({
+                "expected_trace_count": 3,
+                "daemon_id": "daemon-1"
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = client(&server);
+
+        client
+            .put_expected_trace_count("org-1", "rec-1", 3, "daemon-1")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

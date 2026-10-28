@@ -274,6 +274,10 @@ pub enum RecordingCommand {
         /// When the daemon learned of the discard (Unix nanoseconds).
         observed_at_ns: i64,
     },
+    Snapshot {
+        open_recording_ids: HashSet<String>,
+        observed_at_ns: i64,
+    },
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -1061,6 +1065,62 @@ impl Dispatcher {
                 self.handle_discard(&cloud_recording_id, observed_at_ns)
                     .await;
             }
+            RecordingCommand::Snapshot {
+                open_recording_ids,
+                observed_at_ns,
+            } => {
+                self.close_missing_from_snapshot(&open_recording_ids, observed_at_ns, recv_at)
+                    .await;
+            }
+        }
+    }
+
+    async fn close_missing_from_snapshot(
+        &mut self,
+        open_recording_ids: &HashSet<String>,
+        observed_at_ns: i64,
+        recv_at: Instant,
+    ) {
+        let stopped: Vec<(Source, String, Option<i64>)> = self
+            .announced
+            .0
+            .iter()
+            .filter_map(|entry| {
+                let recording_id = entry.value().recording_id.as_ref()?;
+                (!open_recording_ids.contains(recording_id)).then(|| {
+                    (
+                        entry.key().clone(),
+                        recording_id.clone(),
+                        entry.value().recording_index,
+                    )
+                })
+            })
+            .collect();
+        for (source, recording_id, recording_index) in stopped {
+            let live_start = self
+                .windows
+                .get(&source)
+                .and_then(|entry| entry.live.as_ref())
+                .filter(|window| Some(window.recording_index) == recording_index)
+                .map(|window| window.started_at_ns);
+            let Some(live_start) = live_start else {
+                tracing::info!(
+                    recording_id,
+                    robot_id = source.0,
+                    "dropping the announcement of a recording that stopped while \
+                     disconnected from the backend's recording notifications"
+                );
+                self.announced.0.remove(&source);
+                continue;
+            };
+            tracing::warn!(
+                recording_id,
+                robot_id = source.0,
+                "closing recording {recording_id}: it stopped while this daemon was \
+                 disconnected from the backend's recording notifications"
+            );
+            let stop_ns = observed_at_ns.max(live_start);
+            self.handle_stop(source, stop_ns, stop_ns, recv_at).await;
         }
     }
 
@@ -3404,6 +3464,135 @@ mod tests {
             100,
             "the window opens at the recording's start, not at the first datum"
         );
+    }
+
+    fn snapshot(open: &[&str]) -> RecordingCommand {
+        RecordingCommand::Snapshot {
+            open_recording_ids: open.iter().map(|id| id.to_string()).collect(),
+            observed_at_ns: 500,
+        }
+    }
+
+    async fn open_announced(dispatcher: &mut Dispatcher, now: Instant) {
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_closes_a_remote_recording_it_no_longer_lists() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+        let source = ("robot-1".to_string(), 0);
+        let now = Instant::now();
+        open_announced(&mut dispatcher, now).await;
+
+        dispatcher
+            .handle_recording_command(snapshot(&[]), now)
+            .await;
+
+        assert!(dispatcher.windows[&source].live.is_none());
+        assert!(dispatcher.announced.0.get(&source).is_none());
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert!(recordings[0].stopped_at.is_some(), "the stop is persisted");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_closes_a_recording_that_started_after_this_clock_reads() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+        let source = ("robot-1".to_string(), 0);
+        let now = Instant::now();
+        open_announced(&mut dispatcher, now).await;
+
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Snapshot {
+                    open_recording_ids: HashSet::new(),
+                    observed_at_ns: 50,
+                },
+                now,
+            )
+            .await;
+
+        assert!(dispatcher.windows[&source].live.is_none());
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert!(recordings[0].stopped_at.is_some(), "the stop is persisted");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_keeps_a_remote_recording_it_lists() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+        let now = Instant::now();
+        open_announced(&mut dispatcher, now).await;
+
+        dispatcher
+            .handle_recording_command(snapshot(&["rec-a"]), now)
+            .await;
+
+        assert!(dispatcher.windows[&("robot-1".to_string(), 0)]
+            .live
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_leaves_a_locally_started_recording_alone() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+        let now = Instant::now();
+        dispatcher.handle_inbound(start("robot-1", 100), now).await;
+
+        dispatcher
+            .handle_recording_command(snapshot(&[]), now)
+            .await;
+
+        assert!(dispatcher.windows[&("robot-1".to_string(), 0)]
+            .live
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_drops_the_announcement_of_a_stopped_recording() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+        let now = Instant::now();
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+
+        dispatcher
+            .handle_recording_command(snapshot(&[]), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        assert!(dispatcher.announced.0.is_empty());
+        assert!(store
+            .recordings_for_source("robot-1", 0)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@
 //! backoff, and every subscribe opens with the backend's `INIT` snapshot, so
 //! the recordings that were minted while nothing was listening arrive too.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -179,6 +180,7 @@ async fn consume(
     tracing::info!(org_id, "subscribed to recording notifications");
     let mut response = response;
     let mut buffer: Vec<u8> = Vec::new();
+    let mut opened = HashSet::new();
 
     while let Some(chunk) = response
         .chunk()
@@ -187,7 +189,8 @@ async fn consume(
     {
         buffer.extend_from_slice(&chunk);
         for frame in take_frames(&mut buffer) {
-            for command in parse_notification(&frame) {
+            for mut command in parse_notification(&frame) {
+                keep_opened_in_snapshot(&mut command, &mut opened);
                 if tx.send(command).await.is_err() {
                     return Err(StreamEnded::Closed);
                 }
@@ -300,7 +303,19 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
             .map(|payload| vec![open_command(payload)])
             .unwrap_or_default(),
         "INIT" => serde_json::from_value::<Vec<StartPayload>>(notification.payload)
-            .map(|payloads| payloads.into_iter().map(open_command).collect())
+            .map(|payloads| {
+                let open_recording_ids = payloads
+                    .iter()
+                    .map(|payload| payload.recording_id.clone())
+                    .collect();
+                let mut commands: Vec<RecordingCommand> =
+                    payloads.into_iter().map(open_command).collect();
+                commands.push(RecordingCommand::Snapshot {
+                    open_recording_ids,
+                    observed_at_ns: wall_clock_ns(),
+                });
+                commands
+            })
             .unwrap_or_default(),
         "STOP" | "EXPIRED" => serde_json::from_value::<StopPayload>(notification.payload)
             .map(|payload| {
@@ -320,6 +335,20 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
             })
             .unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+/// The backend subscribes a stream before it reads the snapshot it sends as
+/// INIT, so a START can arrive first and be missing from that snapshot.
+fn keep_opened_in_snapshot(command: &mut RecordingCommand, opened: &mut HashSet<String>) {
+    match command {
+        RecordingCommand::Open { recording_id, .. } => {
+            opened.insert(recording_id.clone());
+        }
+        RecordingCommand::Snapshot {
+            open_recording_ids, ..
+        } => open_recording_ids.extend(opened.iter().cloned()),
+        _ => {}
     }
 }
 
@@ -394,17 +423,31 @@ mod tests {
         );
     }
 
+    fn split_init(mut commands: Vec<RecordingCommand>) -> (Vec<RecordingCommand>, Vec<String>) {
+        let Some(RecordingCommand::Snapshot {
+            open_recording_ids,
+            observed_at_ns,
+        }) = commands.pop()
+        else {
+            panic!("an INIT must end with its snapshot");
+        };
+        assert!(observed_at_ns > 0);
+        let mut open: Vec<String> = open_recording_ids.into_iter().collect();
+        open.sort();
+        (commands, open)
+    }
+
     #[test]
     fn init_opens_every_recording_already_running() {
-        let commands = parse_notification(
+        let (opens, snapshot) = split_init(parse_notification(
             r#"{"type":"INIT","payload":[
                {"recording_id":"rec-1","robot_id":"robot-1","instance":0,
                 "created_by":"someone","dataset_ids":["ds-1"],"start_time":1.5},
                {"recording_id":"rec-2","robot_id":"robot-2","instance":1,
                 "created_by":"someone","dataset_ids":[],"start_time":2.0}]}"#,
-        );
+        ));
         assert_eq!(
-            commands,
+            opens,
             vec![
                 RecordingCommand::Open {
                     recording_id: "rec-1".into(),
@@ -422,11 +465,35 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(snapshot, vec!["rec-1".to_string(), "rec-2".to_string()]);
     }
 
     #[test]
-    fn an_empty_init_opens_nothing() {
-        assert!(parse_notification(r#"{"type":"INIT","payload":[]}"#).is_empty());
+    fn an_empty_init_opens_nothing_and_says_nothing_is_open() {
+        let (opens, snapshot) = split_init(parse_notification(r#"{"type":"INIT","payload":[]}"#));
+        assert!(opens.is_empty());
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn a_start_received_before_init_stays_in_the_snapshot() {
+        let mut opened = HashSet::new();
+        let mut commands = parse_notification(
+            r#"{"type":"START","payload":{"recording_id":"rec-new","robot_id":"robot-1",
+               "instance":0,"created_by":"someone","dataset_ids":[],"start_time":3.0}}"#,
+        );
+        commands.extend(parse_notification(r#"{"type":"INIT","payload":[]}"#));
+        for command in &mut commands {
+            keep_opened_in_snapshot(command, &mut opened);
+        }
+
+        let (_, snapshot) = split_init(commands);
+        assert_eq!(snapshot, vec!["rec-new".to_string()]);
+    }
+
+    #[test]
+    fn an_unparsable_init_sends_no_snapshot() {
+        assert!(parse_notification(r#"{"type":"INIT","payload":{"bad":1}}"#).is_empty());
     }
 
     #[test]
