@@ -1,12 +1,18 @@
 """Recording class for managing synchronized data streams in a dataset."""
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import requests
-from neuracore_types import Codec, CrossEmbodimentUnion, DataType
+from neuracore_types import FLAGGED_TAG_NAME, Codec, CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
-from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationDetails
+from neuracore_types import (
+    RecordingMetadata,
+    RecordingStatus,
+    RecordingTag,
+    RecordingTagRequest,
+    SynchronizationDetails,
+)
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -15,9 +21,13 @@ from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.exceptions import AuthenticationError, SynchronizationError
 from neuracore.core.utils.embodiment_description_utils import extract_data_types
 from neuracore.core.utils.http_session import thread_local_session
+from neuracore.utils import deprecated
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
+
+_METADATA_ROUTE = "metadata"
+_TAGS_ROUTE = "tags"
 
 
 class Recording:
@@ -208,14 +218,21 @@ class Recording:
         except Exception as e:
             raise RuntimeError(f"Error fetching recording metadata: {e}")
 
-    def _update_metadata(self, recording_metadata: RecordingMetadata) -> None:
-        """Update the metadata of a recording in this dataset.
+    def _change_dataset_entry(
+        self, method: str, route: str, **request_kwargs: Any
+    ) -> None:
+        """Send a change to this recording's entry in its dataset.
+
+        The API answers with the changed entry, so its metadata replaces the
+        local metadata.
 
         Args:
-            recording_metadata: The metadata to update the recording with
+            method: HTTP method of the request.
+            route: Route below the dataset entry, e.g. `metadata`.
+            **request_kwargs: Body or query parameters of the request.
 
         Raises:
-            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            RuntimeError: If there is an error updating the entry in the cloud.
             ConfigError: If there is an error trying to get the config
             AuthenticationError: If there is an error with authentication
         """
@@ -223,11 +240,12 @@ class Recording:
         org_id = get_current_org()
         try:
             session = thread_local_session()
-            response = session.put(
+            response = session.request(
+                method,
                 f"{API_URL}/org/{org_id}/recording/{self.dataset.id}"
-                f"/{self.id}/metadata",
+                f"/{self.id}/{route}",
                 headers=auth.get_headers(),
-                json=recording_metadata.model_dump(mode="json"),
+                **request_kwargs,
             )
             response.raise_for_status()
             self.metadata = RecordingMetadata.model_validate(
@@ -239,23 +257,71 @@ class Recording:
         except Exception as e:
             raise RuntimeError(f"Error updating recording metadata: {e}")
 
-    def set_status(self, status: RecordingStatus) -> None:
-        """Mark a recording with a specific status programmatically.
+    @property
+    def tags(self) -> list[RecordingTag]:
+        """Tags of this recording in its dataset, as last read from the cloud."""
+        return list(self.metadata.tags or [])
 
-        This call is blocking.
+    def add_tag(self, name: str) -> None:
+        """Add a user tag to this recording in its dataset.
+
+        This call is blocking. The name is normalized with
+        `neuracore_types.normalize_user_tag_name`. Adding a tag that the
+        recording already has changes nothing.
+
+        Args:
+            name: Name of the tag.
+
+        Raises:
+            ValueError: If the name is not a valid tag name.
+            RuntimeError: If there is an error updating the tags in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        tag = RecordingTagRequest(name=name)
+        self._change_dataset_entry("POST", _TAGS_ROUTE, json=tag.model_dump())
+
+    def remove_tag(self, name: str) -> None:
+        """Remove a user tag from this recording in its dataset.
+
+        This call is blocking. The name is normalized as in `add_tag`.
+        Removing a tag that the recording does not have changes nothing.
+        QA tags cannot be removed.
+
+        Args:
+            name: Name of the tag.
+
+        Raises:
+            ValueError: If the name is not a valid tag name.
+            RuntimeError: If there is an error updating the tags in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        tag = RecordingTagRequest(name=name)
+        self._change_dataset_entry("DELETE", _TAGS_ROUTE, params=tag.model_dump())
+
+    @deprecated(f"Use add_tag or remove_tag with the {FLAGGED_TAG_NAME!r} tag.")
+    def set_status(self, status: RecordingStatus) -> None:
+        """Flag or unflag a recording programmatically.
+
+        This call is blocking. FLAGGED adds the user tag `flagged` and NORMAL
+        removes it.
 
         Args:
             status: The status to set the recording to e.g. `RecordingStatus.FLAGGED`
 
         Raises:
-            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ValueError: If the status is QA_FLAGGED. Only QA writes QA tags.
+            RuntimeError: If there is an error updating the metadata in the cloud.
             ConfigError: If there is an error trying to get the config
             AuthenticationError: If there is an error with authentication
         """
-        self._refresh_recording_metadata()
-        new_metadata = self.metadata.model_copy()
-        new_metadata.status = status
-        self._update_metadata(new_metadata)
+        if status == RecordingStatus.QA_FLAGGED:
+            raise ValueError("Only QA can set QA_FLAGGED")
+        if status == RecordingStatus.FLAGGED:
+            self.add_tag(FLAGGED_TAG_NAME)
+        else:
+            self.remove_tag(FLAGGED_TAG_NAME)
 
     def set_notes(self, notes: str) -> None:
         """Update a recordings notes programmatically.
@@ -266,11 +332,11 @@ class Recording:
             notes: The notes to update the recording with.
 
         Raises:
-            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            RuntimeError: If there is an error updating the metadata in the cloud.
             ConfigError: If there is an error trying to get the config
             AuthenticationError: If there is an error with authentication
         """
         self._refresh_recording_metadata()
-        new_metadata = self.metadata.model_copy()
-        new_metadata.notes = notes
-        self._update_metadata(new_metadata)
+        self._change_dataset_entry(
+            "PUT", _METADATA_ROUTE, json={"name": self.name, "notes": notes}
+        )
