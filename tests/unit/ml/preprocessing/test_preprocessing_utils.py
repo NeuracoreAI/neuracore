@@ -1,12 +1,18 @@
 """Tests for resolve_preprocessing_config OmegaConf conversion."""
 
 import json
+from importlib.resources import files
 
 import pytest
 from neuracore_types import DataType
 from omegaconf import OmegaConf
 
-from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
+from neuracore.ml.utils.preprocessing import (
+    resolve_input_output_preprocessing,
+    resolve_preprocessing_config,
+)
+
+TRAINING_CONFIG_DIR = str(files("neuracore.ml") / "config")
 
 
 def _make_config(size: list[int]) -> object:
@@ -63,3 +69,49 @@ def test_preprocessing_configuration_str_is_human_readable():
         "  RGB_IMAGES: [ResizePad(size=[224, 224])]\n"
         "})"
     )
+
+
+def test_rgb_and_depth_preprocessing_overrides_reach_their_own_pipelines():
+    hydra = pytest.importorskip("hydra")
+    pytest.importorskip("torch")
+    with hydra.initialize_config_dir(config_dir=TRAINING_CONFIG_DIR, version_base=None):
+        cfg = hydra.compose(
+            "config",
+            overrides=[
+                (
+                    "++rgb_preprocessing={resize_pad:{size:[128,96]},"
+                    "gaussian_noise:{std:0}}"
+                ),
+                "++depth_preprocessing={resize_pad:{size:[64,48]}}",
+            ],
+        )
+
+    train_input, train_output = resolve_input_output_preprocessing(
+        cfg.train_preprocessing, role_name="train_preprocessing"
+    )
+    inference_input, inference_output = resolve_input_output_preprocessing(
+        cfg.inference_preprocessing, role_name="inference_preprocessing"
+    )
+    pipelines = {
+        "train input": train_input,
+        "train output": train_output,
+        "inference input": inference_input,
+        "inference output": inference_output,
+    }
+
+    assert {
+        name: str(pipeline[DataType.RGB_IMAGES]) for name, pipeline in pipelines.items()
+    } == {
+        "train input": (
+            "[ResizePad(size=[128, 96]), "
+            "ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05), "
+            "GaussianNoise(std=0, clip=True)]"
+        ),
+        "train output": "[ResizePad(size=[128, 96])]",
+        "inference input": "[ResizePad(size=[128, 96])]",
+        "inference output": "[ResizePad(size=[128, 96])]",
+    }
+    assert {
+        name: str(pipeline[DataType.DEPTH_IMAGES])
+        for name, pipeline in pipelines.items()
+    } == dict.fromkeys(pipelines, "[ResizePad(size=[64, 48])]")
