@@ -13,7 +13,7 @@ from neuracore_types import Dataset as DatasetModel
 from neuracore_types import DatasetUpdateRequest, DataType, EmbodimentDescription
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import (
-    SynchronizationDetails,
+    SynchronizationConfig,
     SynchronizationProgress,
     SynchronizeDatasetRequest,
 )
@@ -727,7 +727,7 @@ class Dataset:
             headers=get_auth().get_headers(),
             json=SynchronizeDatasetRequest(
                 dataset_id=self.id,
-                synchronization_details=SynchronizationDetails(
+                synchronization_config=SynchronizationConfig(
                     frequency=frequency,
                     max_delay_s=max_delay_s,
                     allow_duplicates=allow_duplicates,

@@ -19,7 +19,7 @@ from neuracore_types import (
     NCData,
     NCDataUnion,
     PointCloudData,
-    SynchronizationDetails,
+    SynchronizationConfig,
 )
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import (
@@ -118,7 +118,7 @@ class SynchronizedRecording:
         recording_name: str | None,
         robot_id: str,
         instance: int,
-        synchronization_details: SynchronizationDetails,
+        synchronization_config: SynchronizationConfig,
         prefetch_videos: bool = False,
         synced_episode: SerializedSynchronizedEpisode | None = None,
     ):
@@ -130,7 +130,7 @@ class SynchronizedRecording:
             recording_name: Recording Name string.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
-            synchronization_details: The full synchronization parameters. The
+            synchronization_config: The full synchronization parameters. The
                 server keys stored synchronized data on all of them, so these
                 must match the parameters the data was synchronized with or the
                 recording is synchronized again under a different key.
@@ -141,7 +141,7 @@ class SynchronizedRecording:
         self.dataset = dataset
         self.id = recording_id
         self.name = recording_name
-        self.synchronization_details = synchronization_details
+        self.synchronization_config = synchronization_config
         self.cache_dir: Path = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
@@ -171,12 +171,12 @@ class SynchronizedRecording:
     @property
     def frequency(self) -> int:
         """Frequency in Hz this recording was synchronized at."""
-        return self.synchronization_details.frequency
+        return self.synchronization_config.frequency
 
     @property
     def cross_embodiment_union(self) -> CrossEmbodimentUnion | None:
         """Cross-embodiment union this recording was synchronized with."""
-        return self.synchronization_details.cross_embodiment_union
+        return self.synchronization_config.cross_embodiment_union
 
     def _get_synced_data(self) -> SynchronizedEpisodeModel:
         """Retrieve synchronized metadata for the recording.
@@ -215,7 +215,7 @@ class SynchronizedRecording:
             f"{API_URL}/org/{self.dataset.org_id}/synchronize/trigger-synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=self.id,
-                synchronization_details=self.synchronization_details,
+                synchronization_config=self.synchronization_config,
             ).model_dump(mode="json"),
             headers=auth.get_headers(),
         )

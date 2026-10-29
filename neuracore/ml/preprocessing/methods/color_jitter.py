@@ -32,10 +32,10 @@ class ColorJitter(PreprocessingMethod):
 
     def __init__(
         self,
-        brightness: float = 0.3,
-        contrast: float = 0.3,
-        saturation: float = 0.3,
-        hue: float = 0.05,
+        brightness: float,
+        contrast: float,
+        saturation: float,
+        hue: float,
     ) -> None:
         """Initialize color jitter parameters.
 

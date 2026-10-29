@@ -6,8 +6,15 @@ from pathlib import Path
 from typing import Any
 
 import hydra
+from hydra.core.config_store import ConfigStore
 from names_generator import generate_name
-from neuracore_types import CrossEmbodimentDescription, DataType
+from neuracore_types import (
+    AlgorithmConfig,
+    CrossEmbodimentDescription,
+    DataType,
+    SynchronizationConfig,
+    TrainingConfig,
+)
 from omegaconf import DictConfig, OmegaConf
 
 import neuracore as nc
@@ -27,6 +34,18 @@ from neuracore.core.utils.training_input_args_validation import (
 
 # Packaged algorithm Hydra fragments live next to the base training config.
 ALGORITHM_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "algorithm"
+
+# Class of each packaged algorithm, keyed by its config file stem.
+PACKAGED_ALGORITHM_CLASS_PATHS: dict[str, str] = {
+    "act": "neuracore.ml.algorithms.act.act.ACT",
+    "cnnmlp": "neuracore.ml.algorithms.cnnmlp.cnnmlp.CNNMLP",
+    "diffusion_policy": (
+        "neuracore.ml.algorithms.diffusion_policy.diffusion_policy.DiffusionPolicy"
+    ),
+    "groot": "neuracore.ml.algorithms.groot.groot.Groot",
+    "pi0": "neuracore.ml.algorithms.pi0.pi0.Pi0",
+    "pi05": "neuracore.ml.algorithms.pi05.pi05.Pi05",
+}
 
 # Hydra may resolve ``local_output_dir`` more than once during a single process:
 #
@@ -119,37 +138,149 @@ OmegaConf.register_new_resolver(
     replace=True,
 )
 
+STRUCTURED_DEFAULTS_CONFIG_NAME = "structured_defaults"
+
+SYNCHRONIZATION_FIELDS_SET_BY_EMBODIMENT = frozenset({"cross_embodiment_union"})
+
+# Pipelines that an override replaces as a whole, so their defaults come from
+# TrainingConfig at validation instead of a Hydra node an override merges into.
+TRAINING_FIELDS_REPLACED_AS_A_WHOLE = frozenset({"preprocessing"})
+
+
+def build_structured_defaults() -> dict[str, Any]:
+    """Return the training and synchronization defaults as Hydra sections."""
+    return {
+        "training": TrainingConfig().model_dump(
+            mode="json", exclude=set(TRAINING_FIELDS_REPLACED_AS_A_WHOLE)
+        ),
+        "synchronization": SynchronizationConfig().model_dump(
+            mode="json", exclude=set(SYNCHRONIZATION_FIELDS_SET_BY_EMBODIMENT)
+        ),
+    }
+
+
+def register_structured_defaults() -> None:
+    """Store the training and synchronization defaults in the Hydra ConfigStore."""
+    ConfigStore.instance().store(
+        name=STRUCTURED_DEFAULTS_CONFIG_NAME, node=build_structured_defaults()
+    )
+
+
+register_structured_defaults()
+
+
+def load_training_and_synchronization_config(
+    cfg: DictConfig,
+) -> tuple[TrainingConfig, SynchronizationConfig]:
+    """Validate the training and synchronization sections of a config.
+
+    Args:
+        cfg: Hydra configuration holding training and synchronization sections.
+
+    Returns:
+        The validated training and synchronization settings.
+    """
+    training_values = OmegaConf.to_container(
+        cfg.get("training") or OmegaConf.create({}), resolve=True
+    )
+    synchronization_values = OmegaConf.to_container(
+        cfg.get("synchronization") or OmegaConf.create({}), resolve=True
+    )
+    return (
+        TrainingConfig.model_validate(training_values),
+        SynchronizationConfig.model_validate(synchronization_values),
+    )
+
+
+def packaged_algorithm_class_path(cfg: DictConfig) -> str | None:
+    """Return the class path of the packaged algorithm the config selects.
+
+    Args:
+        cfg: Hydra configuration.
+
+    Returns:
+        The class path for the algorithm_name, or None for a custom algorithm
+        that algorithm_id selects.
+    """
+    algorithm_name = cfg.get("algorithm_name")
+    if cfg.get("algorithm_id") is not None or not isinstance(algorithm_name, str):
+        return None
+    return PACKAGED_ALGORITHM_CLASS_PATHS[_packaged_algorithm_stem(algorithm_name)]
+
+
+def load_algorithm_arguments(cfg: DictConfig) -> dict[str, Any]:
+    """Validate the algorithm section of a config as constructor arguments.
+
+    Args:
+        cfg: Hydra configuration holding an optional algorithm section.
+
+    Returns:
+        The algorithm section as constructor arguments.
+    """
+    algorithm = cfg.get("algorithm")
+    algorithm_values: dict[str, Any] = (
+        OmegaConf.to_container(algorithm, resolve=True)
+        if isinstance(algorithm, DictConfig)
+        else {}
+    )
+    if "_target_" in algorithm_values:
+        raise ValueError(
+            "Choose the algorithm with algorithm_name or algorithm_id. The "
+            "algorithm section holds only algorithm arguments."
+        )
+    return AlgorithmConfig.model_validate(algorithm_values).model_dump()
+
+
+def _reject_top_level_section_keys(cfg: DictConfig) -> None:
+    """Raise when a training or synchronization setting sits at the top level."""
+    misplaced_section_by_key = {
+        **{key: "training" for key in TrainingConfig.model_fields},
+        **{key: "synchronization" for key in SynchronizationConfig.model_fields},
+    }
+    misplaced_keys = sorted(key for key in cfg if key in misplaced_section_by_key)
+    if misplaced_keys:
+        moves = ", ".join(
+            f"{key} to {misplaced_section_by_key[key]}.{key}" for key in misplaced_keys
+        )
+        raise ValueError(f"Move these settings into their section: {moves}.")
+    if "algorithm_params" in cfg:
+        raise ValueError(
+            "Move algorithm_params into the algorithm section: algorithm.<key>."
+        )
+
 
 def _normalize_algorithm_name(name: str) -> str:
     """Normalize algorithm names for config lookup."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def _load_algorithm_config_from_name(algorithm_name: str) -> DictConfig:
-    """Load a packaged algorithm config from a file stem or target class name."""
+def _packaged_algorithm_stem(algorithm_name: str) -> str:
+    """Return the config file stem of a packaged algorithm.
+
+    Args:
+        algorithm_name: Config file stem or class name of the algorithm.
+
+    Returns:
+        The config file stem.
+    """
     requested_name = _normalize_algorithm_name(algorithm_name)
-    available_names: list[str] = []
-
-    for config_path in sorted(ALGORITHM_CONFIG_DIR.glob("*.yaml")):
-        algorithm_cfg = OmegaConf.load(config_path)
-        cfg_algorithm = algorithm_cfg.get("algorithm")
-        if cfg_algorithm is None or "_target_" not in cfg_algorithm:
-            continue
-
-        target_name = str(cfg_algorithm._target_).rsplit(".", 1)[-1]
-        candidate_names = {
-            _normalize_algorithm_name(config_path.stem),
-            _normalize_algorithm_name(target_name),
-        }
-        available_names.extend(sorted(candidate_names))
-
-        if requested_name in candidate_names:
-            return algorithm_cfg
-
-    available = ", ".join(sorted(set(available_names)))
+    for stem, class_path in PACKAGED_ALGORITHM_CLASS_PATHS.items():
+        class_name = class_path.rsplit(".", 1)[-1]
+        if requested_name in {
+            _normalize_algorithm_name(stem),
+            _normalize_algorithm_name(class_name),
+        }:
+            return stem
+    available = ", ".join(sorted(PACKAGED_ALGORITHM_CLASS_PATHS))
     raise ValueError(
         f"Unknown algorithm {algorithm_name!r}. Expected one of: {available}."
     )
+
+
+def _load_algorithm_config_from_name(algorithm_name: str) -> DictConfig:
+    """Load a packaged algorithm config from a file stem or class name."""
+    stem = _packaged_algorithm_stem(algorithm_name)
+    return OmegaConf.load(ALGORITHM_CONFIG_DIR / f"{stem}.yaml")
 
 
 def _resolve_algorithm_name_config(cfg: DictConfig) -> DictConfig:
@@ -181,8 +312,10 @@ def resolve_to_merged_config(cfg: DictConfig) -> DictConfig:
     # Merge with the default config to ensure all expected keys are present,
     # even if the user provided a custom config that may not include all the
     # default values.
-    default_cfg = OmegaConf.load(
-        Path(__file__).resolve().parents[1] / "config" / "config.yaml"
+    _reject_top_level_section_keys(cfg)
+    default_cfg = OmegaConf.merge(
+        OmegaConf.create(build_structured_defaults()),
+        OmegaConf.load(Path(__file__).resolve().parents[1] / "config" / "config.yaml"),
     )
     cfg = OmegaConf.merge(default_cfg, cfg)
 
@@ -201,16 +334,10 @@ def _is_provided(value: Any) -> bool:
 
 def validate_complete_config(cfg: DictConfig) -> None:
     """Validate mutually exclusive and required top-level training config fields."""
-    algorithm = cfg.get("algorithm")
-    algorithm_id = cfg.get("algorithm_id")
-    if algorithm is not None and algorithm_id is not None:
+    if cfg.get("algorithm_name") is None and cfg.get("algorithm_id") is None:
         raise ValueError(
-            "Both 'algorithm' and 'algorithm_id' are provided. "
-            "Please specify only one."
-        )
-    if algorithm is None and algorithm_id is None:
-        raise ValueError(
-            "Neither 'algorithm' nor 'algorithm_id' is provided. " "Please specify one."
+            "Neither 'algorithm_name' nor 'algorithm_id' is provided. "
+            "Please specify one."
         )
 
     dataset_id = cfg.get("dataset_id")
@@ -324,8 +451,11 @@ def _resolve_algorithm_name_and_supported_data_types(
         )
 
     # Local case: use the algorithm class to get the supported data types.
-    algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
-    algorithm_cls = hydra.utils.get_object(cfg.algorithm._target_)
+    algorithm_class_path = packaged_algorithm_class_path(cfg)
+    if algorithm_class_path is None:
+        raise ValueError("Either 'algorithm_name' or 'algorithm_id' must be provided.")
+    algorithm_name = algorithm_class_path.rsplit(".", 1)[-1]
+    algorithm_cls = hydra.utils.get_object(algorithm_class_path)
     supported_input_data_types = algorithm_cls.get_supported_input_data_types()
     supported_output_data_types = algorithm_cls.get_supported_output_data_types()
     if (
@@ -439,7 +569,7 @@ def resolve_to_complete_config(
             _resolve_algorithm_name_and_supported_data_types(cfg, [])
         )
         cfg.algorithm_name = algorithm_name
-    elif cfg.get("algorithm") is not None:
+    elif cfg.get("algorithm_name") is not None:
         algorithm_name, supported_input_data_types, supported_output_data_types = (
             _resolve_algorithm_name_and_supported_data_types(cfg, [])
         )

@@ -12,7 +12,7 @@ from neuracore_types import (
     DataType,
     DepthCameraData,
     JointData,
-    SynchronizationDetails,
+    SynchronizationConfig,
     SynchronizedPoint,
     SynchronizeRecordingRequest,
 )
@@ -100,7 +100,7 @@ def build_recording(dataset, recording_id: str = "rec1") -> SynchronizedRecordin
         recording_name="recording1",
         robot_id="robot1",
         instance=1,
-        synchronization_details=SynchronizationDetails(
+        synchronization_config=SynchronizationConfig(
             frequency=30,
             cross_embodiment_union=None,
         ),
@@ -144,7 +144,7 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            synchronization_details=SynchronizationDetails(
+            synchronization_config=SynchronizationConfig(
                 frequency=30,
                 cross_embodiment_union=cross_embodiment_union,
             ),
@@ -400,7 +400,7 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            synchronization_details=SynchronizationDetails(
+            synchronization_config=SynchronizationConfig(
                 frequency=30,
                 cross_embodiment_union=None,
             ),
@@ -420,7 +420,7 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            synchronization_details=SynchronizationDetails(
+            synchronization_config=SynchronizationConfig(
                 frequency=30,
                 cross_embodiment_union=None,
             ),
@@ -441,7 +441,7 @@ class TestSynchronizedRecording:
                 recording_name="recording1",
                 robot_id="robot1",
                 instance=1,
-                synchronization_details=SynchronizationDetails(
+                synchronization_config=SynchronizationConfig(
                     frequency=30,
                     cross_embodiment_union=None,
                 ),
@@ -548,7 +548,7 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            synchronization_details=SynchronizationDetails(
+            synchronization_config=SynchronizationConfig(
                 frequency=30,
                 cross_embodiment_union=None,
             ),
@@ -560,7 +560,7 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            synchronization_details=SynchronizationDetails(
+            synchronization_config=SynchronizationConfig(
                 frequency=60,
                 cross_embodiment_union=None,
             ),
@@ -661,7 +661,7 @@ class TestSyncedEpisodeRetrieval:
         assert start.last_request.json() == (
             SynchronizeRecordingRequest(
                 recording_id="rec1",
-                synchronization_details=recording.synchronization_details,
+                synchronization_config=recording.synchronization_config,
             ).model_dump(mode="json")
         )
         # Both identifiers the start reported are used to poll the artifact.

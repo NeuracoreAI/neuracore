@@ -1,6 +1,6 @@
 # Automatic Batch-Size Tuning
 
-When you set `batch_size: auto` in the training config, Neuracore automatically
+When you set `training.batch_size: auto` in the training config, Neuracore automatically
 picks the **largest batch size that fits on your GPU** before training starts.
 This page explains how it works, in plain language.
 
@@ -210,7 +210,7 @@ training.
 | warm-up / measure iters | `1` / `2` | Iterations before / during memory measurement. |
 
 Override `min_batch_size` / `max_batch_size` in the training config, or set a fixed
-`batch_size: <N>` to skip autotuning entirely.
+`training.batch_size: <N>` to skip autotuning entirely.
 
 ---
 

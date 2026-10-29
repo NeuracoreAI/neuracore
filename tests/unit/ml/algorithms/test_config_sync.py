@@ -2,7 +2,7 @@
 
 The ``__init__`` signature is the single source of truth for algorithm
 hyperparameters; the ``config/algorithm/*.yaml`` files are an override layer that
-``hydra.utils.instantiate`` passes as kwargs. This test fails if the two drift.
+training passes to the class as kwargs. This test fails if the two drift.
 """
 
 import inspect
@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 
 import neuracore.ml as nc_ml
 from neuracore.ml.utils.algorithm_loader import install_packaged_algorithm_requirements
+from neuracore.ml.utils.training_config import PACKAGED_ALGORITHM_CLASS_PATHS
 
 CONFIG_DIR = Path(nc_ml.__file__).parent / "config" / "algorithm"
 
@@ -66,12 +67,12 @@ def test_config_hydra_yaml_values_match_init_defaults(config_path: Path) -> None
     """Every yaml key matches its ``__init__`` default, and every defaulted
     ``__init__`` param is present in the yaml."""
     algorithm = _load_algorithm_block(config_path)
-    target = algorithm["_target_"]
+    target = PACKAGED_ALGORITHM_CLASS_PATHS[config_path.stem]
     install_packaged_algorithm_requirements(target)
     cls = hydra.utils.get_object(target)
     defaults = _init_defaults(cls)
 
-    yaml_keys = {key for key in algorithm if key != "_target_"}
+    yaml_keys = set(algorithm)
 
     unknown = yaml_keys - defaults.keys()
     assert (

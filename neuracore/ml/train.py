@@ -5,7 +5,6 @@ import gc
 import json
 import logging
 import os
-import sys
 import time
 import traceback
 from functools import partial
@@ -24,6 +23,7 @@ from neuracore_types import (
     CrossEmbodimentDescription,
     CrossEmbodimentUnion,
     ModelInitDescription,
+    PreprocessingStage,
     TrainingJobStatus,
     TrainingPhaseProgress,
     TrainingProgress,
@@ -65,6 +65,9 @@ from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
 from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
 from neuracore.ml.utils.training_config import (
+    load_algorithm_arguments,
+    load_training_and_synchronization_config,
+    packaged_algorithm_class_path,
     resolve_to_complete_config,
     resolve_user_input_config,
     validate_complete_config,
@@ -151,6 +154,9 @@ def _save_local_training_metadata(
         # Cloud run metadata is stored remotely; skip local save.
         return
 
+    training_config, synchronization_config = load_training_and_synchronization_config(
+        cfg
+    )
     output_dir = Path(getattr(cfg, "local_output_dir", "."))
     output_dir.mkdir(parents=True, exist_ok=True)
     run_id = output_dir.name
@@ -172,24 +178,16 @@ def _save_local_training_metadata(
         "output_cross_embodiment_description": _serialize_cross_embodiment_description(
             output_cross_embodiment_description
         ),
-        "frequency": getattr(cfg, "frequency", None),
-        "output_prediction_horizon": getattr(cfg, "output_prediction_horizon", None),
+        "frequency": synchronization_config.frequency,
+        "output_prediction_horizon": training_config.output_prediction_horizon,
         # Align with cloud run schema for inspect output
         "epoch": -1,
         "step": -1,
         "gpu_type": None,
         "num_gpus": None,
-        "synchronization_details": {
-            "frequency": getattr(cfg, "frequency", None),
-            "allow_duplicates": getattr(cfg, "allow_duplicates", True),
-            "max_delay_s": (
-                sys.float_info.max
-                if getattr(cfg, "max_delay_s", None) is None
-                else getattr(cfg, "max_delay_s")
-            ),
-            "trim_start_end": getattr(cfg, "trim_start_end", True),
-            "trim_no_movement_at_start_threshold": getattr(
-                cfg, "trim_no_movement_at_start_threshold", None
+        "synchronization_config": {
+            **synchronization_config.model_dump(
+                mode="json", exclude={"cross_embodiment_union"}
             ),
             "cross_embodiment_union": _serialize_cross_embodiment_union(
                 cross_embodiment_union
@@ -225,23 +223,16 @@ def get_model_and_algorithm_config(
     model_init_description: ModelInitDescription,
 ) -> tuple[NeuracoreModel, dict[str, Any]]:
     """Get model and algorithm configuration."""
-    algorithm_params: dict[str, Any] = (
-        OmegaConf.to_container(cfg.algorithm_params, resolve=True)
-        if cfg.get("algorithm_params") is not None
-        else {}
-    )
+    algorithm_config = load_algorithm_arguments(cfg)
 
-    if "algorithm" in cfg:
-        algorithm_config = OmegaConf.to_container(cfg.algorithm, resolve=True)
-        algorithm_config.pop("_target_", None)
-        algorithm_config.update(algorithm_params)
-        model = hydra.utils.instantiate(
-            cfg.algorithm,
+    algorithm_class_path = packaged_algorithm_class_path(cfg)
+    if algorithm_class_path is not None:
+        model_class = hydra.utils.get_object(algorithm_class_path)
+        model = model_class(
             model_init_description=model_init_description,
             **algorithm_config,
         )
     elif cfg.algorithm_id is not None:
-        algorithm_config = algorithm_params
         extract_dir = Path(cfg.local_output_dir) / "algorithm"
         model_class = AlgorithmLoader(extract_dir).load_model()
         model = model_class(
@@ -250,7 +241,7 @@ def get_model_and_algorithm_config(
         )
     else:
         raise ValueError(
-            "Either 'algorithm' or 'algorithm_id' "
+            "Either 'algorithm_name' or 'algorithm_id' "
             "must be provided in the configuration"
         )
 
@@ -305,7 +296,9 @@ def assert_valid_batch_size(
         output_dataset_statistics=dataset_statistics_by_role["output"],
         input_data_types=extract_data_types(input_cross_embodiment_description),
         output_data_types=extract_data_types(output_cross_embodiment_description),
-        output_prediction_horizon=cfg.output_prediction_horizon,
+        output_prediction_horizon=(
+            load_training_and_synchronization_config(cfg)[0].output_prediction_horizon
+        ),
     )
     model_factory = partial(
         _create_model_for_batch_validation, cfg, model_init_description
@@ -366,7 +359,9 @@ def determine_optimal_batch_size(
         output_dataset_statistics=dataset_statistics_by_role["output"],
         input_data_types=extract_data_types(input_cross_embodiment_description),
         output_data_types=extract_data_types(output_cross_embodiment_description),
-        output_prediction_horizon=cfg.output_prediction_horizon,
+        output_prediction_horizon=(
+            load_training_and_synchronization_config(cfg)[0].output_prediction_horizon
+        ),
     )
     model_factory = partial(
         _create_model_for_batch_validation, cfg, model_init_description
@@ -508,6 +503,7 @@ def run_training(
     device: torch.device | None = None,
 ) -> None:
     """Run the training process for a single GPU."""
+    training_config = load_training_and_synchronization_config(cfg)[0]
     # Setup for distributed training
     if world_size > 1:
         nc.login()  # Ensure Neuracore is logged in on this process
@@ -518,7 +514,7 @@ def run_training(
     logger = logging.getLogger(__name__)
 
     # Set random seed (different for each process to ensure different data sampling)
-    torch.manual_seed(cfg.seed + rank)
+    torch.manual_seed(training_config.seed + rank)
 
     try:
         logger.info(f"Using batch size: {batch_size}")
@@ -532,14 +528,14 @@ def run_training(
         # Dataset already has train preprocessing; val is switched to inference.
         train_dataset, val_dataset = split_train_val_datasets(
             dataset,
-            validation_split=cfg.validation_split,
-            seed=cfg.seed,
+            validation_split=training_config.validation_split,
+            seed=training_config.seed,
             inference_input_preprocessing_config=inference_input_preprocessing_config,
             inference_output_preprocessing_config=inference_output_preprocessing_config,
         )
 
-        num_train_workers = min(cfg.num_train_workers, cpu_count())
-        num_val_workers = min(cfg.num_val_workers, cpu_count())
+        num_train_workers = min(training_config.num_train_workers, cpu_count())
+        num_val_workers = min(training_config.num_val_workers, cpu_count())
         train_worker_context = _worker_context(num_train_workers)
         val_worker_context = _worker_context(num_val_workers)
 
@@ -549,14 +545,14 @@ def run_training(
                 num_replicas=world_size,
                 rank=rank,
                 shuffle=True,
-                seed=cfg.seed,
+                seed=training_config.seed,
             )
             val_sampler = DistributedSampler(
                 val_dataset,
                 num_replicas=world_size,
                 rank=rank,
                 shuffle=False,
-                seed=cfg.seed,
+                seed=training_config.seed,
             )
 
             train_loader = DataLoader(
@@ -619,7 +615,7 @@ def run_training(
             output_dataset_statistics=dataset_statistics_by_role["output"],
             input_data_types=input_data_types,
             output_data_types=output_data_types,
-            output_prediction_horizon=cfg.output_prediction_horizon,
+            output_prediction_horizon=training_config.output_prediction_horizon,
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
@@ -657,9 +653,9 @@ def run_training(
             )
 
         validation_rollout_config = ValidationRolloutConfig(
-            num_points=int(cfg.get("validation_rollout_points", 0)),
-            frequency=int(cfg.get("validation_rollout_frequency", 5)),
-            seed=int(cfg.seed),
+            num_points=training_config.validation_rollout_points,
+            frequency=training_config.validation_rollout_frequency,
+            seed=training_config.seed,
         )
 
         trainer = DistributedTrainer(
@@ -669,9 +665,9 @@ def run_training(
             training_logger=training_logger,
             storage_handler=training_storage_handler,
             output_dir=Path(cfg.local_output_dir),
-            num_epochs=cfg.epochs,
-            log_freq=cfg.logging_frequency,
-            system_log_freq=cfg.get("system_logging_frequency", 200),
+            num_epochs=training_config.epochs,
+            log_freq=training_config.logging_frequency,
+            system_log_freq=training_config.system_logging_frequency,
             train_device_preprocessing=(
                 train_input_preprocessing_config.split_by_stage()[1],
                 train_output_preprocessing_config.split_by_stage()[1],
@@ -680,8 +676,8 @@ def run_training(
                 inference_input_preprocessing_config.split_by_stage()[1],
                 inference_output_preprocessing_config.split_by_stage()[1],
             ),
-            keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
-            checkpoint_saving_frequency=cfg.checkpoint_saving_frequency,
+            keep_last_n_checkpoints=training_config.keep_last_n_checkpoints,
+            checkpoint_saving_frequency=training_config.checkpoint_saving_frequency,
             clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
             world_size=world_size,
@@ -703,7 +699,7 @@ def run_training(
 
         # Start training
         try:
-            logger.info(f"Training started (target {cfg.epochs} epochs).")
+            logger.info(f"Training started (target {training_config.epochs} epochs).")
             trainer.train(start_epoch=start_epoch)
             logger.info("Training completed successfully!")
         except Exception:
@@ -756,11 +752,15 @@ def _main(cfg: DictConfig) -> None:
     """
     _raise_open_file_limit()
 
-    if "algorithm" in cfg:
-        install_packaged_algorithm_requirements(cfg.algorithm._target_)
+    algorithm_class_path = packaged_algorithm_class_path(cfg)
+    if algorithm_class_path is not None:
+        install_packaged_algorithm_requirements(algorithm_class_path)
 
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
+    training_config, synchronization_config = load_training_and_synchronization_config(
+        cfg
+    )
 
     setup_logging(cfg.local_output_dir)
     log_streamer: CloudLogStreamer | None = None
@@ -809,7 +809,7 @@ def _main(cfg: DictConfig) -> None:
         # =========================================================
         # From here onwards we only deal with robot IDs, not names
         # =========================================================
-        batch_size = cfg.batch_size
+        batch_size = training_config.batch_size
 
         # Validate that the provided parameters are consistent and sufficient
 
@@ -857,20 +857,18 @@ def _main(cfg: DictConfig) -> None:
             )
 
         synchronized_dataset = dataset.synchronize(
-            frequency=cfg.frequency,
+            frequency=synchronization_config.frequency,
             cross_embodiment_union=cross_embodiment_union,
             prefetch_videos=True,
-            max_prefetch_decode_workers=cfg.max_prefetch_decode_workers,
-            num_concurrent_prefetch_requests=cfg.num_concurrent_prefetch_requests,
-            max_delay_s=(
-                sys.float_info.max
-                if getattr(cfg, "max_delay_s", None) is None
-                else cfg.max_delay_s
+            max_prefetch_decode_workers=training_config.max_prefetch_decode_workers,
+            num_concurrent_prefetch_requests=(
+                training_config.num_concurrent_prefetch_requests
             ),
-            allow_duplicates=cfg.allow_duplicates,
-            trim_start_end=cfg.trim_start_end,
-            trim_no_movement_at_start_threshold=getattr(
-                cfg, "trim_no_movement_at_start_threshold", None
+            max_delay_s=synchronization_config.max_delay_s,
+            allow_duplicates=synchronization_config.allow_duplicates,
+            trim_start_end=synchronization_config.trim_start_end,
+            trim_no_movement_at_start_threshold=(
+                synchronization_config.trim_no_movement_at_start_threshold
             ),
             synchronization_progress_reporter=_report_sync_progress,
             download_progress_reporter=_report_download_progress,
@@ -891,8 +889,8 @@ def _main(cfg: DictConfig) -> None:
             logger.info(f"Algorithm extracted to {extract_dir}")
 
         device = None
-        if cfg.device is not None:
-            device = torch.device(cfg.device)
+        if training_config.device is not None:
+            device = torch.device(training_config.device)
         else:
             device = get_default_device()
 
@@ -900,15 +898,15 @@ def _main(cfg: DictConfig) -> None:
             train_input_preprocessing_config,
             train_output_preprocessing_config,
         ) = resolve_input_output_preprocessing(
-            cfg.get("train_preprocessing"),
-            role_name="train_preprocessing",
+            training_config.preprocessing,
+            stage=PreprocessingStage.TRAINING,
         )
         (
             inference_input_preprocessing_config,
             inference_output_preprocessing_config,
         ) = resolve_input_output_preprocessing(
-            cfg.get("inference_preprocessing"),
-            role_name="inference_preprocessing",
+            training_config.preprocessing,
+            stage=PreprocessingStage.INFERENCE,
         )
 
         # Create a pytorch synchronized dataset
@@ -923,10 +921,10 @@ def _main(cfg: DictConfig) -> None:
             synchronized_dataset=synchronized_dataset,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
-            output_prediction_horizon=cfg.output_prediction_horizon,
+            output_prediction_horizon=training_config.output_prediction_horizon,
             input_preprocessing_config=train_input_preprocessing_config,
             output_preprocessing_config=train_output_preprocessing_config,
-            sample_cache=cfg.get("dataset_sample_cache", True),
+            sample_cache=training_config.dataset_sample_cache,
         )
 
         # Handle batch size configuration

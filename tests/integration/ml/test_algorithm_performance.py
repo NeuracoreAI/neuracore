@@ -199,6 +199,7 @@ class TestAlgorithmPerformance:
             algorithm_name=algorithm_name,
             dataset_name=DATASET_NAME,
             algorithm_config=algorithm_config_entry["algorithm_config"],
+            training_config=algorithm_config_entry.get("training_config", {}),
             input_cross_embodiment_description={robot_id: INPUT_EMBODIMENT_DESCRIPTION},
             output_cross_embodiment_description={
                 robot_id: OUTPUT_EMBODIMENT_DESCRIPTION
