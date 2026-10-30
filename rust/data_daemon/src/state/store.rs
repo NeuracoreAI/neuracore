@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use data_daemon_shared::NANOSECONDS_PER_MICROSECOND;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
@@ -59,6 +60,31 @@ pub enum StateStoreError {
     },
 }
 
+/// One recording start, stop or cancel, with its caller and wall-clock times.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecordingTimestamp {
+    /// Wall-clock time (Unix nanoseconds): the producer's publish time, or the daemon's clock when the daemon
+    /// observed or received it.
+    pub publish_timestamp_ns: i64,
+    /// Caller's timestamp in microseconds on its data clock. `None` for a
+    /// stop the daemon observed itself: the store then derives it on the
+    /// recording's own clock as the start plus the publish time elapsed since
+    /// the start. The daemon always gives a start the caller's value; the
+    /// store's fallback to the publish time in microseconds for a start is
+    /// only test support for rows that tests create directly.
+    pub timestamp_us: Option<i64>,
+}
+
+impl RecordingTimestamp {
+    /// A recording timestamp for a boundary the daemon observed itself at `publish_timestamp_ns`.
+    pub fn observed_at(publish_timestamp_ns: i64) -> Self {
+        Self {
+            publish_timestamp_ns,
+            timestamp_us: None,
+        }
+    }
+}
+
 /// Parameters for inserting a new recording row.
 ///
 /// The daemon supplies the source identity and metadata from the
@@ -71,8 +97,8 @@ pub struct NewRecording<'a> {
     pub robot_instance: Option<i64>,
     /// Dataset identifier.
     pub dataset_id: Option<&'a str>,
-    /// Producer capture-clock window lower bound (Unix nanoseconds).
-    pub start_timestamp_ns: i64,
+    /// The recording's start.
+    pub start: RecordingTimestamp,
 }
 
 /// Persistence interface for daemon state.
@@ -192,8 +218,8 @@ pub trait StateStore: Send + Sync {
         max_wait_secs: f64,
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
-    /// Mark a recording as stopped, setting `stopped_at` (wall clock) and
-    /// `stop_timestamp_ns` (producer capture clock).
+    /// Mark a recording as stopped, setting `stopped_at` (daemon wall clock)
+    /// and the `stop` timestamp.
     ///
     /// Idempotent: re-stopping a recording that already has a `stopped_at`
     /// leaves the existing timestamps untouched so a duplicate `StopRecording`
@@ -201,19 +227,19 @@ pub trait StateStore: Send + Sync {
     async fn mark_recording_stopped(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: RecordingTimestamp,
     ) -> Result<RecordingRow, StateStoreError>;
 
-    /// Refine a retired recording's `stop_timestamp_ns` to the true stop that
-    /// arrived after a later recording had already started (an inverted
-    /// start/stop pair). Unlike [`mark_recording_stopped`](Self::mark_recording_stopped)
-    /// this overwrites `stop_timestamp_ns` even when already set, because the
-    /// stop that superseded it was the *earlier*, accurate one; `stopped_at`
-    /// (wall clock, already set when the recording was retired) is preserved.
+    /// Refine a retired recording's stop timestamp to the true stop that arrived
+    /// after a later recording had already started (an inverted start/stop
+    /// pair). Unlike [`mark_recording_stopped`](Self::mark_recording_stopped)
+    /// this overwrites the stop timestamp even when already set, because the stop
+    /// that superseded it was the *earlier*, accurate one; `stopped_at` (wall
+    /// clock, already set when the recording was retired) is preserved.
     async fn refine_recording_stop(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: RecordingTimestamp,
     ) -> Result<RecordingRow, StateStoreError>;
 
     /// Stamp `backend_stop_notified_at = now` after the recording-stop
@@ -377,9 +403,9 @@ pub trait StateStore: Send + Sync {
     /// (`write_status = failed`, `upload_status = failed`,
     /// `registration_status = failed` if not already `registered`).
     ///
-    /// A cancel is a recording stop that discards data, so it also stamps
-    /// `stop_timestamp_ns` (the cancel's capture time, → backend `end_time`)
-    /// just like [`mark_recording_stopped`](Self::mark_recording_stopped).
+    /// A cancel is a recording stop that discards data, so it also sets the
+    /// stop timestamp just like
+    /// [`mark_recording_stopped`](Self::mark_recording_stopped).
     ///
     /// Idempotent: re-cancelling a recording that already has a `cancelled_at`
     /// leaves both timestamps untouched. Returns the recording row after the
@@ -389,7 +415,7 @@ pub trait StateStore: Send + Sync {
     async fn cancel_recording(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: RecordingTimestamp,
     ) -> Result<(RecordingRow, u64), StateStoreError>;
 
     /// Record that the backend answered 404 for this recording: stamp
@@ -577,15 +603,17 @@ impl SqliteStateStore {
             .max_connections(1)
             .connect_with(options.clone())
             .await?;
+        // Migrations are writes, so they run on the write connection.
+        MIGRATOR.run(&write_pool).await?;
+
         // Reads run concurrently on their own pool so they never wait behind the
-        // writer.
+        // writer. Opened after the migrations: a connection that loaded the
+        // schema before them decodes `SELECT *` rows with the old column list
+        // (see `upgrade_splits_nanosecond_rows_into_microseconds_and_publish_times`).
         let read_pool = SqlitePoolOptions::new()
             .max_connections(READ_POOL_CONNECTIONS)
             .connect_with(options)
             .await?;
-
-        // Migrations are writes — run them on the write connection.
-        MIGRATOR.run(&write_pool).await?;
 
         Ok(SqliteStateStore {
             read_pool,
@@ -765,14 +793,17 @@ impl StateStore for SqliteStateStore {
         let result = sqlx::query(
             "INSERT INTO recordings ( \
                  robot_id, robot_instance, dataset_id, \
-                 start_timestamp_ns, created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                 start_timestamp_us, start_publish_timestamp_ns, \
+                 created_at, last_updated \
+             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
         .bind(new.dataset_id)
-        .bind(new.start_timestamp_ns)
+        .bind(new.start.timestamp_us)
+        .bind(new.start.publish_timestamp_ns)
         .bind(now)
+        .bind(NANOSECONDS_PER_MICROSECOND)
         .execute(&mut *tx)
         .await?;
 
@@ -868,7 +899,7 @@ impl StateStore for SqliteStateStore {
               WHERE recording_id = ?1 \
                  OR (recording_id IS NULL \
                      AND robot_id = ?2 AND robot_instance = ?3 \
-                     AND ABS(start_timestamp_ns - ?4) <= ?5) \
+                     AND ABS(start_timestamp_us * ?6 - ?4) <= ?5) \
               LIMIT 1",
         )
         .bind(recording_id)
@@ -876,6 +907,7 @@ impl StateStore for SqliteStateStore {
         .bind(robot_instance)
         .bind(start_timestamp_ns)
         .bind(i64::try_from(tolerance_ns).unwrap_or(i64::MAX))
+        .bind(NANOSECONDS_PER_MICROSECOND)
         .fetch_optional(&self.read_pool)
         .await?;
         Ok(recording_index)
@@ -1137,7 +1169,7 @@ impl StateStore for SqliteStateStore {
     async fn mark_recording_stopped(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: RecordingTimestamp,
     ) -> Result<RecordingRow, StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
 
@@ -1145,13 +1177,16 @@ impl StateStore for SqliteStateStore {
         sqlx::query(
             "UPDATE recordings \
                 SET stopped_at = COALESCE(stopped_at, ?2), \
-                    stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?3), \
+                    stop_timestamp_us = COALESCE(stop_timestamp_us, ?3, start_timestamp_us + (?4 - start_publish_timestamp_ns) / ?5), \
+                    stop_publish_timestamp_ns = COALESCE(stop_publish_timestamp_ns, ?4), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
         .bind(recording_index)
         .bind(now)
-        .bind(stop_timestamp_ns)
+        .bind(stop.timestamp_us)
+        .bind(stop.publish_timestamp_ns)
+        .bind(NANOSECONDS_PER_MICROSECOND)
         .execute(&mut *tx)
         .await?;
 
@@ -1166,21 +1201,24 @@ impl StateStore for SqliteStateStore {
     async fn refine_recording_stop(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: RecordingTimestamp,
     ) -> Result<RecordingRow, StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
-                SET stop_timestamp_ns = ?3, \
+                SET stop_timestamp_us = COALESCE(?3, start_timestamp_us + (?4 - start_publish_timestamp_ns) / ?5), \
+                    stop_publish_timestamp_ns = ?4, \
                     stopped_at = COALESCE(stopped_at, ?2), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
         .bind(recording_index)
         .bind(now)
-        .bind(stop_timestamp_ns)
+        .bind(stop.timestamp_us)
+        .bind(stop.publish_timestamp_ns)
+        .bind(NANOSECONDS_PER_MICROSECOND)
         .execute(&mut *tx)
         .await?;
 
@@ -1579,7 +1617,7 @@ impl StateStore for SqliteStateStore {
     async fn cancel_recording(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: RecordingTimestamp,
     ) -> Result<(RecordingRow, u64), StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
 
@@ -1587,7 +1625,8 @@ impl StateStore for SqliteStateStore {
         sqlx::query(
             "UPDATE recordings \
                 SET cancelled_at = COALESCE(cancelled_at, ?2), \
-                    stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?4), \
+                    stop_timestamp_us = COALESCE(stop_timestamp_us, ?4, start_timestamp_us + (?5 - start_publish_timestamp_ns) / ?6), \
+                    stop_publish_timestamp_ns = COALESCE(stop_publish_timestamp_ns, ?5), \
                     progress_reported = ?3, \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
@@ -1595,7 +1634,9 @@ impl StateStore for SqliteStateStore {
         .bind(recording_index)
         .bind(now)
         .bind(ProgressReportStatus::Reported.as_str())
-        .bind(stop_timestamp_ns)
+        .bind(stop.timestamp_us)
+        .bind(stop.publish_timestamp_ns)
+        .bind(NANOSECONDS_PER_MICROSECOND)
         .execute(&mut *tx)
         .await?;
 
@@ -1716,6 +1757,93 @@ mod tests {
         (store, tempdir)
     }
 
+    #[tokio::test]
+    async fn upgrade_splits_nanosecond_rows_into_microseconds_and_publish_times() {
+        // A recording still pending a backend notify survives a daemon
+        // upgrade: its nanosecond start and stop become the publish times, and
+        // the caller's value becomes microseconds.
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let earlier_migrations = tempdir.path().join("migrations");
+        std::fs::create_dir(&earlier_migrations).unwrap();
+        for name in [
+            "0001_initial.sql",
+            "0002_trace_completion_reported.sql",
+            "0003_recording_backend_not_found.sql",
+        ] {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations")
+                .join(name);
+            std::fs::copy(source, earlier_migrations.join(name)).unwrap();
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(earlier_migrations.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "INSERT INTO recordings (start_timestamp_ns, stop_timestamp_ns, created_at, last_updated) \
+             VALUES (1700000000123456789, 1700000005123456789, ?1, ?1)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = SqliteStateStore::open(&path).await.expect("open store");
+        let row = store.list_recordings().await.unwrap().remove(0);
+        assert_eq!(
+            (row.start_timestamp_us, row.start_publish_timestamp_ns),
+            (Some(1_700_000_000_123_456), Some(1_700_000_000_123_456_789))
+        );
+        assert_eq!(
+            (row.stop_timestamp_us, row.stop_publish_timestamp_ns),
+            (Some(1_700_000_005_123_456), Some(1_700_000_005_123_456_789))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_observed_stop_keeps_the_caller_clock_of_the_start() {
+        // A start on a zero-based caller clock, stopped by the daemon itself 2 s
+        // of publish time later: the stop continues the caller's clock.
+        let (store, _tempdir) = open_store().await;
+        let recording_index = store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                start: RecordingTimestamp {
+                    publish_timestamp_ns: 1_700_000_000_000_000_000,
+                    timestamp_us: Some(5),
+                },
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+
+        let row = store
+            .mark_recording_stopped(
+                recording_index,
+                RecordingTimestamp::observed_at(1_700_000_002_000_000_000),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (row.stop_timestamp_us, row.stop_publish_timestamp_ns),
+            (Some(2_000_005), Some(1_700_000_002_000_000_000))
+        );
+    }
+
     /// Insert a recording for `(robot-1, instance)` and return its index.
     async fn seed_recording(store: &SqliteStateStore, instance: i64) -> i64 {
         store
@@ -1723,7 +1851,7 @@ mod tests {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(instance),
                 dataset_id: Some("ds-1"),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })
             .await
             .expect("create_recording")
@@ -1848,7 +1976,10 @@ mod tests {
         assert_eq!(lookup("rec-a", 9, START_NS).await, None);
 
         // A cancelled recording still awaits the id of a POST in flight.
-        store.cancel_recording(index, START_NS + 1).await.unwrap();
+        store
+            .cancel_recording(index, RecordingTimestamp::observed_at(START_NS + 1))
+            .await
+            .unwrap();
         assert_eq!(lookup("rec-a", 0, START_NS).await, Some(index));
 
         // Once stamped, only its own cloud id matches, whatever the start time.
@@ -1897,7 +2028,10 @@ mod tests {
     async fn stop_notify_sweep_requires_a_cloud_id() {
         let (store, _tempdir) = open_store().await;
         let index = seed_recording(&store, 0).await;
-        store.mark_recording_stopped(index, 2).await.unwrap();
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(2))
+            .await
+            .unwrap();
         // Stopped but no cloud id yet → not eligible for the stop sweep.
         assert!(store
             .recordings_pending_stop_notify()
@@ -2275,7 +2409,10 @@ mod tests {
             )
             .await;
         }
-        store.cancel_recording(cancelled, 0).await.expect("cancel");
+        store
+            .cancel_recording(cancelled, RecordingTimestamp::observed_at(0))
+            .await
+            .expect("cancel");
         store
             .mark_recording_not_found(not_found)
             .await
@@ -2301,7 +2438,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
         assert_eq!(store.recordings_pending_progress().await.unwrap().len(), 1);
@@ -2329,7 +2466,7 @@ mod tests {
             .expect("create recording");
         let recording_index = row.recording_index;
         store
-            .cancel_recording(recording_index, 0)
+            .cancel_recording(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .expect("cancel");
 
@@ -2407,15 +2544,19 @@ mod tests {
             .await
             .unwrap();
 
+        let cancel = RecordingTimestamp {
+            publish_timestamp_ns: 5_000_000_000,
+            timestamp_us: Some(42),
+        };
         let (row, touched) = store
-            .cancel_recording(recording_index, 5_000_000_000)
+            .cancel_recording(recording_index, cancel)
             .await
             .unwrap();
         assert!(row.cancelled_at.is_some(), "cancelled_at must be stamped");
         assert_eq!(
-            row.stop_timestamp_ns,
-            Some(5_000_000_000),
-            "a cancel stamps stop_timestamp_ns like a stop"
+            (row.stop_publish_timestamp_ns, row.stop_timestamp_us),
+            (Some(5_000_000_000), Some(42)),
+            "a cancel sets the stop timestamp like a stop"
         );
         assert_eq!(row.progress_reported, ProgressReportStatus::Reported);
         assert_eq!(touched, 1, "only the non-Written trace's write was touched");
@@ -2454,20 +2595,26 @@ mod tests {
             .unwrap();
 
         let (first, _) = store
-            .cancel_recording(recording_index, 5_000_000_000)
+            .cancel_recording(
+                recording_index,
+                RecordingTimestamp::observed_at(5_000_000_000),
+            )
             .await
             .unwrap();
         let first_at = first.cancelled_at.expect("cancelled_at set");
         // Sleep across a clock tick to make a date change observable.
         std::thread::sleep(std::time::Duration::from_millis(10));
         let (second, _) = store
-            .cancel_recording(recording_index, 9_000_000_000)
+            .cancel_recording(
+                recording_index,
+                RecordingTimestamp::observed_at(9_000_000_000),
+            )
             .await
             .unwrap();
         assert_eq!(
-            second.stop_timestamp_ns,
-            Some(5_000_000_000),
-            "subsequent cancels must not slide stop_timestamp_ns forward"
+            (second.stop_publish_timestamp_ns, second.stop_timestamp_us),
+            (Some(5_000_000_000), Some(5_000_000)),
+            "subsequent cancels must not slide the stop forward"
         );
         assert_eq!(
             second.cancelled_at,
@@ -2613,7 +2760,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped(index, 1).await.unwrap();
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .await
+            .unwrap();
         store.mark_recording_stop_notified(index).await.unwrap();
         store.set_expected_trace_count(index, 1).await.unwrap();
         store
@@ -2650,7 +2800,10 @@ mod tests {
             .mark_recording_start_notified(cancelled, "cloud-c")
             .await
             .unwrap();
-        store.cancel_recording(cancelled, 1).await.unwrap();
+        store
+            .cancel_recording(cancelled, RecordingTimestamp::observed_at(1))
+            .await
+            .unwrap();
         store
             .mark_recording_cancel_notified(cancelled)
             .await

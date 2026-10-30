@@ -18,7 +18,8 @@ pub use schema::{
 };
 #[allow(unused_imports)]
 pub use store::{
-    CoalescedTraceWrite, NewRecording, SqliteStateStore, StateStore, StateStoreError, TraceUpdate,
+    CoalescedTraceWrite, NewRecording, RecordingTimestamp, SqliteStateStore, StateStore,
+    StateStoreError, TraceUpdate,
 };
 #[allow(unused_imports)]
 pub use trace_event_database_writer::{TraceEventDatabaseWriter, TraceWriteHandle};

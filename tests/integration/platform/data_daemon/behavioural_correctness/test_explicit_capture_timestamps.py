@@ -16,8 +16,8 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_RECORDING_INDEX,
-    COLUMN_START_TIMESTAMP_NS,
-    COLUMN_STOP_TIMESTAMP_NS,
+    COLUMN_START_TIMESTAMP_US,
+    COLUMN_STOP_TIMESTAMP_US,
     TRACE_WRITE_WRITTEN,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
@@ -86,6 +86,9 @@ _EARLIER_CAPTURE_START_S = _SYNTHETIC_CAPTURE_START_S - 86_400.0
 """A day before the first recording's, for the newest-first case below."""
 
 _TRACE_WRITE_TIMEOUT_S = 30.0
+
+_NANOSECONDS_PER_SECOND = 1_000_000_000
+_NANOSECONDS_PER_MICROSECOND = 1_000
 
 _EPOCH_VISIBLE_TIMEOUT_S = 5.0
 """How long the producer's cache may take to see a recording it did not open.
@@ -178,6 +181,15 @@ def _record_one(
     )
 
 
+def _stored_microseconds(capture_s: float) -> int:
+    """Return the microseconds the daemon stores for a capture time in seconds.
+
+    The SDK sends the capture time as whole nanoseconds and the daemon divides
+    them down to microseconds.
+    """
+    return int(capture_s * _NANOSECONDS_PER_SECOND) // _NANOSECONDS_PER_MICROSECOND
+
+
 def _fetch_only_recording(robot: Any) -> dict[str, Any]:
     """Return the single recording row this source produced."""
     rows = fetch_recordings_for_source(str(robot.id), int(robot.instance))
@@ -218,11 +230,15 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone(
             )
 
             row = _fetch_only_recording(robot)
-            assert row[COLUMN_START_TIMESTAMP_NS] == int(capture_start_s * 1e9), (
+            assert row[COLUMN_START_TIMESTAMP_US] == _stored_microseconds(
+                capture_start_s
+            ), (
                 "Recording row did not store the capture start time passed to"
                 f" start_recording; row={row}"
             )
-            assert row[COLUMN_STOP_TIMESTAMP_NS] == int(capture_stop_s * 1e9), (
+            assert row[COLUMN_STOP_TIMESTAMP_US] == _stored_microseconds(
+                capture_stop_s
+            ), (
                 "Recording row did not store the capture stop time passed to"
                 f" stop_recording; row={row}"
             )
@@ -313,9 +329,9 @@ def test_a_recording_may_start_below_where_the_last_one_ended(
                 "Both recordings must survive as their own rows; the second is"
                 f" not a continuation of the first. rows={sorted(rows)}"
             )
-            assert rows[earlier_index][COLUMN_START_TIMESTAMP_NS] == int(
-                _EARLIER_CAPTURE_START_S * 1e9
-            ), (
+            assert rows[earlier_index][
+                COLUMN_START_TIMESTAMP_US
+            ] == _stored_microseconds(_EARLIER_CAPTURE_START_S), (
                 "The later recording did not store its own, earlier capture"
                 f" start; row={rows[earlier_index]}"
             )

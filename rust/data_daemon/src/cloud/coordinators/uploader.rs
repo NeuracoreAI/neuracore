@@ -759,7 +759,7 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
     use crate::state::store::{NewRecording, TraceUpdate};
-    use crate::state::{TraceUploadStatus, TraceWriteStatus};
+    use crate::state::{RecordingTimestamp, TraceUploadStatus, TraceWriteStatus};
     use crate::storage::paths::{LOSSY_VIDEO_FILENAME, TRACE_JSON_FILENAME};
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -1639,7 +1639,10 @@ mod tests {
                     .unwrap();
                 bus.publish(DaemonEvent::RecordingNotFound { recording_index });
             } else {
-                store.cancel_recording(recording_index, 0).await.unwrap();
+                store
+                    .cancel_recording(recording_index, RecordingTimestamp::observed_at(0))
+                    .await
+                    .unwrap();
                 bus.publish(DaemonEvent::RecordingCancelled { recording_index });
             }
             sleep(Duration::from_millis(2500)).await;
