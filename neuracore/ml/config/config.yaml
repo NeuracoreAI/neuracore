@@ -95,44 +95,63 @@ trim_no_movement_at_start_threshold: null
 # DataLoader worker or per batch once the batch is on the training device, and
 # every worker-side method runs before every device-side one. Relative order is
 # preserved within each of those two groups.
+# RGB preprocessing values that train_preprocessing and inference_preprocessing
+# read below. A value of 0 turns that color jitter adjustment or the noise off.
+rgb_preprocessing:
+  resize_pad:
+    size: [224, 224]
+  color_jitter:
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.05
+  gaussian_noise:
+    std: 5.0
+
+# Depth preprocessing values that train_preprocessing and inference_preprocessing
+# read below.
+depth_preprocessing:
+  resize_pad:
+    size: [224, 224]
+
 train_preprocessing:
   input:
     RGB_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${rgb_preprocessing.resize_pad.size}
       - _target_: neuracore.ml.preprocessing.methods.color_jitter.ColorJitter
-        brightness: 0.2
-        contrast: 0.2
-        saturation: 0.2
-        hue: 0.05
+        brightness: ${rgb_preprocessing.color_jitter.brightness}
+        contrast: ${rgb_preprocessing.color_jitter.contrast}
+        saturation: ${rgb_preprocessing.color_jitter.saturation}
+        hue: ${rgb_preprocessing.color_jitter.hue}
       - _target_: neuracore.ml.preprocessing.methods.gaussian_noise.GaussianNoise
-        std: 5.0
+        std: ${rgb_preprocessing.gaussian_noise.std}
     DEPTH_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${depth_preprocessing.resize_pad.size}
   output:
     RGB_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${rgb_preprocessing.resize_pad.size}
     DEPTH_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${depth_preprocessing.resize_pad.size}
 
 inference_preprocessing:
   input:
     RGB_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${rgb_preprocessing.resize_pad.size}
     DEPTH_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${depth_preprocessing.resize_pad.size}
   output:
     RGB_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${rgb_preprocessing.resize_pad.size}
     DEPTH_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
+        size: ${depth_preprocessing.resize_pad.size}
 
 # Resolve the name separately from the full path so Hydra can still own
 # hydra.run.dir creation while Neuracore controls duplicate-name behavior.
