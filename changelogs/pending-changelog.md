@@ -20,3 +20,5 @@ Fixed-choice hyperparameters of the built-in algorithms are now string enums, so
 The built-in CNNMLP, DiffusionPolicy, Groot, Pi0 and Pi05 algorithms no longer list the H100 GPU, which is no longer offered. Groot, Pi0 and Pi05 now train on the A100 80GB only.
 
 Requires neuracore_types 13, which no longer has `GPUType.NVIDIA_H100_80GB`.
+
+Recordings that several machines record into are now saved with every machine's traces, and `stop_recording(wait=True)` returns once all of them have uploaded. A machine that misses a recording's stop while disconnected from the backend now finishes its part when it reconnects.

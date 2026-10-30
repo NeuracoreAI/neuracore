@@ -288,7 +288,11 @@ fn run_daemon(
         let state_store = SqliteStateStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open state store at {}", db_path.display()))?;
-        tracing::info!(path = %db_path.display(), "state store ready");
+        tracing::info!(
+            path = %db_path.display(),
+            daemon_id = state_store.daemon_id(),
+            "state store ready"
+        );
         crate::lifecycle::recovery::run_startup_sweeps(&state_store, &recordings_root).await;
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
         // Reconcile the storage budget (directory scan + `statvfs`) on a

@@ -240,6 +240,7 @@ async fn submit_batch(
                     // fallthrough, which is a placeholder rather than a claim
                     // about how it was stored, so it is left unreported.
                     codec: is_video_family(data_type).then_some(codec),
+                    daemon_id: store.daemon_id().to_string(),
                 }
             })
             .collect();
@@ -774,6 +775,47 @@ mod tests {
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
         assert_eq!(trace.upload_session_uris, None, "no partial map persisted");
+    }
+
+    #[tokio::test]
+    async fn registration_names_the_daemon() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [{
+                    "trace_id": "trace-1",
+                    "upload_session_uris": {"JOINT_POSITIONS/arm0/trace.json": "https://upload/abc"}
+                }],
+                "failed_traces": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
+        let claimed = store
+            .claim_traces_for_registration(BATCH_SIZE, 0.0)
+            .await
+            .unwrap();
+        submit_batch(
+            &Arc::new(store.clone()),
+            &EventBus::new(),
+            &client(&server),
+            &org_rx(Some("org-1")),
+            &config_rx(None),
+            claimed,
+            &mut HashMap::new(),
+        )
+        .await;
+
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body["traces"][0]["daemon_id"].as_str(),
+            Some(store.daemon_id())
+        );
     }
 
     #[tokio::test]
