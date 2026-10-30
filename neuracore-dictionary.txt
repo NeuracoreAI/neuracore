@@ -490,6 +490,7 @@ sdecode
 sdist
 sdpa
 secho
+SEGV
 sencode
 seqlen
 serde
@@ -503,9 +504,12 @@ setsid
 setuptools
 SFIXED
 shadowsize
+SIGABRT
 SIGLIP
 Siglip
 siglip
+SIGSEGV
+SIGUSR
 silu
 skcms
 softmax
