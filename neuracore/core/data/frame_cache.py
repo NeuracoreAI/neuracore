@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 from neuracore_types import DataType
+from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 
 from neuracore.core.utils.depth_utils import (
@@ -95,7 +96,7 @@ def staged_camera_data_name(
         The filename, with the suffix of the camera data file it holds.
     """
     suffix = Path(get_camera_data_filenames(camera_type, legacy_depth)[0]).suffix
-    return f"{camera_id}{camera_type.value}{suffix}"
+    return f"{to_safe_name(camera_id)}{camera_type.value}{suffix}"
 
 
 def is_camera_cached(

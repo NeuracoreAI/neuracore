@@ -47,6 +47,7 @@ from neuracore.core.data.frame_cache import (
     lock_file_for,
     staged_camera_data_name,
 )
+from neuracore.core.data.sensor_paths import sensor_directory
 from neuracore.core.data.serialized_synchronized_episode import (
     SerializedSynchronizedEpisode,
 )
@@ -536,7 +537,9 @@ class CameraDataPrefetcher:
                     isinstance(entry, DepthCameraData) and entry.offset is None
                 )
                 frames_dir = (
-                    self.dataset.cache_dir / recording.id / data_type.value / camera_id
+                    self.dataset.cache_dir
+                    / recording.id
+                    / sensor_directory(data_type, camera_id)
                 )
                 lock_file = lock_file_for(frames_dir)
 
@@ -657,7 +660,9 @@ class CameraDataPrefetcher:
             target.data_type, target.legacy_depth
         )
         for filename in preferred_filenames:
-            filepath = f"{target.data_type.value}/{target.camera_id}/{filename}"
+            filepath = (
+                f"{sensor_directory(target.data_type, target.camera_id)}/{filename}"
+            )
             url = (
                 f"{API_URL}/org/{self.dataset.org_id}"
                 f"/recording/{target.recording_id}/download_url"

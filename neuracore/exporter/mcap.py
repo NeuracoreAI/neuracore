@@ -7,20 +7,19 @@ import re
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import quote
 
 import av
 import numpy as np
 import requests
 from neuracore_types import DataType
 from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
-from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.frame_cache import get_camera_data_filenames
 from neuracore.core.data.recording import Recording
+from neuracore.core.data.sensor_paths import sensor_directory
 from neuracore.core.utils.depth_utils import decode_depth_frame, rgb_to_depth_storage
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
@@ -227,7 +226,7 @@ class McapExporter(DatasetExporter):
                 )
                 for data_type, names in sorted(recording.sensor_manifest.items()):
                     for name in sorted(names):
-                        prefix = f"{data_type.value}/{to_safe_name(name)}"
+                        prefix = sensor_directory(data_type, name)
                         trace = json.loads(recording.download(f"{prefix}/trace.json"))
                         if not isinstance(trace, list) or not trace:
                             raise ValueError(f"Empty or invalid trace: {prefix}.")
@@ -249,10 +248,7 @@ class McapExporter(DatasetExporter):
                             channel_metadata["attachment"] = path
                             del payload
                         channel_id = writer.register_channel(
-                            topic=(
-                                f"/neuracore/{data_type.value}/"
-                                f"{quote(name, safe='').replace('.', '%2E')}"
-                            ),
+                            topic=f"/neuracore/{prefix}",
                             message_encoding="json",
                             schema_id=schema_id,
                             metadata=channel_metadata,

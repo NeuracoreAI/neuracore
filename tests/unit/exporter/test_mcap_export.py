@@ -1,4 +1,3 @@
-# cspell:ignore Fjoint
 """Read exported MCAPs back to verify data fidelity and failure handling."""
 
 import io
@@ -49,7 +48,7 @@ def dataset():
 @pytest.fixture
 def recording():
     files = {
-        "JOINT_POSITIONS/arm\\joint/trace.json": json.dumps([
+        "JOINT_POSITIONS/arm%2Fjoint/trace.json": json.dumps([
             {"timestamp": 1.250000001, "value": 0.75},
             {"timestamp": 1.5, "value": -0.1},
         ]).encode(),
