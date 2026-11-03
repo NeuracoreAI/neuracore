@@ -23,13 +23,14 @@ from typing import TYPE_CHECKING
 import requests
 from neuracore_types import DataType, EmbodimentDescription, SynchronizedPoint
 
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.utils.http_session import thread_local_session
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.exceptions import InsufficientSynchronizedPointError
+from neuracore.core.exceptions import InsufficientSynchronizedPointError, RobotError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_to_cache
 from neuracore.ml.logging.endpoint_log_streamer import EndpointLogStreamer
@@ -42,7 +43,7 @@ from .exceptions import EndpointError
 
 logger = logging.getLogger(__name__)
 
-PREDICTION_WAIT_TIME = 0.1
+TRACE_POLL_INTERVAL = 0.01
 
 
 def _parse_embodiment_description(raw_description: dict) -> EmbodimentDescription:
@@ -55,6 +56,19 @@ def _parse_embodiment_description(raw_description: dict) -> EmbodimentDescriptio
 
 class Policy:
     """Base class for all policies."""
+
+    def __init__(self, include_remote: bool = True):
+        """Initialize the policy.
+
+        Args:
+            include_remote: Whether to merge data from remote nodes into the
+                sync points gathered by predict().
+        """
+        self._include_remote = include_remote
+        self._input_embodiment_description: EmbodimentDescription | None = None
+        # Start the p2p robot consumer so remote nodes connect while the model loads.
+        if include_remote and GlobalSingleton()._active_robot is not None:
+            get_latest_sync_point(include_remote=True)
 
     def set_checkpoint(
         self, epoch: int | None = None, checkpoint_file: str | None = None
@@ -79,14 +93,15 @@ class Policy:
         """Get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
-        Automatically creates a sync point from current robot data if none
-        is provided.
+        If no sync point is provided, polls the robot's latest data until every
+        trace in the input embodiment description is present or the timeout is reached.
 
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
             timeout: Maximum time to wait (in seconds) to accumulate asynchronous
-                sensor data. Raises error if timeout is reached without sufficient data.
+                sensor data. Raises error if timeout is reached without sufficient
+                data. Zero fails immediately if any data is missing.
 
         Returns:
             Model predictions as dict[DataType, dict[str, "BatchedNCData"]].
@@ -94,20 +109,54 @@ class Policy:
         Raises:
             InsufficientSynchronizedPointError:
                 If the sync point doesn't contain required data.
+            RobotError: If no sync point is given and no robot is connected.
             EndpointError: If prediction request fails or response is invalid.
         """
-        if timeout <= 0:
-            raise ValueError("Timeout must be a positive number.")
-        t = time.time()
-        prediction = None
-        while prediction is None:
-            try:
-                prediction = self._predict(sync_point)
-            except InsufficientSynchronizedPointError as e:
-                if time.time() - t > timeout:
-                    raise e
-                time.sleep(PREDICTION_WAIT_TIME)
-        return prediction
+        if timeout < 0:
+            raise ValueError("Timeout must be a non-negative number.")
+        if sync_point is None and GlobalSingleton()._active_robot is None:
+            raise RobotError(
+                "You are not connected to a robot with nc.connect_robot() and did "
+                "not pass a sync point to predict(). Either connect to a Neuracore "
+                "robot to get live data streamed to it, or construct your own "
+                "SynchronizedPoint and pass it."
+            )
+        if sync_point is None:
+            sync_point = self._wait_for_expected_traces(timeout)
+        return self._predict(sync_point)
+
+    def _wait_for_expected_traces(self, timeout: float) -> SynchronizedPoint:
+        """Poll the robot's latest data until every expected input trace is present.
+
+        Args:
+            timeout: Maximum time to wait, in seconds. Zero checks once and
+                fails immediately if any trace is missing.
+
+        Returns:
+            SynchronizedPoint holding every trace in the input embodiment.
+
+        Raises:
+            InsufficientSynchronizedPointError: If the timeout elapses with
+                traces still missing.
+        """
+        deadline = time.time() + timeout
+        while True:
+            sync_point = get_latest_sync_point(include_remote=self._include_remote)
+            missing = [
+                f"{data_type.value}:{name}"
+                for data_type, names in (
+                    self._input_embodiment_description or {}
+                ).items()
+                for name in names.values()
+                if name not in sync_point.data.get(data_type, {})
+            ]
+            if not missing:
+                return sync_point
+            if time.time() >= deadline:
+                raise InsufficientSynchronizedPointError(
+                    f"Timed out waiting for traces: {', '.join(missing)}"
+                )
+            time.sleep(TRACE_POLL_INTERVAL)
 
     def disconnect(self) -> None:
         """Disconnect from the policy and clean up resources."""
@@ -115,17 +164,14 @@ class Policy:
 
     def _predict(
         self,
-        sync_point: SynchronizedPoint | None = None,
+        sync_point: SynchronizedPoint,
     ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Internal get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
-        Automatically creates a sync point from current robot data if none
-        is provided.
 
         Args:
-            sync_point: Synchronized sensor data to send to the model. If None,
-                creates a new sync point from the robot's current sensor data.
+            sync_point: Synchronized sensor data to send to the model.
 
         Returns:
             Model predictions as dict[DataType, dict[str, "BatchedNCData"]].
@@ -152,9 +198,10 @@ class DirectPolicy(Policy):
         job_id: str | None = None,
         device: str | None = None,
         robot_id: str | None = None,
+        include_remote: bool = True,
     ):
         """Initialize the direct policy with a robot instance."""
-        super().__init__()
+        super().__init__(include_remote)
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
 
@@ -168,6 +215,7 @@ class DirectPolicy(Policy):
             device=device,
             robot_id=robot_id,
         )
+        self._input_embodiment_description = self._policy.input_embodiment_description
 
     def set_checkpoint(
         self, epoch: int | None = None, checkpoint_file: str | None = None
@@ -184,12 +232,12 @@ class DirectPolicy(Policy):
 
     def _predict(
         self,
-        sync_point: SynchronizedPoint | None = None,
+        sync_point: SynchronizedPoint,
     ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Run direct model inference.
 
         Args:
-            sync_point: Optional sync point. If None, creates from robot sensors.
+            sync_point: Synchronized sensor data to send to the model.
 
         Returns:
             Model predictions as dict[DataType, dict[str, "BatchedNCData"]].
@@ -198,9 +246,6 @@ class DirectPolicy(Policy):
             InsufficientSynchronizedPointError:
                 If the sync point doesn't contain required data.
         """
-        if sync_point is None:
-            sync_point = get_latest_sync_point()
-
         # Filter sync point to only include data types the model expects as input
         filtered_data = {
             data_type: sync_point.data[data_type]
@@ -224,6 +269,7 @@ class ServerPolicy(Policy):
         base_url: str,
         headers: dict[str, str] | None = None,
         input_embodiment_description: EmbodimentDescription | None = None,
+        include_remote: bool = True,
     ):
         """Initialize the server policy with connection details.
 
@@ -233,8 +279,10 @@ class ServerPolicy(Policy):
             headers: Optional HTTP headers for authentication.
             input_embodiment_description: Optional input spec used to project
                 local sync points before sending them to the server.
+            include_remote: Whether to merge data from remote nodes into the
+                sync points gathered by predict().
         """
-        super().__init__()
+        super().__init__(include_remote)
         self._base_url = base_url
         self._headers = headers or {}
         self._input_embodiment_description = input_embodiment_description
@@ -282,17 +330,15 @@ class ServerPolicy(Policy):
 
     def _predict(
         self,
-        sync_point: SynchronizedPoint | None = None,
+        sync_point: SynchronizedPoint,
     ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
-        Automatically creates a sync point from current robot data if none
-        is provided. Handles image encoding and payload size validation.
+        Handles image encoding and payload size validation.
 
         Args:
-            sync_point: Synchronized sensor data to send to the model. If None,
-                creates a new sync point from the robot's current sensor data.
+            sync_point: Synchronized sensor data to send to the model.
 
         Returns:
             Model predictions including actions and any generated outputs.
@@ -305,8 +351,6 @@ class ServerPolicy(Policy):
         # Lazy import to avoid torch dependency at module load time
         from neuracore_types import DATA_TYPE_TO_BATCHED_NC_DATA_CLASS
 
-        if sync_point is None:
-            sync_point = get_latest_sync_point()
         if self._input_embodiment_description is not None:
             filtered_data = {
                 data_type: sync_point.data[data_type]
@@ -375,6 +419,7 @@ class LocalServerPolicy(ServerPolicy):
         host: str = "127.0.0.1",
         endpoint_id: str | None = None,
         robot_id: str | None = None,
+        include_remote: bool = True,
     ):
         """Initialize the local server policy.
 
@@ -394,10 +439,13 @@ class LocalServerPolicy(ServerPolicy):
                 metadata when explicit embodiments are omitted.
             input_preprocessing_config: Preprocessing configuration for the input
                 data.
+            include_remote: Whether to merge data from remote nodes into the
+                sync points gathered by predict().
         """
         super().__init__(
             f"http://{host}:{port}",
             input_embodiment_description=input_embodiment_description,
+            include_remote=include_remote,
         )
         self.input_embodiment_description = input_embodiment_description
         self.output_embodiment_description = output_embodiment_description
@@ -613,6 +661,7 @@ class RemoteServerPolicy(ServerPolicy):
         base_url: str,
         headers: dict[str, str],
         input_embodiment_description: EmbodimentDescription | None = None,
+        include_remote: bool = True,
     ):
         """Initialize the remote server policy.
 
@@ -621,11 +670,14 @@ class RemoteServerPolicy(ServerPolicy):
             headers: HTTP headers for authentication.
             input_embodiment_description: Optional input spec used to project
                 local sync points before sending them to the server.
+            include_remote: Whether to merge data from remote nodes into the
+                sync points gathered by predict().
         """
         super().__init__(
             base_url,
             headers,
             input_embodiment_description=input_embodiment_description,
+            include_remote=include_remote,
         )
 
 
@@ -637,6 +689,7 @@ def policy(
     model_file: str | None = None,
     device: str | None = None,
     robot_id: str | None = None,
+    include_remote: bool = True,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
 
@@ -651,6 +704,8 @@ def policy(
         device: Torch device to run the model on (CPU or GPU, or MPS).
         robot_id: Robot ID used to select embodiments from the model archive
             when embodiment descriptions are not explicitly provided.
+        include_remote: Whether to merge data from remote nodes into the sync
+            points gathered by predict().
 
     Returns:
         DirectPolicy instance for direct model inference.
@@ -674,6 +729,7 @@ def policy(
         model_path=model_path,
         device=device,
         robot_id=robot_id,
+        include_remote=include_remote,
     )
 
 
@@ -689,6 +745,7 @@ def policy_local_server(
     job_id: str | None = None,
     endpoint_id: str | None = None,
     robot_id: str | None = None,
+    include_remote: bool = True,
 ) -> LocalServerPolicy:
     """Launch a local server policy with a FastAPI server.
 
@@ -707,6 +764,8 @@ def policy_local_server(
         endpoint_id: Optional endpoint ID used for endpoint log streaming.
         robot_id: Robot ID used to select embodiments from the model archive
             when embodiment descriptions are not explicitly provided.
+        include_remote: Whether to merge data from remote nodes into the sync
+            points gathered by predict().
 
     Returns:
         LocalServerPolicy instance managing a local FastAPI server.
@@ -740,16 +799,20 @@ def policy_local_server(
         host=host,
         endpoint_id=endpoint_id,
         robot_id=robot_id,
+        include_remote=include_remote,
     )
 
 
 def policy_remote_server(
     endpoint_name: str,
+    include_remote: bool = True,
 ) -> RemoteServerPolicy:
     """Launch a remote server policy connected to a deployed endpoint.
 
     Args:
         endpoint_name: Name of the deployed endpoint.
+        include_remote: Whether to merge data from remote nodes into the sync
+            points gathered by predict().
 
     Returns:
         RemoteServerPolicy instance for remote inference.
@@ -788,6 +851,7 @@ def policy_remote_server(
             base_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}",
             headers=auth.get_headers(),
             input_embodiment_description=input_embodiment_description,
+            include_remote=include_remote,
         )
     except requests.exceptions.ConnectionError:
         raise EndpointError(
