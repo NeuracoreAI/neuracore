@@ -8,14 +8,13 @@ import numpy as np
 import pytest
 import requests
 import torch
-from neuracore_types import BatchedJointData, BatchedNCData, DataType
+from neuracore_types import BatchedJointData, BatchedNCData, DataType, SynchronizedPoint
 from neuracore_types.endpoints.endpoint_requests import DeploymentRequest
 from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.endpoint import EndpointError, Policy
-from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 from tests.unit.conftest import TEST_API_KEY
 from tests.unit.ml.conftest import (
@@ -161,6 +160,7 @@ def _assert_local_policy_passes_robot_id(
 
 def _log_default_inputs() -> None:
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_parallel_gripper_open_amounts(values={"left_arm": 0.5, "right_arm": 0.5})
     nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
 
@@ -195,11 +195,15 @@ def _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id: str):
     return nc.policy_remote_server("test_endpoint")
 
 
+EMPTY_SYNC_POINT = SynchronizedPoint(timestamp=0.0)
+
+
 class _StubPolicy(Policy):
     def __init__(self, predict_impl):
+        super().__init__(include_remote=False)
         self._predict_impl = predict_impl
 
-    def _predict(self, sync_point=None):
+    def _predict(self, sync_point):
         return self._predict_impl(sync_point)
 
 
@@ -298,53 +302,12 @@ def test_remote_endpoint_filters_sync_point_from_endpoint_input_description(
     }
 
 
-def test_policy_predict_raises_for_non_positive_timeout():
-    """Policy should reject timeout values <= 0."""
+def test_policy_predict_raises_for_negative_timeout():
+    """Policy should reject timeout values < 0."""
     policy = _StubPolicy(lambda _sync_point: {})
 
-    with pytest.raises(ValueError, match="Timeout must be a positive number."):
-        policy.predict(timeout=0)
-
-
-def test_policy_predict_retries_until_success_before_timeout(monkeypatch):
-    """Policy should retry on insufficient sync point until success."""
-    attempts = {"count": 0}
-    expected_prediction = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.full((1, 1, 1), 0.1))
-        }
-    }
-
-    def predict_impl(_sync_point):
-        attempts["count"] += 1
-        if attempts["count"] < 3:
-            raise InsufficientSynchronizedPointError("not enough data yet")
-        return expected_prediction
-
-    time_values = iter([100.0, 100.1, 100.2])
-    monkeypatch.setattr("neuracore.core.endpoint.time.time", lambda: next(time_values))
-    monkeypatch.setattr("neuracore.core.endpoint.time.sleep", lambda _seconds: None)
-    policy = _StubPolicy(predict_impl)
-
-    prediction = policy.predict(timeout=1)
-    assert prediction == expected_prediction
-    assert attempts["count"] == 3
-
-
-def test_policy_predict_raises_after_timeout_when_insufficient_data(monkeypatch):
-    """Policy.predict should re-raise insufficient data error after timeout."""
-    policy = _StubPolicy(
-        lambda _sync_point: (_ for _ in ()).throw(
-            InsufficientSynchronizedPointError("not enough data")
-        )
-    )
-
-    time_values = iter([100.0, 100.05, 100.2])
-    monkeypatch.setattr("neuracore.core.endpoint.time.time", lambda: next(time_values))
-    monkeypatch.setattr("neuracore.core.endpoint.time.sleep", lambda _seconds: None)
-
-    with pytest.raises(InsufficientSynchronizedPointError, match="not enough data"):
-        policy.predict(timeout=0.1)
+    with pytest.raises(ValueError, match="Timeout must be a non-negative number."):
+        policy.predict(sync_point=EMPTY_SYNC_POINT, timeout=-1)
 
 
 def test_set_checkpoint_success(

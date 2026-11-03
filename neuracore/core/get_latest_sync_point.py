@@ -89,6 +89,10 @@ def get_latest_sync_point(
     cameras, joint sensors, and language inputs. Organizes the data
     into a synchronized structure with consistent timestamps.
 
+    This returns whatever remote data has arrived so far, so with include_remote
+    call check_remote_nodes_connected first with the expected number of remote nodes,
+    if known.
+
     Args:
         robot: Robot to get data for. Defaults to the active robot.
         include_remote: Whether to merge data gathered from remote nodes.

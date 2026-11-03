@@ -447,13 +447,15 @@ def test_predict_filters_to_input_embodiment_description_only(
 
 @patch("neuracore.ml.utils.policy_inference.PolicyInference")
 @patch("neuracore.core.endpoint.get_latest_sync_point")
+@patch("neuracore.core.endpoint.GlobalSingleton")
 def test_predict_filters_when_sync_point_is_none(
+    _mock_global_singleton,
     mock_get_latest_sync_point,
     mock_policy_inference_class,
     mock_model_path,
     sample_sync_point_with_multiple_data_types,
 ):
-    """Test _predict filters as expected when sync_point is None."""
+    """Test predict() filters the sync point it gathers when none is passed."""
     # Setup: Model only expects JOINT_POSITIONS
     input_embodiment_description = {
         DataType.JOINT_POSITIONS: _indexed_names("joint1", "joint2"),
@@ -480,11 +482,10 @@ def test_predict_filters_when_sync_point_is_none(
         org_id="test_org",
     )
 
-    # Call _predict with None sync point
-    policy._predict(sync_point=None)
+    policy.predict()
 
-    # Verify get_latest_sync_point was called
-    assert mock_get_latest_sync_point.call_count == 1
+    # Once at construction to start the robot consumer, once in predict()
+    assert mock_get_latest_sync_point.call_count == 2
 
     # Verify that PolicyInference was called
     assert mock_policy.call_count == 1
@@ -671,7 +672,9 @@ def test_predict_filters_preserves_all_sensors_for_selected_data_types(
 
 @patch("neuracore.ml.utils.policy_inference.PolicyInference")
 @patch("neuracore.core.endpoint.get_latest_sync_point")
+@patch("neuracore.core.endpoint.GlobalSingleton")
 def test_predict_filters_multiple_streams_logged_scenario(
+    _mock_global_singleton,
     mock_get_latest_sync_point,
     mock_policy_inference_class,
     mock_model_path,
@@ -746,11 +749,10 @@ def test_predict_filters_multiple_streams_logged_scenario(
         org_id="test_org",
     )
 
-    # Call _predict with None (will use get_latest_sync_point)
-    policy._predict(sync_point=None)
+    policy.predict()
 
-    # Verify get_latest_sync_point was called
-    assert mock_get_latest_sync_point.call_count == 1
+    # Once at construction to start the robot consumer, once in predict()
+    assert mock_get_latest_sync_point.call_count == 2
 
     # Verify that PolicyInference was called
     assert mock_policy.call_count == 1
@@ -1021,7 +1023,7 @@ def test_predict_retries_until_remote_node_data_arrives(
     monkeypatch,
     mock_model_path,
 ):
-    """predict() keeps retrying while a remote node is still connecting."""
+    """predict() waits for every input trace before running the model once."""
     _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
     attempts = {"count": 0}
@@ -1038,19 +1040,163 @@ def test_predict_retries_until_remote_node_data_arrives(
     policy, mock_policy = _build_multi_node_policy(
         mock_policy_inference_class, mock_model_path
     )
-
-    def predict_impl(sync_point):
-        if DataType.RGB_IMAGES not in sync_point.data:
-            raise InsufficientSynchronizedPointError("no camera data yet")
-        return _mock_policy_output(MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION)
-
-    mock_policy.side_effect = predict_impl
     monkeypatch.setattr("neuracore.core.endpoint.time.sleep", lambda _seconds: None)
 
     predictions = policy.predict(timeout=5)
 
     assert DataType.JOINT_TARGET_POSITIONS in predictions
-    assert mock_policy.call_count == 3
+    assert attempts["count"] == 3
+    mock_policy.assert_called_once()
+    called_sync_point = mock_policy.call_args[0][0]
+    assert REMOTE_CAMERA_NAME in called_sync_point.data[DataType.RGB_IMAGES]
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_fails_immediately_with_zero_timeout_when_trace_missing(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """A zero timeout polls once and names the traces that are still missing."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    consumer = patch_remote_node_data(lambda: remote_sync_point(remote_joint_data()))
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+    calls_after_init = consumer.calls
+
+    with pytest.raises(
+        InsufficientSynchronizedPointError,
+        match=f"{DataType.RGB_IMAGES.value}:{REMOTE_CAMERA_NAME}",
+    ):
+        policy.predict(timeout=0)
+
+    assert consumer.calls == calls_after_init + 1
+    mock_policy.assert_not_called()
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_times_out_when_trace_never_arrives(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """predict() polls until the timeout and then raises without running the model."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    consumer = patch_remote_node_data(lambda: remote_sync_point(remote_joint_data()))
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+    calls_after_init = consumer.calls
+
+    with pytest.raises(InsufficientSynchronizedPointError, match="Timed out"):
+        policy.predict(timeout=0.05)
+
+    assert consumer.calls > calls_after_init + 1
+    mock_policy.assert_not_called()
+
+
+def test_predict_rejects_negative_timeout():
+    with pytest.raises(ValueError, match="non-negative"):
+        DirectPolicy.predict(MagicMock(), timeout=-1)
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+@patch("neuracore.core.endpoint.get_latest_sync_point")
+def test_predict_without_sync_point_or_connected_robot_raises(
+    mock_get_latest_sync_point,
+    mock_policy_inference_class,
+    reset_neuracore,
+    mock_model_path,
+):
+    """predict() explains both ways to supply data when it has neither."""
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+
+    with pytest.raises(RobotError, match="did not pass a sync point to predict"):
+        policy.predict()
+
+    mock_get_latest_sync_point.assert_not_called()
+    mock_policy.assert_not_called()
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_policy_init_starts_robot_consumer(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """Constructing a policy reads remote data once so the consumer starts early."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    consumer = patch_remote_node_data(lambda: remote_sync_point())
+
+    _build_multi_node_policy(mock_policy_inference_class, mock_model_path)
+
+    assert consumer.calls == 1
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+@patch("neuracore.core.endpoint.get_latest_sync_point")
+def test_policy_init_skips_robot_consumer_without_active_robot(
+    mock_get_latest_sync_point,
+    mock_policy_inference_class,
+    reset_neuracore,
+    mock_model_path,
+):
+    """A policy built without a connected robot doesn't try to read its data."""
+    _build_multi_node_policy(mock_policy_inference_class, mock_model_path)
+
+    mock_get_latest_sync_point.assert_not_called()
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_ignores_remote_node_data_when_include_remote_is_false(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """include_remote=False never reads remote nodes, at init or in predict()."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    consumer = patch_remote_node_data(lambda: remote_sync_point(remote_camera_data()))
+    mock_policy = MagicMock()
+    mock_policy.input_embodiment_description = {
+        DataType.JOINT_POSITIONS: _indexed_names(*REMOTE_JOINT_NAMES),
+    }
+    mock_policy.return_value = _mock_policy_output(
+        MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION
+    )
+    mock_policy_inference_class.return_value = mock_policy
+    policy = DirectPolicy(
+        input_embodiment_description=mock_policy.input_embodiment_description,
+        output_embodiment_description=MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION,
+        model_path=mock_model_path,
+        org_id="test_org",
+        include_remote=False,
+    )
+
+    nc.log_joint_positions(positions={name: 0.5 for name in REMOTE_JOINT_NAMES})
+    policy.predict(timeout=0)
+
+    assert consumer.calls == 0
+    called_sync_point = mock_policy.call_args[0][0]
+    assert set(called_sync_point.data) == {DataType.JOINT_POSITIONS}
 
 
 @patch("neuracore.ml.utils.policy_inference.PolicyInference")
@@ -1073,8 +1219,9 @@ def test_predict_ignores_remote_node_data_when_consume_live_data_disabled(
     )
 
     nc.log_joint_positions(positions={name: 0.5 for name in REMOTE_JOINT_NAMES})
-    policy.predict()
+    # The camera only exists on a remote node, so the policy can never see it.
+    with pytest.raises(InsufficientSynchronizedPointError, match=REMOTE_CAMERA_NAME):
+        policy.predict(timeout=0)
 
     assert consumer.calls == 0
-    called_sync_point = mock_policy.call_args[0][0]
-    assert set(called_sync_point.data) == {DataType.JOINT_POSITIONS}
+    mock_policy.assert_not_called()

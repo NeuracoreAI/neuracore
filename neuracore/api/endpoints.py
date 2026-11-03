@@ -66,6 +66,7 @@ def policy(
     robot_id: str | None = None,
     robot_name: str | None = None,
     instance: int = 0,
+    include_remote: bool = True,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
 
@@ -83,6 +84,7 @@ def policy(
             robot_name are omitted, the active robot is used as a fallback.
         robot_name: Robot name to resolve to robot_id before model loading.
         instance: Robot instance number used with robot_name resolution.
+        include_remote: Whether to merge data logged from other processes.
 
     Returns:
         DirectPolicy object that provides direct in-process model inference.
@@ -111,6 +113,7 @@ def policy(
         model_file=model_file,
         device=device,
         robot_id=robot_id,
+        include_remote=include_remote,
     )
 
 
@@ -125,6 +128,7 @@ def policy_local_server(
     robot_id: str | None = None,
     robot_name: str | None = None,
     instance: int = 0,
+    include_remote: bool = True,
 ) -> LocalServerPolicy:
     """Launch and connect to a local server policy.
 
@@ -143,6 +147,7 @@ def policy_local_server(
             robot_name are omitted, the active robot is used as a fallback.
         robot_name: Robot name to resolve to robot_id before model loading.
         instance: Robot instance number used with robot_name resolution.
+        include_remote: Whether to merge data logged from other processes.
 
     Returns:
         LocalServerPolicy object that manages a local FastAPI server.
@@ -173,10 +178,13 @@ def policy_local_server(
         port=port,
         host=host,
         robot_id=robot_id,
+        include_remote=include_remote,
     )
 
 
-def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
+def policy_remote_server(
+    endpoint_name: str, include_remote: bool = True
+) -> RemoteServerPolicy:
     """Connects to a policy that is remotely running on neuracore.
 
     Connects to a model endpoint deployed on the Neuracore cloud platform.
@@ -184,6 +192,8 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 
     Args:
         endpoint_name: Name of the deployed endpoint to connect to.
+        include_remote: whether to connect to remote nodes to gather their
+            data. This is ignored if NEURACORE_CONSUME_LIVE_DATA is disabled.
 
     Returns:
         RemoteServerPolicy object for making predictions with the remote endpoint.
@@ -193,7 +203,7 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
             name, authentication issues, or network problems.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy_remote_server(endpoint_name)
+    return _policy_remote_server(endpoint_name, include_remote=include_remote)
 
 
 # Deployment management functions
@@ -386,7 +396,7 @@ def get_latest_sync_point(
     Args:
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        include_remote: wether to connect to remote nodes to gather their
+        include_remote: whether to connect to remote nodes to gather their
             data. This is ignored if NEURACORE_CONSUME_LIVE_DATA is disabled.
 
     Returns:
