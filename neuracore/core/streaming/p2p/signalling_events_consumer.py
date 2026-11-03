@@ -5,6 +5,7 @@ connection manager.
 """
 
 import asyncio
+import logging
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -28,9 +29,15 @@ from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     ManagerType,
 )
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.streaming.p2p.signalling_session import (
+    LowerEpochError,
+    SignallingSession,
+)
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
 MAX_QUEUED_MESSAGES = 100
+
+logger = logging.getLogger(__name__)
 
 
 class SignallingEventsConsumer(BaseSSEConsumer):
@@ -49,6 +56,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
         client_session: ClientSession | None = None,
         auth: Auth | None = None,
+        signalling_session: SignallingSession | None = None,
     ):
         """Initialise the signalling events consumer.
 
@@ -68,6 +76,8 @@ class SignallingEventsConsumer(BaseSSEConsumer):
                 if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
+            signalling_session: In regional mode, the session whose region and
+                token the stream and heartbeats use. None: the legacy service.
         """
         super().__init__(
             loop=loop,
@@ -81,6 +91,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         self.connection_managers: dict[str, BaseP2PStreamManager] = {}
         self.message_queue: list[HandshakeMessage] = []
         self.auth = auth or get_auth()
+        self.signalling_session = signalling_session
 
     def on_authentication_error(self) -> None:
         """Propagate terminal authentication failure to the root owner."""
@@ -98,6 +109,56 @@ class SignallingEventsConsumer(BaseSSEConsumer):
                 "headers": self.auth.get_headers(),
             },
         )
+
+    async def prepare_sse_client_config(self) -> EventSourceConfig:
+        """Return the stream configuration; in regional mode, the region's.
+
+        Returns:
+            the configuration to be used to connect to the client
+        """
+        session = self.signalling_session
+        if session is None:
+            return self.get_sse_client_config()
+        return EventSourceConfig(
+            url=f"{self._signalling_url()}/notifications/{self.local_stream_id}",
+            request_options={"headers": await session.headers()},
+        )
+
+    async def on_reconnect(self) -> None:
+        """In regional mode, register the robot again: a reconnect is a registration."""
+        await self._register_again()
+
+    async def on_close(self, reason: str) -> None:
+        """Log the reason; the stream reconnects.
+
+        Args:
+            reason: Why the region closed the stream.
+        """
+        logger.info(f"Signalling stream closed: {reason}")
+
+    def _signalling_url(self) -> str:
+        session = self.signalling_session
+        if session is None:
+            return f"{STREAM_API_URL}/org/{self.org_id}/signalling"
+        if session.base_url is None:
+            raise RuntimeError("signalling session has no region")
+        return f"{session.base_url}/org/{self.org_id}/signalling"
+
+    async def _register_again(self) -> None:
+        """Register the robot again; stop if another process holds a newer epoch."""
+        session = self.signalling_session
+        if session is None or session.robot_instance is None:
+            return
+        if session.base_url is None:
+            return
+        try:
+            await session.register(session.base_url, self.local_stream_id)
+        except LowerEpochError:
+            logger.error(
+                "Another process registered this robot instance with a newer"
+                " epoch; signalling stops"
+            )
+            self.close()
 
     def queue_message(self, message: HandshakeMessage) -> None:
         """Queue a message for a connection we dont have yet.
@@ -138,15 +199,20 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         """Handle heartbeat events by keeping the connection alive."""
         # The response is read within a context manager so the underlying
         # connection is released back to the session pool.
+        session = self.signalling_session
+        headers = (
+            self.auth.get_headers() if session is None else await session.headers()
+        )
         async with self.client_session.post(
-            f"{STREAM_API_URL}/org/{self.org_id}/signalling/alive/{self.local_stream_id}",
-            headers=self.auth.get_headers(),
+            f"{self._signalling_url()}/alive/{self.local_stream_id}",
+            headers=headers,
             data="pong",
         ) as raw_response:
             raw_response.raise_for_status()
             response = StreamAliveResponse.model_validate(await raw_response.json())
 
         if response.resurrected:
+            await self._register_again()
             for manager in self.connection_managers.values():
                 if manager.enabled_manager.is_disabled():
                     continue

@@ -1,6 +1,7 @@
 """This module provides the base class for consumers of server sent events."""
 
 import asyncio
+import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -8,7 +9,7 @@ from datetime import timedelta
 
 from aiohttp import ClientSession, ClientTimeout
 from aiohttp.client import _RequestOptions
-from aiohttp_sse_client.client import EventSource
+from aiohttp_sse_client.client import READY_STATE_CONNECTING, EventSource
 
 from neuracore.core.const import (
     STREAMING_MAXIMUM_BACKOFF_TIME_S,
@@ -21,6 +22,10 @@ from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutin
 from neuracore.core.utils.http_session import retry_connection_failures
 
 logger = logging.getLogger(__name__)
+
+
+class _StreamEndedError(Exception):
+    """The server ended the stream; reconnect through the consumer loop."""
 
 
 @dataclass
@@ -93,8 +98,30 @@ class BaseSSEConsumer(ABC):
         """
         raise NotImplementedError("get_sse_client must be implemented")
 
+    async def prepare_sse_client_config(self) -> EventSourceConfig:
+        """Return the configuration for the next connection.
+
+        Override it when the configuration needs I/O, such as a token request.
+        """
+        return self.get_sse_client_config()
+
+    async def on_reconnect(self) -> None:
+        """An optional handler run before reconnecting after an open stream.
+
+        If it raises, the consumer runs it again before the next attempt.
+        """
+        pass
+
     async def on_heartbeat(self) -> None:
         """An optional handler for heartbeat events."""
+        pass
+
+    async def on_close(self, reason: str) -> None:
+        """An optional handler for close events. The stream then reconnects.
+
+        Args:
+            reason: Why the server closed the stream.
+        """
         pass
 
     async def on_end(self) -> None:
@@ -129,20 +156,35 @@ class BaseSSEConsumer(ABC):
 
     async def _message_received_loop(self) -> None:
         backoff_time = STREAMING_MINIMUM_BACKOFF_TIME_S
+        reconnect_due = False
 
         while self.enabled_manager.is_enabled():
             try:
                 await asyncio.sleep(backoff_time)
                 backoff_time = min(STREAMING_MAXIMUM_BACKOFF_TIME_S, backoff_time * 2)
-                event_source_config = self.get_sse_client_config()
+                if reconnect_due:
+                    await self.on_reconnect()
+                    reconnect_due = False
+                event_source_config = await self.prepare_sse_client_config()
+                sources: list[EventSource] = []
+
+                def end_stream() -> None:
+                    # The library reconnects by itself at the end of a stream,
+                    # with the same config. Reconnect here instead, so every
+                    # connection gets a new config and on_reconnect.
+                    if sources and sources[0].ready_state == READY_STATE_CONNECTING:
+                        raise _StreamEndedError()
 
                 async with EventSource(
                     url=event_source_config.url,
                     option={"method": event_source_config.method},
                     session=self.client_session,
                     reconnection_time=timedelta(seconds=0.1),
+                    on_error=end_stream,
                     **event_source_config.request_options,
                 ) as event_source:
+                    sources.append(event_source)
+                    reconnect_due = True
                     async for event in event_source:
                         backoff_time = max(
                             STREAMING_MINIMUM_BACKOFF_TIME_S, backoff_time / 2
@@ -164,6 +206,11 @@ class BaseSSEConsumer(ABC):
                                 return
                             continue
 
+                        if event.type == "close":
+                            reason = json.loads(event.data or "{}").get("reason", "")
+                            await self.on_close(reason)
+                            break
+
                         if event.type == "data":
                             self.background_tracker.submit_background_coroutine(
                                 self.on_message(event.data)
@@ -173,6 +220,8 @@ class BaseSSEConsumer(ABC):
                         logger.warning(
                             f'Unsupported SSE event type "{event.type}" received'
                         )
+            except _StreamEndedError:
+                continue
             except (AuthenticationError, ConnectionRefusedError):
                 self.on_authentication_error()
                 return
