@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "data-daemon"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "data_daemon_bridge"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "data_daemon_shared",
  "iceoryx2",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "data_daemon_shared"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "dirs",
  "nix",
