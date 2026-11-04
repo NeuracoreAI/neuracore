@@ -994,6 +994,18 @@ class TestDatasetIndexingAndSlicing:
         assert isinstance(recording, Recording)
         assert recording.id == "rec1"
 
+    def test_getitem_passes_the_microsecond_window_through(
+        self, dataset_dict, recordings_list
+    ):
+        recordings_list[0]["start_timestamp_us"] = 1_000_001
+        recordings_list[0]["end_timestamp_us"] = 3_000_002
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+
+        assert dataset[0].start_timestamp_us == 1_000_001
+        assert dataset[0].end_timestamp_us == 3_000_002
+        assert dataset[1].start_timestamp_us is None
+        assert dataset[1].end_timestamp_us is None
+
     def test_getitem_negative_index(self, dataset_dict, recordings_list):
         """Test accessing recordings with negative indices."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
