@@ -3,7 +3,6 @@
 import sys
 from typing import TYPE_CHECKING
 
-import requests
 from neuracore_types import Codec, CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationDetails
@@ -13,6 +12,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.exceptions import AuthenticationError, SynchronizationError
+from neuracore.core.utils.download import download_bytes
 from neuracore.core.utils.embodiment_description_utils import extract_data_types
 from neuracore.core.utils.http_session import thread_local_session
 
@@ -99,10 +99,7 @@ class Recording:
             timeout=(10, 60),
         )
         response.raise_for_status()
-        # Use a separate unauthenticated request for signed storage URLs.
-        with requests.get(response.json()["url"], timeout=(10, 300)) as download:
-            download.raise_for_status()
-            return download.content
+        return download_bytes(response.json()["url"])
 
     def synchronize(
         self,
