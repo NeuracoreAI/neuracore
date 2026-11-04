@@ -193,7 +193,7 @@ pyo3::create_exception!(
 /// boundary; every internal Rust component downstream works with the strongly
 /// typed [`FrameDtype`].
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None, depth_scale_m = None, intrinsics = None, extrinsics = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_us, depth_scale_m = None, intrinsics = None, extrinsics = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
@@ -205,8 +205,7 @@ fn log_frame(
     height: u32,
     dtype: &str,
     payload: PyBuffer<u8>,
-    timestamp_ns: i64,
-    timestamp_s: Option<f64>,
+    timestamp_us: i64,
     depth_scale_m: Option<f64>,
     intrinsics: Option<Vec<f32>>,
     extrinsics: Option<Vec<f32>>,
@@ -236,7 +235,6 @@ fn log_frame(
     // looks (silent data loss) or panicking across the FFI boundary.
     crate::paths::recordings_root()
         .map_err(|message| PyRuntimeError::new_err(message.to_string()))?;
-    let resolved_timestamp_s = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
 
     // SAFETY: PyO3 holds the GIL here, the buffer is validated `u8` and
     // C-contiguous, the length comes from `PyBuffer::item_count`, and we only
@@ -258,8 +256,7 @@ fn log_frame(
         // Stamped on the caller's thread while the owning recording is open,
         // not on the writer thread, which may reach the frame after the stop.
         publish_ns: now_ns(),
-        timestamp_ns,
-        timestamp_s: resolved_timestamp_s,
+        timestamp_us,
         calibration,
         data,
     };
