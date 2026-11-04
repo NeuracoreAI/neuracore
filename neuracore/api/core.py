@@ -168,15 +168,11 @@ def connect_robot(
         The initialized and connected robot instance.
 
     Raises:
-        RobotError: If the robot could not be initialized.
+        RobotError: If the robot could not be initialized or is archived.
         DaemonLifecycleError: If the data daemon could not be started.
     """
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
-    if robot.archived is True:
-        warn(
-            f"This robot '{robot.name}' is archived. Was this intentional?",
-        )
     # Initialize push update managers
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
@@ -189,24 +185,24 @@ def connect_robot(
 def update_robot_name(
     robot_key: str,
     new_robot_name: str,
-    instance: int = 0,
     shared: bool = False,
 ) -> str:
     """Update the robot name for a robot.
 
     Args:
-        robot_key: Old robot name or ID of the robot to update.
+        robot_key: Robot ID, or name of a robot connected in this session.
         new_robot_name: New robot name to set for the robot.
-        instance: Robot instance to associate with the update.
         shared: Whether the robot is shared/open-source.
 
     Returns:
         The resolved robot ID.
+
+    Raises:
+        RobotError: If the robot is not found or the rename fails.
     """
     robot_id = _update_robot_name(
         robot_key,
         new_robot_name,
-        instance=instance,
         shared=shared,
     )
     return robot_id

@@ -22,7 +22,7 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
-from neuracore.core.utils.http_errors import extract_error_detail
+from neuracore.core.utils.http_errors import extract_error_code, extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.timestamp_utils import resolve_timestamp_us
 from neuracore.data_daemon import bridge as recording_context
@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
 
 _ROBOTS_LIST_PAGE_SIZE = 30
+_ROBOT_ARCHIVED_ERROR_CODE = "ROBOT_ARCHIVED"
+_ROBOT_ARCHIVED_MESSAGE = (
+    "Robot '{robot_name}' is archived. Unarchive it on the Archived Robots "
+    "page of the Neuracore dashboard, then connect again."
+)
 
 
 @dataclass
@@ -171,7 +176,8 @@ class Robot:
         or recording.
 
         Raises:
-            RobotError: If not authenticated or if server communication fails.
+            RobotError: If not authenticated, if the robot is archived or if
+                server communication fails.
             ConfigError: If there is an error trying to get the current org
         """
         if not self._auth.is_authenticated:
@@ -214,6 +220,11 @@ class Robot:
                     "Unauthorised: no organisation selected. "
                     "Run `neuracore select-org` and try again."
                 )
+            if (
+                e.response is not None
+                and extract_error_code(e.response) == _ROBOT_ARCHIVED_ERROR_CODE
+            ):
+                raise RobotError(_ROBOT_ARCHIVED_MESSAGE.format(robot_name=self.name))
             raise RobotError(f"Failed to initialize robot: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
@@ -1014,15 +1025,13 @@ def _update_local_robot_name_cache(robot_id: str, new_robot_name: str) -> None:
 def update_robot_name(
     robot_key: str,
     new_robot_name: str,
-    instance: int = 0,
     shared: bool = False,
 ) -> str:
     """Update a robot's name on the server.
 
     Args:
-        robot_key: Robot old name or ID to update.
+        robot_key: Robot ID, or name of a robot connected in this session.
         new_robot_name: New display name to set.
-        instance: Robot instance to associate with the update.
         shared: Whether the robot is shared/open-source.
 
     Returns:
@@ -1046,9 +1055,10 @@ def update_robot_name(
     robot_id = _robot_name_id_mapping.get(robot_key, robot_key)
     try:
         session = thread_local_session()
-        response = session.post(
-            f"{API_URL}/org/{resolved_org_id}/robots?is_shared={shared}&robot_id={robot_id}",
-            json={"name": new_robot_name, "instance": instance},
+        response = session.put(
+            f"{API_URL}/org/{resolved_org_id}/robots/{robot_id}/name",
+            json={"name": new_robot_name},
+            params={"is_shared": str(shared).lower()},
             headers=get_auth().get_headers(),
         )
         response.raise_for_status()
@@ -1058,7 +1068,10 @@ def update_robot_name(
             "please check your internet connection and try again."
         )
     except requests.exceptions.RequestException as e:
-        raise RobotError(f"Failed to update robot name: {str(e)}")
+        detail = None
+        if e.response is not None:
+            detail = extract_error_detail(e.response)
+        raise RobotError(f"Failed to update robot name: {detail or str(e)}")
     _update_local_robot_name_cache(robot_id, new_robot_name)
     return robot_id
 
