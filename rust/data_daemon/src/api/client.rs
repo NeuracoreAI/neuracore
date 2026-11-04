@@ -100,20 +100,20 @@ impl ApiClientError {
     /// True when the backend answered `410 Gone` with `RECORDING_CANCELLED`.
     ///
     /// The only response that means the recording's data should be discarded:
-    /// a plain 404 carries no error code, so it cannot tell a cancelled
+    /// a plain 404 carries no error type, so it cannot tell a cancelled
     /// recording from a saved or reaped one, or from an unrelated 404.
     pub fn is_recording_cancelled(&self) -> bool {
-        self.error_code(StatusCode::GONE).as_deref() == Some("RECORDING_CANCELLED")
+        self.error_type(StatusCode::GONE).as_deref() == Some("RECORDING_CANCELLED")
     }
 
     /// True when a cancel lost the race with upload completion (409
     /// `RECORDING_ALREADY_UPLOADED`). Other conflicts are not terminal.
     pub fn is_recording_already_uploaded(&self) -> bool {
-        self.error_code(StatusCode::CONFLICT).as_deref() == Some("RECORDING_ALREADY_UPLOADED")
+        self.error_type(StatusCode::CONFLICT).as_deref() == Some("RECORDING_ALREADY_UPLOADED")
     }
 
-    /// The backend's `detail.error_code` when it responded with `expected`.
-    fn error_code(&self, expected: StatusCode) -> Option<String> {
+    /// The backend's `detail.error_type` when it responded with `expected`.
+    fn error_type(&self, expected: StatusCode) -> Option<String> {
         let ApiClientError::Status { status, body } = self else {
             return None;
         };
@@ -123,7 +123,7 @@ impl ApiClientError {
         serde_json::from_str::<serde_json::Value>(body)
             .ok()?
             .get("detail")?
-            .get("error_code")?
+            .get("error_type")?
             .as_str()
             .map(str::to_owned)
     }
@@ -847,7 +847,7 @@ mod tests {
     fn a_cancelled_410_is_told_apart_from_a_404() {
         let cancelled = status_error(
             410,
-            serde_json::json!({ "detail": { "error_code": "RECORDING_CANCELLED" } }),
+            serde_json::json!({ "detail": { "error_type": "RECORDING_CANCELLED" } }),
         );
         assert!(cancelled.is_recording_cancelled());
         assert!(!cancelled.is_not_found());
@@ -866,7 +866,7 @@ mod tests {
 
         let wrong_status = status_error(
             404,
-            serde_json::json!({ "detail": { "error_code": "RECORDING_CANCELLED" } }),
+            serde_json::json!({ "detail": { "error_type": "RECORDING_CANCELLED" } }),
         );
         assert!(!wrong_status.is_recording_cancelled());
     }

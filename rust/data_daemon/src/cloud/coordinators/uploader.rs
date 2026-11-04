@@ -1041,7 +1041,7 @@ mod tests {
         let (store, _tempdir, recording_index, _local, events) =
             upload_with_refetch_answering(ResponseTemplate::new(410).set_body_json(
                 serde_json::json!({
-                    "detail": { "error": "Recording has been cancelled.", "error_code": "RECORDING_CANCELLED" }
+                    "detail": { "error": "Recording has been cancelled.", "error_type": "RECORDING_CANCELLED" }
                 }),
             ))
             .await;

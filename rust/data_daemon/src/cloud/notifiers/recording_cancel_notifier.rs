@@ -763,7 +763,7 @@ mod tests {
                 "detail": {
                     "error": "Recording has already been uploaded.",
                     "status": 409,
-                    "error_code": "RECORDING_ALREADY_UPLOADED"
+                    "error_type": "RECORDING_ALREADY_UPLOADED"
                 }
             })))
             .mount(&server)
