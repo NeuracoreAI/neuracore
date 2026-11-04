@@ -402,7 +402,7 @@ fn write_status_is_terminal(trace: &TraceRecord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::DaemonEvent;
+    use crate::state::{DaemonEvent, RecordingTimestamp};
     use std::time::Duration;
 
     use crate::api::auth::StaticAuthProvider;
@@ -496,7 +496,7 @@ mod tests {
                 .unwrap();
         }
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 
@@ -541,7 +541,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 
@@ -614,7 +614,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 
@@ -672,7 +672,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 
@@ -728,7 +728,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 
@@ -789,7 +789,7 @@ mod tests {
                 .unwrap();
         }
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 
@@ -831,7 +831,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
         recording_index
@@ -998,7 +998,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, 0)
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
             .await
             .unwrap();
 

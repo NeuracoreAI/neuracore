@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
+use crate::state::{DaemonEvent, EventBus, RecordingTimestamp, SqliteStateStore, StateStore};
 
 pub mod progress;
 pub mod registration;
@@ -25,7 +25,13 @@ pub(crate) async fn discard_recording_locally(
     recording_index: i64,
 ) {
     let discarded_at = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    let touched = match store.cancel_recording(recording_index, discarded_at).await {
+    let touched = match store
+        .cancel_recording(
+            recording_index,
+            RecordingTimestamp::observed_at(discarded_at),
+        )
+        .await
+    {
         Ok((_, touched)) => touched,
         Err(error) => {
             tracing::warn!(%error, recording_index, "failed to burn cancelled recording");

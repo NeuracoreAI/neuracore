@@ -89,6 +89,7 @@ pub fn spawn_recording_cancel_notifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RecordingTimestamp;
 
     use std::time::Duration;
 
@@ -127,7 +128,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 0,
+                start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
             .await
@@ -137,10 +138,11 @@ mod tests {
             .mark_recording_start_notified(index, cloud_id)
             .await
             .expect("mark start notified");
-        store
-            .cancel_recording(index, 5_000_000_000)
-            .await
-            .expect("cancel");
+        let cancel = RecordingTimestamp {
+            publish_timestamp_ns: 5_000_000_000,
+            timestamp_us: Some(3_000_000),
+        };
+        store.cancel_recording(index, cancel).await.expect("cancel");
         index
     }
 
@@ -182,17 +184,26 @@ mod tests {
 
         bus.publish(DaemonEvent::RecordingCancelled { recording_index: 1 });
 
-        timeout(Duration::from_secs(3), async {
+        let received = timeout(Duration::from_secs(3), async {
             loop {
                 let received = server.received_requests().await.unwrap_or_default();
                 if !received.is_empty() {
-                    break;
+                    break received;
                 }
                 sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("expected one POST within 3s");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "recording_id": "rec-cancel-1",
+                "end_time": 3.0,
+            }),
+            "end_time is the caller's cancel"
+        );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
@@ -218,14 +229,14 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 0,
+                start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
             .await
             .expect("create_recording");
         let index = row.recording_index;
         store
-            .cancel_recording(index, 5_000_000_000)
+            .cancel_recording(index, RecordingTimestamp::observed_at(5_000_000_000))
             .await
             .expect("cancel");
 
@@ -294,7 +305,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 0,
+                start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
             .await
@@ -529,13 +540,16 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 0,
+                start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
             .await
             .unwrap();
         store
-            .cancel_recording(row.recording_index, 5_000_000_000)
+            .cancel_recording(
+                row.recording_index,
+                RecordingTimestamp::observed_at(5_000_000_000),
+            )
             .await
             .unwrap();
 
@@ -595,7 +609,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 0,
+                start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
             .await
@@ -642,13 +656,16 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 0,
+                start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
             .await
             .unwrap();
         store
-            .cancel_recording(row.recording_index, 5_000_000_000)
+            .cancel_recording(
+                row.recording_index,
+                RecordingTimestamp::observed_at(5_000_000_000),
+            )
             .await
             .unwrap();
 

@@ -80,6 +80,12 @@ def _timestep_marker(data_type: DataType, timestep: int, item_index: int = 0) ->
     return base + float(timestep) + float(item_index)
 
 
+def _done_at_timestep(timestep: int) -> bool:
+    # A flag holds only two values, so adjacent timesteps alternate to keep the
+    # same-step and next-step alignments apart.
+    return timestep % 2 == 1
+
+
 def _create_nc_data_at_timestep(
     data_type: DataType, timestep: int, item_index: int = 0
 ):
@@ -150,6 +156,10 @@ def _create_nc_data_at_timestep(
         from neuracore_types.nc_data.custom_1d_data import Custom1DData
 
         return Custom1DData(data=np.array([marker], dtype=np.float32))
+    if data_type == DataType.DONE:
+        from neuracore_types.nc_data.done_data import DoneData
+
+        return DoneData(done=_done_at_timestep(timestep))
     raise ValueError(f"Unhandled data type: {data_type}")
 
 
@@ -225,6 +235,10 @@ def _assert_output_matches_timestep(
         assert torch.equal(
             batched_nc_data.attention_mask, expected_batched.attention_mask
         )
+        return
+    if output_data_type == DataType.DONE:
+        expected_done = float(_done_at_timestep(expected_timestep))
+        assert float(batched_nc_data.done[0, 0, 0]) == expected_done
         return
 
     marker = _extract_output_marker(batched_nc_data, output_data_type)
