@@ -12,10 +12,19 @@ from neuracore.api.globals import GlobalSingleton
 from neuracore.core import robot as core_robot
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL
-from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
+from neuracore.core.exceptions import (
+    AuthenticationError,
+    RobotError,
+    VersionMismatchError,
+)
 from neuracore.core.robot import Robot
 from neuracore.data_daemon import bridge as recording_context
 from neuracore.data_daemon.daemon_control import DaemonLifecycleError
+
+ARCHIVED_ROBOT_ERROR = (
+    "Robot 'test_robot' is archived. Unarchive it on the Archived Robots "
+    "page of the Neuracore dashboard, then connect again."
+)
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -317,33 +326,79 @@ def test_connect_robot_raises_when_the_daemon_fails_to_start(
         nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
 
+def test_connect_robot_refuses_an_archived_robot(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    monkeypatch,
+):
+    """An archived robot gets an actionable error and no session."""
+    ensure_daemon_running = Mock(return_value=1)
+    orchestrator = Mock()
+    monkeypatch.setattr(api_core, "ensure_daemon_running", ensure_daemon_running)
+    monkeypatch.setattr(api_core, "StreamManagerOrchestrator", orchestrator)
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={
+            "detail": {
+                "error": "Server text that the SDK does not show",
+                "status": 409,
+                "error_code": "ROBOT_ARCHIVED",
+            }
+        },
+        status_code=409,
+    )
+
+    with pytest.raises(RobotError) as raised:
+        nc.connect_robot("test_robot")
+
+    assert str(raised.value) == ARCHIVED_ROBOT_ERROR
+    ensure_daemon_running.assert_not_called()
+    orchestrator.assert_not_called()
+    assert api_core.GlobalSingleton()._active_robot is None
+    assert core_robot._robots == {}
+
+
+def test_connect_robot_conflict_without_archived_code_is_a_generic_error(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """A 409 without the archived error code gives the generic connect error."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"detail": {"error": "Robot already exists", "status": 409}},
+        status_code=409,
+    )
+
+    with pytest.raises(RobotError, match="Failed to initialize robot"):
+        nc.connect_robot("test_robot")
+
+
 def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):
     calls: list[tuple] = []
 
     def fake_update_robot_name(
         robot_name: str,
         new_robot_name: str,
-        instance: int = 0,
         shared: bool = False,
     ) -> str:
-        calls.append((robot_name, new_robot_name, instance, shared))
+        calls.append((robot_name, new_robot_name, shared))
         return "robot_id_123"
 
     monkeypatch.setattr(api_core, "_update_robot_name", fake_update_robot_name)
 
-    robot_id = nc.update_robot_name(
-        "old_name_or_id", "new_name", instance=2, shared=True
-    )
+    robot_id = nc.update_robot_name("old_name_or_id", "new_name", shared=True)
 
     assert robot_id == "robot_id_123"
-    assert calls == [("old_name_or_id", "new_name", 2, True)]
+    assert calls == [("old_name_or_id", "new_name", True)]
 
 
 def test_update_robot_name_forwards_arguments(monkeypatch):
     def fake_update_robot_name(
         robot_name: str,
         new_robot_name: str,
-        instance: int = 0,
         shared: bool = False,
     ) -> str:
         return "robot_id_123"
