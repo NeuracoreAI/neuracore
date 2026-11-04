@@ -46,8 +46,27 @@ const PROGRESS_PERSIST_EVERY_CHUNKS: u32 = 4;
 const MAX_RETRIES: u32 = 5;
 /// Hard deadline for a single chunk PUT. Belt-and-braces over the reqwest
 /// client-level timeout, which can silently fail to fire for direct GCS
-/// resumable session URI uploads.
+/// resumable session URI uploads. A retry of a full chunk gets all of this time.
 const CHUNK_UPLOAD_TIMEOUT: Duration = Duration::from_secs(200);
+/// Latency time for each attempt of a chunk.
+const CHUNK_LATENCY_FLOOR: Duration = Duration::from_secs(2);
+/// Minimum transfer speed for the first attempt, in bits per second.
+const FIRST_ATTEMPT_MIN_SPEED_BPS: f64 = 1_000_000.0;
+/// Lowest minimum transfer speed for a retry, in bits per second.
+const RETRY_MIN_SPEED_BPS: f64 = 500_000.0;
+
+/// Returns the time limit for one chunk PUT attempt.
+///
+/// The limit is the chunk transfer time at the minimum speed plus the latency
+/// time. The minimum speed starts at 1 Mbit/s and halves on each retry, but it
+/// is not less than 0.5 Mbit/s. The limit is not more than
+/// [`CHUNK_UPLOAD_TIMEOUT`].
+fn chunk_timeout(len: usize, attempt: u32) -> Duration {
+    let speed_bps =
+        (FIRST_ATTEMPT_MIN_SPEED_BPS / 2f64.powi(attempt as i32)).max(RETRY_MIN_SPEED_BPS);
+    let transfer = Duration::from_secs_f64(len as f64 * 8.0 / speed_bps);
+    (transfer + CHUNK_LATENCY_FLOOR).min(CHUNK_UPLOAD_TIMEOUT)
+}
 
 /// Outcome of [`upload_one_file`]. Carries a refreshed `session_uri` when the
 /// server expired the original one mid-upload so the caller can persist it
@@ -450,8 +469,9 @@ async fn put_chunk(
             "sending upload chunk"
         );
         let chunk_started = Instant::now();
+        let chunk_attempt_deadline = chunk_timeout(chunk.len(), attempt);
         let response =
-            match timeout(CHUNK_UPLOAD_TIMEOUT, client.raw_client().execute(request)).await {
+            match timeout(chunk_attempt_deadline, client.raw_client().execute(request)).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
                     if attempt + 1 >= MAX_RETRIES {
@@ -474,27 +494,26 @@ async fn put_chunk(
                 Err(_elapsed) => {
                     tracing::warn!(
                         attempt,
-                        timeout_secs = CHUNK_UPLOAD_TIMEOUT.as_secs(),
+                        timeout_ms = chunk_attempt_deadline.as_millis(),
                         bytes = chunk.len(),
                         "upload chunk PUT timed out; retrying"
                     );
                     if attempt + 1 >= MAX_RETRIES {
                         return Err(format!(
-                            "chunk PUT timed out after {}s ({MAX_RETRIES} attempts exhausted)",
-                            CHUNK_UPLOAD_TIMEOUT.as_secs()
+                            "chunk PUT timed out after {}ms ({MAX_RETRIES} attempts exhausted)",
+                            chunk_attempt_deadline.as_millis()
                         ));
                     }
                     attempt += 1;
-                    let delay = backoff(attempt, client.options().max_backoff);
+                    // Retry immediately. The timeout was the wait.
                     emit_upload_retry(
                         recording_index,
                         trace_id,
                         cloud_filepath,
                         attempt,
                         "timeout",
-                        delay,
+                        Duration::ZERO,
                     );
-                    sleep(delay).await;
                     continue;
                 }
             };
@@ -665,6 +684,76 @@ fn extract_server_crc32c(headers: &HeaderMap, body: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::auth::StaticAuthProvider;
+    use crate::api::ApiClientOptions;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn chunk_timeout_small_chunk_halves_speed_once() {
+        // 19,291 bytes at 1 Mbit/s, then 0.5 Mbit/s, plus 2s latency.
+        assert_eq!(chunk_timeout(19_291, 0).as_millis(), 2_154);
+        for attempt in 1..MAX_RETRIES {
+            assert_eq!(chunk_timeout(19_291, attempt).as_millis(), 2_308);
+        }
+    }
+
+    #[test]
+    fn chunk_timeout_full_chunk_is_capped_on_retry() {
+        // 16 MiB at 1 Mbit/s is 134.2s; at 0.5 Mbit/s it is more than the cap.
+        assert_eq!(chunk_timeout(CHUNK_SIZE, 0).as_millis(), 136_217);
+        for attempt in 1..MAX_RETRIES {
+            assert_eq!(chunk_timeout(CHUNK_SIZE, attempt), CHUNK_UPLOAD_TIMEOUT);
+        }
+    }
+
+    #[tokio::test]
+    async fn put_chunk_retries_a_stalled_small_chunk_without_backoff() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Arc::new(
+            ApiClient::new(
+                ApiClientOptions::new(server.uri()),
+                Arc::new(StaticAuthProvider::new("test-token")),
+            )
+            .expect("client"),
+        );
+        let session_uri = format!("{}/upload", server.uri());
+        let chunk = Bytes::from(vec![0u8; 19_291]);
+
+        let started = Instant::now();
+        let outcome = put_chunk(
+            &client,
+            PutChunkRequest {
+                session_uri: &session_uri,
+                chunk_end: chunk.len() as u64 - 1,
+                total_bytes: chunk.len() as u64,
+                chunk,
+                chunk_start: 0,
+                is_final: true,
+                recording_index: 1,
+                trace_id: "trace",
+                cloud_filepath: "JOINT_POSITIONS/trace.json",
+            },
+        )
+        .await
+        .expect("put_chunk");
+
+        assert!(matches!(outcome, PutChunkOutcome::Accepted { .. }));
+        // The first deadline is about 2.2s. A 1s backoff makes this more than 3s.
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    }
 
     #[test]
     fn parse_resume_offset_uses_last_byte_plus_one() {
