@@ -29,6 +29,7 @@ from neuracore.ml.trainers.metric_accumulator import MetricAccumulator
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
+from neuracore.ml.utils.step_timer import StepTimer
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
     rollout_root_dir,
@@ -242,7 +243,19 @@ class DistributedTrainer:
         for optimizer in self.optimizers:
             optimizer.zero_grad()
 
+        data_wait_s = compute_s = 0.0
+        iter_t0 = time.monotonic()
         for batch_idx, batch in enumerate(pbar):
+            fetched_t = time.monotonic()
+            data_wait_s += fetched_t - iter_t0
+            if batch_idx == 0:
+                # Includes spawning DataLoader workers (spawn re-imports torch).
+                logger.info(
+                    "[timing] rank%s/epoch%s/train_loop: first_batch_wait=%.2fs",
+                    self.rank,
+                    epoch,
+                    fetched_t - iter_t0,
+                )
             if batch_idx % CHECK_MEMORY_INTERVAL == 0:
                 memory_monitor.check_memory()
 
@@ -318,6 +331,19 @@ class DistributedTrainer:
                 optimizer.zero_grad()
 
             del batch, batch_output, loss
+            iter_t0 = time.monotonic()
+            compute_s += iter_t0 - fetched_t
+
+        # No cuda sync: async GPU work may land in the next batch's compute.
+        logger.info(
+            "[timing] rank%s/epoch%s/train_loop: data_wait=%.2fs compute=%.2fs "
+            "batches=%s",
+            self.rank,
+            epoch,
+            data_wait_s,
+            compute_s,
+            len(self.train_loader),
+        )
 
         avg_epoch_losses, avg_epoch_metrics = accumulator.averages()
         self._log_scalars(avg_epoch_losses, epoch, prefix="train/epoch/loss")
@@ -445,6 +471,7 @@ class DistributedTrainer:
         # A resumed run saves the input points again. Same seed, same points.
         self._input_points_saved = False
 
+        run_timer = StepTimer(f"rank{self.rank}/train")
         try:
             start_epoch = max(start_epoch, 1)
             if self._run_rollout_validation:
@@ -457,8 +484,10 @@ class DistributedTrainer:
                         exc_info=True,
                     )
                     self._run_rollout_validation = False
+            run_timer.lap("rollout_setup")
 
             for epoch in range(start_epoch, self.num_epochs + 1):
+                timer = StepTimer(f"rank{self.rank}/epoch{epoch}")
                 # Set epoch for distributed sampler to
                 # ensure different shuffling each epoch
                 if isinstance(self.train_loader.sampler, DistributedSampler):
@@ -475,6 +504,7 @@ class DistributedTrainer:
                 epoch_t0 = time.perf_counter()
                 train_loss_metrics = self.train_epoch(epoch)
                 train_elapsed = time.perf_counter() - epoch_t0
+                timer.lap("train")
 
                 # Save checkpoint and artifacts periodically (only from rank 0)
                 checkpoint_saved = False
@@ -493,15 +523,18 @@ class DistributedTrainer:
                         time.perf_counter() - save_t0,
                         SECONDS_PER_EPOCH_EMA_ALPHA,
                     )
+                    timer.lap("checkpoint_and_artifacts")
 
                 validate_t0 = time.perf_counter()
                 with torch.no_grad():
                     self.validate(epoch)
+                    timer.lap("validate")
                     if (
                         self._run_rollout_validation
                         and epoch % self.validation_rollout_frequency == 0
                     ):
                         self._save_validation_rollouts(epoch)
+                        timer.lap("rollouts")
 
                 train_val_seconds = train_elapsed + (time.perf_counter() - validate_t0)
 
@@ -526,6 +559,8 @@ class DistributedTrainer:
                     # Flush logger to ensure data is written
                     if hasattr(self.training_logger, "flush"):
                         self.training_logger.flush()
+                timer.lap("progress_update")
+                timer.total()
 
         except OutOfMemoryError:
             logger.error(
@@ -538,6 +573,7 @@ class DistributedTrainer:
             logger.error("Error during training.", exc_info=True)
             raise
         finally:
+            run_timer.lap("epochs")
             if self.rank == 0:
                 # Checkpoint/artifact uploads run in the background (see
                 # TrainingStorageHandler); block here until they've all
@@ -545,10 +581,13 @@ class DistributedTrainer:
                 # VM/container be torn down — while the final checkpoint is
                 # still mid-upload.
                 self.storage_handler.wait_for_rollout_saves()
+                run_timer.lap("wait_rollout_saves")
                 self.storage_handler.wait_for_pending_uploads()
+                run_timer.lap("wait_pending_uploads")
                 # Progress updates are also sent off-thread, so flush the last
                 # one rather than letting it die with the worker.
                 self.storage_handler.wait_for_pending_progress_updates()
+                run_timer.lap("wait_progress_updates")
                 # Close the logger
                 self.training_logger.close()
 
