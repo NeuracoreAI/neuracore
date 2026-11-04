@@ -11,6 +11,7 @@ both modalities.
 import logging
 import multiprocessing
 import random
+import time
 import traceback
 from collections.abc import Generator
 from copy import deepcopy
@@ -75,9 +76,10 @@ ROBOT_NAME_PREFIX = "multinode_policy_robot"
 
 FRAME_SHAPE = (64, 64, 3)
 NODE_READY_TIMEOUT_S = 180
+NODE_CONNECT_TIMEOUT_S = 180
+NODE_CONNECT_POLL_S = 1.0
 NODE_JOIN_TIMEOUT_S = 15
-# predict() also waits for the remote nodes to connect and deliver every trace.
-PREDICT_TIMEOUT_S = 5
+PREDICT_TIMEOUT_S = 60
 
 DUMMY_DATASET_SAMPLES = 5
 TRAIN_BATCH_SIZE = 2
@@ -215,6 +217,21 @@ def _camera_node_worker(
         ready_event.set()
 
 
+def _wait_for_remote_nodes(
+    robot_name: str, instance: int, num_remote_nodes: int
+) -> None:
+    """Block until the expected remote nodes have delivered data."""
+    deadline = time.time() + NODE_CONNECT_TIMEOUT_S
+    while not nc.check_remote_nodes_connected(
+        num_remote_nodes=num_remote_nodes, robot_name=robot_name, instance=instance
+    ):
+        assert time.time() < deadline, (
+            f"Timed out after {NODE_CONNECT_TIMEOUT_S}s waiting for "
+            f"{num_remote_nodes} remote node(s) to connect"
+        )
+        time.sleep(NODE_CONNECT_POLL_S)
+
+
 def _assert_no_worker_failures(result_queue: multiprocessing.Queue) -> None:
     """Fail with the child traceback if either logger node errored."""
     failures = []
@@ -291,19 +308,8 @@ def _run_policy_inference_multi_node(
         _assert_no_worker_failures(result_queue)
         logger.info("Both logger nodes are ready")
 
-        predictions = policy.predict(timeout=PREDICT_TIMEOUT_S)
-        for data_type in output_data_types:
-            assert data_type in predictions, (
-                f"Expected {data_type.value} in policy output, got: "
-                f"{[key.value for key in predictions]}"
-            )
-            for name, prediction in predictions[data_type].items():
-                assert isinstance(
-                    prediction, BatchedJointData
-                ), f"Expected BatchedJointData for {name!r}, got {type(prediction)}"
-                assert (
-                    prediction.value.shape[0] == 1
-                ), f"Expected a batch of 1 for {name!r}, got {prediction.value.shape}"
+        _wait_for_remote_nodes(robot_name, instance, num_remote_nodes=2)
+        logger.info("Both remote nodes are connected")
 
         sync_point = nc.get_latest_sync_point(
             robot_name=robot_name, instance=instance, include_remote=True
@@ -334,6 +340,19 @@ def _run_policy_inference_multi_node(
             )
         logger.info("Merged sync point holds both remote nodes' data")
 
+        predictions = policy.predict(timeout=PREDICT_TIMEOUT_S)
+        for data_type in output_data_types:
+            assert data_type in predictions, (
+                f"Expected {data_type.value} in policy output, got: "
+                f"{[key.value for key in predictions]}"
+            )
+            for name, prediction in predictions[data_type].items():
+                assert isinstance(
+                    prediction, BatchedJointData
+                ), f"Expected BatchedJointData for {name!r}, got {type(prediction)}"
+                assert (
+                    prediction.value.shape[0] == 1
+                ), f"Expected a batch of 1 for {name!r}, got {prediction.value.shape}"
         logger.info(
             f"Multi-node inference passed — output keys: "
             f"{[key.value for key in predictions]}"
