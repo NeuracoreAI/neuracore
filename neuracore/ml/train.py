@@ -18,6 +18,7 @@ except ImportError:
     resource = None  # type: ignore[assignment]
 
 import hydra
+import psutil
 import torch
 import torch.multiprocessing as mp
 from neuracore_types import (
@@ -64,6 +65,7 @@ from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
 from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
+from neuracore.ml.utils.step_timer import StepTimer
 from neuracore.ml.utils.training_config import (
     resolve_to_complete_config,
     resolve_user_input_config,
@@ -508,6 +510,7 @@ def run_training(
     device: torch.device | None = None,
 ) -> None:
     """Run the training process for a single GPU."""
+    timer = StepTimer(f"rank{rank}/setup")
     # Setup for distributed training
     if world_size > 1:
         nc.login()  # Ensure Neuracore is logged in on this process
@@ -516,6 +519,7 @@ def run_training(
     # Setup logging (different file per process)
     setup_logging(cfg.local_output_dir, rank)
     logger = logging.getLogger(__name__)
+    timer.lap("login_distributed_and_logging")
 
     # Set random seed (different for each process to ensure different data sampling)
     torch.manual_seed(cfg.seed + rank)
@@ -537,6 +541,7 @@ def run_training(
             inference_input_preprocessing_config=inference_input_preprocessing_config,
             inference_output_preprocessing_config=inference_output_preprocessing_config,
         )
+        timer.lap("split_datasets")
 
         num_train_workers = min(cfg.num_train_workers, cpu_count())
         num_val_workers = min(cfg.num_val_workers, cpu_count())
@@ -609,6 +614,7 @@ def run_training(
             f"Created data loaders with {len(train_loader.dataset)} training samples "
             f"and {len(val_loader.dataset)} validation samples"
         )
+        timer.lap("dataloaders")
 
         # Model doesn't need to know about ids or names, just data types
         input_data_types = extract_data_types(input_cross_embodiment_description)
@@ -625,6 +631,7 @@ def run_training(
         model, algorithm_config = get_model_and_algorithm_config(
             cfg, model_init_description
         )
+        timer.lap("build_model")
 
         training_id = getattr(cfg, "training_id", None)
         training_storage_handler = TrainingStorageHandler(
@@ -688,6 +695,7 @@ def run_training(
             device=device,
             validation_rollout_config=validation_rollout_config,
         )
+        timer.lap("build_trainer")
 
         # A failed resume load aborts the run. Continuing would train and save
         # artifacts from unrestored state.
@@ -700,11 +708,13 @@ def run_training(
                 world_size,
             )
             logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
+            timer.lap("load_checkpoint")
 
         # Start training
         try:
             logger.info(f"Training started (target {cfg.epochs} epochs).")
             trainer.train(start_epoch=start_epoch)
+            timer.lap("train")
             logger.info("Training completed successfully!")
         except Exception:
             logger.error("Training failed.", exc_info=True)
@@ -714,6 +724,8 @@ def run_training(
         # Clean up distributed process group
         if world_size > 1:
             cleanup_distributed()
+            timer.lap("cleanup_distributed")
+        timer.total()
 
         logger.info(f"Process {rank} completed")
 
@@ -754,6 +766,11 @@ def _main(cfg: DictConfig) -> None:
     Args:
         cfg: Fully resolved Hydra configuration.
     """
+    timer = StepTimer("main")
+    # Wall clock: covers interpreter start, imports and Hydra config composition,
+    # which happen before any monotonic timer can start.
+    process_started_at = psutil.Process().create_time()
+    process_start_to_main_s = time.time() - process_started_at
     _raise_open_file_limit()
 
     if "algorithm" in cfg:
@@ -763,6 +780,14 @@ def _main(cfg: DictConfig) -> None:
     cfg = resolve_user_input_config(cfg)
 
     setup_logging(cfg.local_output_dir)
+    logger.info(
+        "[timing] main/process_start_to_main: %.2fs (wall clock; process started "
+        "at epoch %.3f)",
+        process_start_to_main_s,
+        process_started_at,
+    )
+    # Laps logged before setup_logging would miss train.log, so these share one.
+    timer.lap("install_requirements_and_resolve_config")
     log_streamer: CloudLogStreamer | None = None
 
     try:
@@ -788,11 +813,13 @@ def _main(cfg: DictConfig) -> None:
                 output_dir=Path(cfg.local_output_dir),
             )
             log_streamer.start()
+        timer.lap("login_and_setup")
 
         if cfg.dataset_name is not None:
             dataset = nc.get_dataset(name=cfg.dataset_name)
         else:
             dataset = nc.get_dataset(id=cfg.dataset_id)
+        timer.lap("get_dataset")
 
         cfg = resolve_to_complete_config(cfg, dataset=dataset)
         logger.info("Training configuration:")
@@ -828,8 +855,16 @@ def _main(cfg: DictConfig) -> None:
             output_cross_embodiment_description=output_cross_embodiment_description,
             cross_embodiment_union=cross_embodiment_union,
         )
+        timer.lap("resolve_full_config")
+
+        sync_lapped = False
 
         def _report_sync_progress(done: int, total: int) -> None:
+            nonlocal sync_lapped
+            if done >= total and not sync_lapped:
+                # Splits backend sync wait from the recording prefetch after it.
+                sync_lapped = True
+                timer.lap("wait_for_backend_sync")
             if setup_storage_handler is None:
                 return
             if done < total:
@@ -878,6 +913,7 @@ def _main(cfg: DictConfig) -> None:
 
         if setup_storage_handler is not None:
             setup_storage_handler.wait_for_pending_progress_updates()
+        timer.lap("prefetch_recordings")
 
         # Check if distributed training is enabled and multiple GPUs are available
         world_size = torch.cuda.device_count()
@@ -889,6 +925,7 @@ def _main(cfg: DictConfig) -> None:
             extract_dir = Path(cfg.local_output_dir) / "algorithm"
             storage_handler.download_algorithm(extract_dir=extract_dir)
             logger.info(f"Algorithm extracted to {extract_dir}")
+            timer.lap("download_algorithm")
 
         device = None
         if cfg.device is not None:
@@ -910,6 +947,7 @@ def _main(cfg: DictConfig) -> None:
             cfg.get("inference_preprocessing"),
             role_name="inference_preprocessing",
         )
+        timer.lap("resolve_preprocessing")
 
         # Create a pytorch synchronized dataset
         # NOTE: we are creating it here, and not in training to access the first sample
@@ -928,6 +966,7 @@ def _main(cfg: DictConfig) -> None:
             output_preprocessing_config=train_output_preprocessing_config,
             sample_cache=cfg.get("dataset_sample_cache", True),
         )
+        timer.lap("build_dataset_and_stats")
 
         # Handle batch size configuration
         if isinstance(batch_size, str) and batch_size.lower() == "auto":
@@ -958,6 +997,7 @@ def _main(cfg: DictConfig) -> None:
             )
 
             batch_size = int(batch_size)
+        timer.lap("batch_size_selection")
 
         logger.info(f"Using batch size {batch_size} per GPU.")
         if setup_storage_handler is not None:
@@ -965,6 +1005,7 @@ def _main(cfg: DictConfig) -> None:
                 TrainingProgress(status=TrainingJobStatus.TRAINING)
             )
             setup_storage_handler.wait_for_pending_progress_updates()
+        timer.lap("status_update")
 
         if world_size > 1:
             # Use multiprocessing to launch multiple processes
@@ -1002,9 +1043,12 @@ def _main(cfg: DictConfig) -> None:
                 pytorch_dataset,
                 device,
             )
+        timer.lap("run_training")
     finally:
+        timer.total()
         if log_streamer is not None:
             log_streamer.close()
+            timer.lap("log_streamer_close")
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
