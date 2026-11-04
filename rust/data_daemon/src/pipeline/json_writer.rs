@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
+use data_daemon_shared::microseconds_to_seconds;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -40,10 +41,10 @@ enum JsonWriteMsg {
         trace_dir: PathBuf,
     },
     /// Append one entry. `payload` is forwarded verbatim when it is itself valid
-    /// JSON, else wrapped in a small fallback object stamped with `timestamp_ns`.
+    /// JSON, else wrapped in a small fallback object stamped with `timestamp_us`.
     Append {
         trace_id: String,
-        timestamp_ns: i64,
+        timestamp_us: i64,
         payload: Vec<u8>,
     },
     /// Finalise the trace (append `]`, flush, close) and report the on-disk byte
@@ -76,10 +77,10 @@ impl JsonWriteHandle {
 
     /// Append one entry (fire-and-forget). Takes ownership of `payload` so the
     /// caller's frame buffer is freed immediately.
-    pub fn append(&self, trace_id: &str, timestamp_ns: i64, payload: Vec<u8>) {
+    pub fn append(&self, trace_id: &str, timestamp_us: i64, payload: Vec<u8>) {
         let _ = self.tx.send(JsonWriteMsg::Append {
             trace_id: trace_id.to_string(),
-            timestamp_ns,
+            timestamp_us,
             payload,
         });
     }
@@ -145,14 +146,14 @@ fn writer_loop(rx: Receiver<JsonWriteMsg>) {
             },
             JsonWriteMsg::Append {
                 trace_id,
-                timestamp_ns,
+                timestamp_us,
                 payload,
             } => {
                 if errored.contains_key(&trace_id) {
                     continue;
                 }
                 if let Some(writer) = writers.get_mut(&trace_id) {
-                    if let Err(error) = append_entry(writer, timestamp_ns, &payload) {
+                    if let Err(error) = append_entry(writer, timestamp_us, &payload) {
                         errored.insert(trace_id, error);
                     }
                 }
@@ -183,7 +184,7 @@ fn writer_loop(rx: Receiver<JsonWriteMsg>) {
 /// (already-JSON) path.
 fn append_entry(
     writer: &mut JsonTraceWriter,
-    timestamp_ns: i64,
+    timestamp_us: i64,
     payload: &[u8],
 ) -> Result<(), JsonTraceError> {
     match serde_json::from_slice::<serde::de::IgnoredAny>(payload) {
@@ -194,11 +195,11 @@ fn append_entry(
             // dropping the bytes silently: only the length is retained on disk;
             // the raw payload bytes are intentionally discarded.
             tracing::warn!(
-                timestamp_ns,
+                timestamp_us,
                 payload_len = payload.len(),
                 "non-JSON scalar payload; storing length only (raw bytes discarded)"
             );
-            writer.add_entry(&scalar_fallback_entry(timestamp_ns, payload))
+            writer.add_entry(&scalar_fallback_entry(timestamp_us, payload))
         }
     }
 }
@@ -207,9 +208,13 @@ fn append_entry(
 /// `trace.json` array stays parseable. Only the payload length is recorded; the
 /// raw bytes are intentionally discarded. Only reached after a structural JSON
 /// parse has already failed, so it never re-parses the bytes.
-pub(crate) fn scalar_fallback_entry(timestamp_ns: i64, payload: &[u8]) -> Value {
+pub(crate) fn scalar_fallback_entry(timestamp_us: i64, payload: &[u8]) -> Value {
     let mut map = serde_json::Map::new();
-    map.insert("timestamp_ns".to_string(), Value::from(timestamp_ns));
+    map.insert(
+        "timestamp".to_string(),
+        Value::from(microseconds_to_seconds(timestamp_us)),
+    );
+    map.insert("timestamp_us".to_string(), Value::from(timestamp_us));
     map.insert("payload_len".to_string(), Value::from(payload.len() as u64));
     Value::Object(map)
 }
@@ -292,12 +297,12 @@ mod tests {
         let (handle, join) = spawn();
 
         handle.open("t-1", tempdir.path().to_path_buf());
-        handle.append("t-1", 42, b"not-json".to_vec());
+        handle.append("t-1", 1_500_000, b"not-json".to_vec());
         handle.finish("t-1").await.expect("finish");
 
+        let raw = std::fs::read_to_string(tempdir.path().join(TRACE_JSON_FILENAME)).unwrap();
         assert_eq!(
-            read_back(tempdir.path()),
-            json!([{"timestamp_ns": 42, "payload_len": 8}]),
+            raw, r#"[{"timestamp":1.5,"timestamp_us":1500000,"payload_len":8}]"#,
             "a non-JSON payload is replaced by a length-only fallback object"
         );
         shutdown(handle, join);
