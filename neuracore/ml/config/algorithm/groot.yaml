@@ -56,3 +56,11 @@ algorithm:
   attention_head_dim: 48
   dit_output_dim: 1024
   backbone_embedding_dim: 2048
+
+  # Done head
+  done_loss_weight: 0.1        # Weight of the done BCE loss relative to the flow matching loss
+  done_head_dim: 128           # Hidden width of the done MLP
+  done_head_dropout: 0.5       # Dropout inside the done MLP
+  detach_done_encoder: false   # Stop the done loss from updating the VLM backbone and connector
+  done_use_proprio: false      # Also use joint positions and gripper opening to predict done
+  done_max_pos_weight: 50.0    # Cap on the BCE positive-class weight (1 - p) / p
