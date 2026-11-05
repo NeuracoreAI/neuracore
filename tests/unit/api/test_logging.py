@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from neuracore_types import DataType, ParallelGripperOpenAmountData
+from neuracore_types import DataType, DoneData, ParallelGripperOpenAmountData
 
 import neuracore as nc
 from neuracore.api import logging as api_logging
@@ -762,6 +762,40 @@ def test_log_joints_rounds_seconds_to_the_nearest_microsecond(
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None
+
+
+@pytest.mark.parametrize(
+    "value, expected", [(0, False), (1, True), (False, False), (True, True)]
+)
+def test_log_done_records_flag_to_daemon(monkeypatch, value, expected) -> None:
+    """log_done stores a DONE sample under the done sensor name."""
+    robot = Robot("test_robot", instance=0, org_id="org-1")
+    robot.id = "robot-id"
+    native = MagicMock()
+
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: "recording-id")
+    monkeypatch.setattr(api_logging, "_get_robot", lambda *_: robot)
+    monkeypatch.setattr(api_logging, "_publish_json_to_p2p", MagicMock())
+
+    nc.log_done(value, timestamp=12.5)
+
+    native.log_json.assert_called_once()
+    args = native.log_json.call_args.args
+    assert args[:4] == ("robot-id", 0, DataType.DONE.value, "done")
+    assert json.loads(args[4]) == DoneData(timestamp=12.5, done=expected).model_dump(
+        mode="json"
+    )
+
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
+@pytest.mark.parametrize("value", [2, -1, 0.5, 1.0, "1", None])
+def test_log_done_rejects_non_binary_values(value) -> None:
+    """log_done only accepts booleans or 0/1."""
+    with pytest.raises(ValueError, match="Done must be a boolean or 0/1"):
+        nc.log_done(value, dry_run=True)
 
 
 def test_log_parallel_gripper_target_open_amounts(
