@@ -42,6 +42,7 @@ pub struct RegisterTraceRequest {
     /// constructed before the request is encoded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<LossyVideoCodec>,
+    pub daemon_id: String,
 }
 
 /// Backend response payload for `POST /traces/batch-register`.
@@ -139,6 +140,7 @@ mod tests {
                 content_type: "video/mp4".to_string(),
             }],
             codec: Some(LossyVideoCodec::H264MediumLossyOnly),
+            daemon_id: "daemon-1".to_string(),
         };
         let body = serde_json::to_value(serde_json::json!({"traces": [request]})).unwrap();
         assert_eq!(
@@ -152,7 +154,8 @@ mod tests {
                         "filepath": "rgb/cam_0/lossy.mp4",
                         "content_type": "video/mp4"
                     }],
-                    "codec": "h264_medium"
+                    "codec": "h264_medium",
+                    "daemon_id": "daemon-1"
                 }]
             })
         );
@@ -172,6 +175,7 @@ mod tests {
                 content_type: "application/json".to_string(),
             }],
             codec: None,
+            daemon_id: "daemon-1".to_string(),
         };
         let body = serde_json::to_value(&request).unwrap();
         assert!(

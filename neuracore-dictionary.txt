@@ -445,6 +445,7 @@ quadprog
 qvel
 Qwen
 randn
+randomblob
 randperm
 rawvideo
 rclpy
