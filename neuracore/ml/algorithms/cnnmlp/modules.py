@@ -59,7 +59,24 @@ class ImageEncoder(nn.Module):
         Returns:
             torch.Tensor: Encoded features of shape (batch, output_dim)
         """
+        return self.forward_with_spatial(x)[0]
+
+    def forward_with_spatial(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode images and also return the projected spatial feature map.
+
+        Runs the same computation as ``forward``. The feature map is the
+        1x1-projected backbone output before it is flattened into ``linear``.
+
+        Args:
+            x: Image tensor of shape (batch, channels, height, width)
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Encoded features of shape
+            (batch, output_dim) and the feature map of shape
+            (batch, output_dim, H', W').
+        """
         batch = x.shape[0]
-        x = self.backbone(x)
-        x = self.proj_2d(x).view(batch, -1)
-        return self.linear(x)
+        feature_map = self.proj_2d(self.backbone(x))
+        return self.linear(feature_map.view(batch, -1)), feature_map
