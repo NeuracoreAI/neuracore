@@ -22,3 +22,11 @@ algorithm:
   # Backbone
   freeze_backbone: false   # Whether to freeze image encoder backbone
   use_resnet_stats: true   # Use ResNet normalization statistics
+
+  # Done head
+  done_loss_weight: 0.1        # Weight of the done BCE loss relative to L1 + KL
+  done_head_dim: 128           # Hidden width of the done MLP
+  done_head_dropout: 0.5       # Dropout inside the done MLP
+  detach_done_encoder: false   # Stop the done loss from updating the image encoder
+  done_use_proprio: false      # Also use joint positions and gripper opening to predict done
+  done_max_pos_weight: 50.0    # Cap on the BCE positive-class weight (1 - p) / p

@@ -5,6 +5,11 @@ from "Learning fine-grained bimanual manipulation with low-cost hardware"
 (Zhao et al., 2023). ACT uses a transformer architecture with latent variable
 modeling to predict action sequences for robot manipulation tasks.
 
+When ``DataType.DONE`` is an output, a separate classification head also
+predicts whether the task is done at the current step, from attention-pooled
+image features and optionally the joint and gripper state. Without DONE the
+model is plain ACT.
+
 Reference: Zhao, Tony Z., et al. "Learning fine-grained bimanual manipulation
 with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
 """
@@ -17,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 from neuracore_types import (
+    BatchedDoneData,
     BatchedJointData,
     BatchedNCData,
     BatchedParallelGripperOpenAmountData,
@@ -24,6 +30,7 @@ from neuracore_types import (
     CameraDataStats,
     DataItemStats,
     DataType,
+    DoneDataStats,
     GPUType,
     JointDataStats,
     ModelInitDescription,
@@ -37,6 +44,7 @@ from neuracore.ml import (
     NeuracoreModel,
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
+from neuracore.ml.core.neuracore_model import DEFAULT_OUTPUT_DATA_TYPE_ORDER
 
 from .modules import (
     ACTImageEncoder,
@@ -51,6 +59,17 @@ proprio_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
 action_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
 RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
+# Done frames are rare, so BCE up-weights them by (1 - p) / p. The default
+# multiplier stops here so one missed frame cannot dominate the loss. At 50 the
+# weight is exact down to a ~2% positive rate.
+MAX_DONE_POS_WEIGHT = 50.0
+
+_ACTION_OUTPUT_DATA_TYPES = frozenset({
+    DataType.JOINT_TARGET_POSITIONS,
+    DataType.JOINT_POSITIONS,
+    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+})
 
 
 class ACT(NeuracoreModel):
@@ -63,7 +82,15 @@ class ACT(NeuracoreModel):
     The model uses a variational autoencoder framework with separate encoders
     for visual features and action sequences, combined with a transformer
     decoder for action generation.
+
+    When ``DataType.DONE`` is an output, a lightweight MLP on spatially
+    attended vision features also predicts the current-step done flag.
+    ``done_use_proprio`` adds the current joint positions and gripper opening.
+    ``detach_done_encoder`` stops the done loss from updating any of those
+    inputs.
     """
+
+    CANONICAL_OUTPUT_DATA_TYPE_ORDER = DEFAULT_OUTPUT_DATA_TYPE_ORDER + (DataType.DONE,)
 
     def __init__(
         self,
@@ -81,12 +108,18 @@ class ACT(NeuracoreModel):
         weight_decay: float = 1e-4,
         kl_weight: float = 10.0,
         latent_dim: int = 512,
+        done_loss_weight: float = 0.1,
+        done_head_dim: int = 128,
+        done_head_dropout: float = 0.5,
+        detach_done_encoder: bool = False,
+        done_use_proprio: bool = False,
+        done_max_pos_weight: float = MAX_DONE_POS_WEIGHT,
     ):
         """Initialize the ACT model.
 
         Args:
             model_init_description: Model initialization parameters
-            hidden_dim: Hidden dimension for transformer layers
+            hidden_dim: Hidden dimension for transformer layers and done head
             num_encoder_layers: Number of transformer encoder layers
             num_decoder_layers: Number of transformer decoder layers
             nheads: Number of attention heads
@@ -99,6 +132,22 @@ class ACT(NeuracoreModel):
             weight_decay: Weight decay for optimizer
             kl_weight: Weight for KL divergence loss
             latent_dim: Dimension of latent variable space
+            done_loss_weight: Weight for the done-flag BCE loss relative to the
+                ACT L1+KL loss
+            done_head_dim: Hidden width of the done MLP. The default stays
+                narrow so the head is less able to memorize training episodes.
+            done_head_dropout: Dropout probability inside the done MLP.
+            detach_done_encoder: When true, the done loss does not flow into
+                any done-head input: image features, their position embeddings,
+                and the joint and gripper state. The done modules still train.
+                The action loss still updates the encoder.
+            done_use_proprio: When true, a zero-initialized linear map adds the
+                current normalized joint positions and gripper opening onto the
+                done logits.
+            done_max_pos_weight: Upper bound on the BCE ``pos_weight``
+                ``(1 - p) / p``, where ``p`` is the dataset share of done
+                frames. Raise it if done recall stays low; lower it if the
+                done loss is noisy or the head predicts done too early.
         """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
@@ -109,6 +158,12 @@ class ACT(NeuracoreModel):
         self.weight_decay = weight_decay
         self.kl_weight = kl_weight
         self.latent_dim = latent_dim
+        self.done_loss_weight = done_loss_weight
+        self.done_head_dim = done_head_dim
+        self.done_head_dropout = done_head_dropout
+        self.detach_done_encoder = detach_done_encoder
+        self.done_use_proprio = done_use_proprio
+        self.done_max_pos_weight = done_max_pos_weight
 
         data_stats: dict[DataType, DataItemStats] = {}
 
@@ -153,12 +208,25 @@ class ACT(NeuracoreModel):
         if state_input_dim > 0:
             self.state_embed = nn.Linear(state_input_dim, hidden_dim)
 
-        # Setup output data
+        # Continuous action outputs only (DONE is handled by the done head).
+        self.action_output_data_types = [
+            data_type
+            for data_type in self.ordered_output_data_types
+            if data_type in _ACTION_OUTPUT_DATA_TYPES
+        ]
+        if not self.action_output_data_types:
+            raise ValueError(
+                "ACT requires at least one continuous action "
+                "output type (joint or gripper positions); DONE alone is not "
+                "supported."
+            )
+
+        # Setup continuous output data for the ACT action head
         self.max_output_size = 0
         output_stats = []
         self.output_dims: dict[DataType, tuple[int, int]] = {}
         current_output_dim = 0
-        for data_type in self.ordered_output_data_types:
+        for data_type in self.action_output_data_types:
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 stats = cast(
                     list[JointDataStats],
@@ -179,7 +247,7 @@ class ACT(NeuracoreModel):
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.open_amount)
             else:
-                raise ValueError(f"Unsupported output data type: {data_type}")
+                raise ValueError(f"Unsupported action output data type: {data_type}")
 
             data_stats[data_type] = combined_stats
             output_stats.append(combined_stats)
@@ -190,6 +258,40 @@ class ACT(NeuracoreModel):
             )
             current_output_dim += dim
             self.max_output_size += dim
+
+        # Setup DONE flag dims (classification head, not decoded)
+        self.done_slot_dims: list[int] = []
+        self.done_dim = 0
+        self.done_head: nn.Sequential | None = None
+        self.done_proprio_to_logits: nn.Linear | None = None
+        self.done_proprio_slices: list[tuple[int, int]] = []
+        if DataType.DONE in self.output_data_types:
+            done_stats = cast(
+                list[DoneDataStats],
+                self.output_dataset_statistics[DataType.DONE],
+            )
+            done_means: list[float] = []
+            for stat in done_stats:
+                slot_dim = len(stat.done.mean)
+                self.done_slot_dims.append(slot_dim)
+                self.done_dim += slot_dim
+                done_means.extend(stat.done.mean.tolist())
+            if self.done_dim == 0:
+                raise ValueError(
+                    "DONE is configured as an output but has zero feature "
+                    "dimensions in the dataset statistics."
+                )
+            # Done labels are 0/1 and rare, so the mean is the positive rate and
+            # pos_weight = (1 - p) / p rebalances BCE toward the positive class.
+            # Cap it at done_max_pos_weight so a very small p cannot make one
+            # missed frame dominate the batch.
+            pos_rate = torch.tensor(done_means, dtype=torch.float32).clamp(
+                1e-4, 1.0 - 1e-4
+            )
+            pos_weight = ((1.0 - pos_rate) / pos_rate).clamp(
+                max=self.done_max_pos_weight
+            )
+            self.register_buffer("done_pos_weight", pos_weight)
 
         # Action embedding
         self.action_embed = nn.Linear(self.max_output_size, hidden_dim)
@@ -207,6 +309,7 @@ class ACT(NeuracoreModel):
         )
 
         # Vision components
+        self.vision_cond_dim = 0
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
                 list[CameraDataStats],
@@ -224,6 +327,45 @@ class ACT(NeuracoreModel):
                     std = std_c_h_w.mean(axis=(1, 2)).tolist()
                 self.image_normalizers.append(T.Normalize(mean=mean, std=std))
                 self.image_encoders.append(ACTImageEncoder(output_dim=hidden_dim))
+            self.vision_cond_dim = hidden_dim * max_cameras
+
+        if self.done_dim > 0:
+            if self.vision_cond_dim == 0:
+                raise ValueError("ACT requires RGB_IMAGES input to predict DONE flags.")
+            # Score starts at zero so the spatial pool begins as a uniform
+            # average, then learns which locations matter for the done flag.
+            self.done_spatial_score = nn.Linear(hidden_dim, 1)
+            nn.init.zeros_(self.done_spatial_score.weight)
+            nn.init.zeros_(self.done_spatial_score.bias)
+            self.done_head = nn.Sequential(
+                nn.Linear(self.vision_cond_dim, self.done_head_dim),
+                nn.ReLU(),
+                nn.Dropout(self.done_head_dropout),
+                nn.Linear(self.done_head_dim, self.done_dim),
+            )
+            if self.done_use_proprio:
+                self.done_proprio_slices = [
+                    self.proprio_dims[data_type]
+                    for data_type in (
+                        DataType.JOINT_POSITIONS,
+                        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+                    )
+                    if data_type in self.proprio_dims
+                ]
+                done_proprio_dim = sum(
+                    end - start for start, end in self.done_proprio_slices
+                )
+                if done_proprio_dim == 0:
+                    raise ValueError(
+                        "done_use_proprio requires JOINT_POSITIONS or "
+                        "PARALLEL_GRIPPER_OPEN_AMOUNTS inputs."
+                    )
+                # Zero weights keep the first step identical to the vision head.
+                # Joint and gripper values are added onto the logits, not mixed
+                # inside the vision MLP.
+                self.done_proprio_to_logits = nn.Linear(done_proprio_dim, self.done_dim)
+                nn.init.zeros_(self.done_proprio_to_logits.weight)
+                nn.init.zeros_(self.done_proprio_to_logits.bias)
 
         # CLS token embedding for latent encoder
         self.cls_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
@@ -468,7 +610,7 @@ class ACT(NeuracoreModel):
         batched_nc_data: list[BatchedNCData],
         camera_images_mask: torch.FloatTensor,
         latent: torch.FloatTensor,
-    ) -> torch.FloatTensor:
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]:
         """Encode visual inputs with latent and proprioceptive features.
 
         Processes RGB images through vision encoders and combines them with
@@ -481,7 +623,9 @@ class ACT(NeuracoreModel):
             latent: Latent features from action encoding
 
         Returns:
-            torch.FloatTensor: Encoded visual and proprioceptive memory
+            tuple[torch.FloatTensor, torch.FloatTensor | None]: Encoded visual
+            and proprioceptive memory, plus spatially attended vision features
+            ``(B, vision_cond_dim)`` for the done head, or None without one.
         """
         batched_rgb_data = cast(list[BatchedRGBData], batched_nc_data)
         batch_size = latent.shape[0]
@@ -500,6 +644,16 @@ class ACT(NeuracoreModel):
             features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
             image_features.append(features)
             image_pos.append(pos)
+
+        # Attend over each camera's feature map for the done head.
+        # A masked camera is already zeros, so its pooled vector stays zero.
+        vision_cond = None
+        if self.done_head is not None:
+            pooled = [
+                self._spatial_attention_pool(*self._done_encoder_tensors(features, pos))
+                for features, pos in zip(image_features, image_pos)
+            ]
+            vision_cond = torch.cat(pooled, dim=-1)  # [B, hidden_dim * num_cameras]
 
         # Combine image features and positions
         combined_features = torch.cat(image_features, dim=3)  # [B, C, H, W]
@@ -538,7 +692,50 @@ class ACT(NeuracoreModel):
         # Encode
         memory = self.transformer["encoder"](src)
 
-        return memory
+        return memory, vision_cond
+
+    def _done_encoder_tensors(
+        self, features: torch.Tensor, pos: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the feature map the done head is allowed to train.
+
+        With ``detach_done_encoder``, the map is detached so the done loss
+        stops before the image encoder. The action encoder still receives the
+        original tensors. The same flag detaches the joint and gripper input.
+
+        Args:
+            features: Feature map of shape (B, C, H, W).
+            pos: Position embeddings of shape (B, C, H, W).
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Features and position embeddings
+            for the done spatial pool.
+        """
+        if self.detach_done_encoder:
+            return features.detach(), pos.detach()
+        return features, pos
+
+    def _spatial_attention_pool(
+        self, features: torch.Tensor, pos: torch.Tensor
+    ) -> torch.Tensor:
+        """Pool a feature map by attending over its spatial locations.
+
+        The score uses features plus their position embeddings, and the pooled
+        vector is a weighted sum of the features. A zero score layer is a
+        uniform average, which is where training starts.
+
+        Args:
+            features: Feature map of shape (B, C, H, W).
+            pos: Position embeddings of shape (B, C, H, W).
+
+        Returns:
+            torch.Tensor: Pooled features of shape (B, C).
+        """
+        tokens = features.flatten(2).transpose(1, 2)  # (B, HW, C)
+        pos_tokens = pos.flatten(2).transpose(1, 2)
+        scores = self.done_spatial_score(tokens + pos_tokens).squeeze(-1)
+        weights = torch.softmax(scores, dim=-1)
+        return torch.einsum("bn,bnc->bc", weights, tokens)
 
     def _encode_proprio_only(
         self,
@@ -623,7 +820,7 @@ class ACT(NeuracoreModel):
         logvar: torch.FloatTensor,
         batch: BatchedInferenceInputs,
         proprio_state: torch.FloatTensor | None = None,
-    ) -> torch.FloatTensor:
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]:
         """Predict action sequence from latent distribution and observations.
 
         Args:
@@ -633,7 +830,8 @@ class ACT(NeuracoreModel):
             proprio_state: Pre-computed proprio features; recomputed if None
 
         Returns:
-            torch.FloatTensor: Predicted action sequence
+            tuple[torch.FloatTensor, torch.FloatTensor | None]: Predicted action
+            sequence and optional pooled vision features for the done head.
         """
         # Sample latent
         latent_sample = self._reparametrize(mu, logvar)
@@ -648,7 +846,7 @@ class ACT(NeuracoreModel):
             DataType.RGB_IMAGES in self.input_data_types
             and DataType.RGB_IMAGES in batch.inputs
         ):
-            memory = self._encode_visual(
+            memory, vision_cond = self._encode_visual(
                 proprio_state,
                 batch.inputs[DataType.RGB_IMAGES],
                 batch.inputs_mask[DataType.RGB_IMAGES],
@@ -656,10 +854,15 @@ class ACT(NeuracoreModel):
             )
         else:
             memory = self._encode_proprio_only(proprio_state, latent)
+            vision_cond = (
+                torch.zeros(len(batch), self.vision_cond_dim, device=self.device)
+                if self.done_head is not None
+                else None
+            )
 
         # Decode actions
         action_preds = self._decode(latent, memory)
-        return action_preds
+        return action_preds, vision_cond
 
     def forward(
         self, batch: BatchedInferenceInputs
@@ -670,19 +873,44 @@ class ACT(NeuracoreModel):
             batch: Input batch with observations
 
         Returns:
-            dict[DataType, list[BatchedNCData]]: Model predictions with action sequences
+            dict[DataType, list[BatchedNCData]]: Model predictions with action
+            sequences and optional done-flag probabilities.
         """
         batch_size = len(batch)
         mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
         logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
-        action_preds = self._predict_action(mu, logvar, batch)
+        proprio_state = self._combine_proprio(batch)
+        action_preds, vision_cond = self._predict_action(
+            mu, logvar, batch, proprio_state
+        )
 
         # (B, T, action_dim)
-        predictions = self.action_normalizer.unnormalize(action_preds)
+        outputs = self._split_outputs(self.action_normalizer.unnormalize(action_preds))
 
+        if self.done_head is not None:
+            assert vision_cond is not None
+            done_probs = torch.sigmoid(
+                self._predict_done_logits(vision_cond, proprio_state)
+            )
+            outputs[DataType.DONE] = self._split_done_outputs(done_probs)
+
+        return outputs
+
+    def _split_outputs(
+        self, predictions: torch.Tensor
+    ) -> dict[DataType, list[BatchedNCData]]:
+        """Split an unnormalized action tensor into per-sensor batched outputs.
+
+        Args:
+            predictions: Unnormalized actions with shape (B, T, action_dim).
+
+        Returns:
+            dict[DataType, list[BatchedNCData]]: One entry per output sensor,
+            ordered by the tensor column layout in ``self.output_dims``.
+        """
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
-        for data_type in self.ordered_output_data_types:
+        for data_type in self.action_output_data_types:
             start_idx, end_idx = self.output_dims[data_type]
             output_width = end_idx - start_idx
             dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
@@ -709,11 +937,137 @@ class ACT(NeuracoreModel):
 
         return output_tensors
 
+    def _predict_done_logits(
+        self,
+        vision_cond: torch.Tensor,
+        proprio_state: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Predict the current-step done flag.
+
+        The MLP reads pooled vision features. When ``done_use_proprio`` is set,
+        a linear map adds the current joint positions and gripper opening onto
+        those logits. ``detach_done_encoder`` detaches that state as well as
+        the image features.
+
+        Args:
+            vision_cond: Pooled image features with shape (B, vision_cond_dim).
+            proprio_state: Normalized proprioception with shape (B, state_dim),
+                or None when the model has no proprioception.
+
+        Returns:
+            torch.Tensor: Done logits with shape (B, 1, done_dim).
+        """
+        assert self.done_head is not None
+        logits = self.done_head(vision_cond)
+        if self.done_proprio_to_logits is not None:
+            if proprio_state is None:
+                source_dim = max(end for _, end in self.done_proprio_slices)
+                proprio_state = torch.zeros(
+                    vision_cond.shape[0],
+                    source_dim,
+                    device=vision_cond.device,
+                    dtype=vision_cond.dtype,
+                )
+            proprio = torch.cat(
+                [
+                    proprio_state[:, start:end]
+                    for start, end in self.done_proprio_slices
+                ],
+                dim=-1,
+            )
+            if self.detach_done_encoder:
+                proprio = proprio.detach()
+            logits = logits + self.done_proprio_to_logits(proprio)
+        return logits.unsqueeze(1)
+
+    def _split_done_outputs(self, done_probs: torch.Tensor) -> list[BatchedDoneData]:
+        """Split a concatenated done probability tensor into per-slot outputs.
+
+        Args:
+            done_probs: Probabilities with shape (B, T, done_dim).
+
+        Returns:
+            list[BatchedDoneData]: One entry per DONE embodiment slot.
+        """
+        batched_outputs: list[BatchedDoneData] = []
+        start = 0
+        for slot_dim in self.done_slot_dims:
+            end = start + slot_dim
+            batched_outputs.append(BatchedDoneData(done=done_probs[:, :, start:end]))
+            start = end
+        return batched_outputs
+
+    def _build_done_mask(self, batch: BatchedTrainingSamples) -> torch.Tensor:
+        """Build a per-feature mask for DONE targets.
+
+        Expands the per-slot mask ``(B, num_slots)`` across each slot's feature
+        width so it aligns with concatenated done targets ``(B, done_dim)``.
+
+        Args:
+            batch: Training batch.
+
+        Returns:
+            torch.Tensor: Mask with shape (B, done_dim).
+        """
+        if DataType.DONE not in batch.outputs_mask:
+            return torch.zeros(batch.batch_size, self.done_dim, device=self.device)
+
+        slot_mask = batch.outputs_mask[DataType.DONE]  # (B, num_slots)
+        expanded: list[torch.Tensor] = []
+        for slot_idx, slot_dim in enumerate(self.done_slot_dims):
+            expanded.append(slot_mask[:, slot_idx : slot_idx + 1].expand(-1, slot_dim))
+        return torch.cat(expanded, dim=-1)
+
+    @staticmethod
+    def _done_classification_metrics(
+        done_logits: torch.Tensor,
+        done_targets: torch.Tensor,
+        done_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Score the current-step done flag at probability 0.5.
+
+        A logit at or above zero is a positive prediction. Masked features
+        are left out of every count. An empty denominator is reported as
+        zero: no predicted positives gives precision 0, and no labeled
+        positives gives recall 0.
+
+        Args:
+            done_logits: Logits with shape (B, 1, D).
+            done_targets: Targets with shape (B, 1, D), in ``[0, 1]``.
+            done_mask: Feature mask with shape (B, D).
+
+        Returns:
+            dict[str, torch.Tensor]: ``done_accuracy``, ``done_precision``,
+            and ``done_recall``.
+        """
+        targets = done_targets.clamp(0.0, 1.0)
+        predicted_positive = (done_logits >= 0).to(dtype=targets.dtype)
+        actual_positive = (targets >= 0.5).to(dtype=targets.dtype)
+        mask = done_mask.unsqueeze(1).to(dtype=targets.dtype)
+
+        true_positive = (predicted_positive * actual_positive * mask).sum()
+        predicted_positive_count = (predicted_positive * mask).sum()
+        actual_positive_count = (actual_positive * mask).sum()
+        correct = (
+            (predicted_positive == actual_positive).to(dtype=targets.dtype) * mask
+        ).sum()
+        evaluated = mask.sum()
+        return {
+            "done_accuracy": correct / torch.clamp(evaluated, min=1.0),
+            "done_precision": true_positive
+            / torch.clamp(predicted_positive_count, min=1.0),
+            "done_recall": true_positive / torch.clamp(actual_positive_count, min=1.0),
+        }
+
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
 
         Encodes action sequences to latent space, predicts actions, and computes
-        L1 reconstruction loss plus KL divergence regularization.
+        L1 reconstruction loss plus KL divergence regularization. When DONE
+        outputs are configured, also computes a masked BCE loss on the current
+        done flag, plus accuracy, precision, and recall at probability 0.5.
+        ``pos_weight`` comes from the dataset positive rate and is capped at
+        ``done_max_pos_weight`` so rare positives cannot dominate.
 
         Args:
             batch: Training batch with inputs and targets
@@ -729,7 +1083,7 @@ class ACT(NeuracoreModel):
 
         # Extract target actions; zero-fill types absent from this batch
         action_targets = []
-        for data_type in self.ordered_output_data_types:
+        for data_type in self.action_output_data_types:
             start, end = self.output_dims[data_type]
             dim = end - start
             if data_type not in batch.outputs:
@@ -772,7 +1126,7 @@ class ACT(NeuracoreModel):
                         device=self.device,
                     )
                 )
-                for data_type in self.ordered_output_data_types
+                for data_type in self.action_output_data_types
             ],
             dim=-1,
         )  # (B, max_output_size)
@@ -794,7 +1148,9 @@ class ACT(NeuracoreModel):
             pred_sequence_mask,
         )
 
-        action_preds = self._predict_action(mu, logvar, inference_sample, proprio_state)
+        action_preds, vision_cond = self._predict_action(
+            mu, logvar, inference_sample, proprio_state
+        )
         target_actions = self.action_normalizer.normalize(action_data)
 
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
@@ -811,6 +1167,41 @@ class ACT(NeuracoreModel):
             "l1_loss": l1_loss,
             "kl_loss": kl_loss,
         }
+
+        if self.done_head is not None:
+            assert vision_cond is not None
+            done_logits = self._predict_done_logits(
+                vision_cond, proprio_state
+            )  # (B, 1, D)
+
+            if DataType.DONE in batch.outputs:
+                done_outputs = cast(list[BatchedDoneData], batch.outputs[DataType.DONE])
+                done_targets = torch.cat(
+                    [item.done for item in done_outputs], dim=-1
+                )  # (B, T, D)
+                # The first step of the chunk is the current action step.
+                current_targets = done_targets[:, :1]
+            else:
+                current_targets = torch.zeros_like(done_logits)
+
+            done_mask = self._build_done_mask(batch)  # (B, D)
+            bce = F.binary_cross_entropy_with_logits(
+                done_logits,
+                current_targets.clamp(0.0, 1.0),
+                reduction="none",
+                pos_weight=self.done_pos_weight,
+            )
+            done_bce_loss = (bce * done_mask.unsqueeze(1)).sum() / torch.clamp(
+                done_mask.sum(), min=1.0
+            )
+            weighted_done_loss = self.done_loss_weight * done_bce_loss
+            losses["done_bce_loss"] = weighted_done_loss
+            metrics["done_bce_loss"] = done_bce_loss
+            metrics.update(
+                self._done_classification_metrics(
+                    done_logits, current_targets, done_mask
+                )
+            )
 
         return BatchedTrainingOutputs(
             losses=losses,
@@ -857,6 +1248,7 @@ class ACT(NeuracoreModel):
             DataType.JOINT_TARGET_POSITIONS,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+            DataType.DONE,
         }
 
     @staticmethod
