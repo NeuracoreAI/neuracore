@@ -12,3 +12,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 <!-- Append your summary here -->
 
 Timestamps are now kept as integer microseconds. Every `timestamp` argument still takes float seconds, and the SDK rounds it once to microseconds. Logged samples, stored traces and synchronized data carry `timestamp_us` beside `timestamp`, and `timestamp` is the same instant rounded to the microsecond. The SDK now needs pydantic 2.12 or later. Two timestamps that round to the same microsecond on one stream are rejected as not increasing, and a timestamp that is not finite or is out of range raises `ValueError`.
+
+New built-in algorithm `act_with_done`: ACT with a head that predicts the episode done flag logged with `nc.log_done()`. Add `DONE` to the output data types (RGB images are required) to train it. The head is a small classifier on attention-pooled image features, trained with a class-balanced BCE loss next to ACT's action loss; `done_loss_weight`, `done_max_pos_weight`, `detach_done_encoder` and `done_use_proprio` control it. At inference the model returns the done probability for the current step.

@@ -1,0 +1,32 @@
+# @package _global_
+algorithm:
+  _target_: neuracore.ml.algorithms.act_with_done.act_with_done.ACTWithDone
+
+  # Transformer architecture
+  hidden_dim: 512          # Hidden dimension for transformer layers
+  num_encoder_layers: 4    # Number of transformer encoder layers
+  num_decoder_layers: 1    # Number of transformer decoder layers
+  nheads: 8                # Number of attention heads
+  dim_feedforward: 3200    # Feedforward network dimension
+  dropout: 0.1             # Dropout probability
+
+  # Latent variable
+  latent_dim: 512          # Dimension of latent variable space
+  kl_weight: 10.0          # Weight for KL divergence loss
+
+  # Learning rates
+  lr: 1e-4                 # Learning rate for main parameters
+  lr_backbone: 1e-5        # Learning rate for image encoder backbone
+  weight_decay: 1e-4       # AdamW weight decay
+
+  # Backbone
+  freeze_backbone: false   # Whether to freeze image encoder backbone
+  use_resnet_stats: true   # Use ResNet normalization statistics
+
+  # Done head
+  done_loss_weight: 0.1        # Weight of the done BCE loss relative to L1 + KL
+  done_head_dim: 128           # Hidden width of the done MLP
+  done_head_dropout: 0.5       # Dropout inside the done MLP
+  detach_done_encoder: false   # Stop the done loss from updating the image encoder
+  done_use_proprio: false      # Also use joint positions and gripper opening to predict done
+  done_max_pos_weight: 50.0    # Cap on the BCE positive-class weight (1 - p) / p
