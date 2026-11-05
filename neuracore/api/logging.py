@@ -17,6 +17,7 @@ from neuracore_types import (
     Custom1DData,
     DataType,
     DepthCameraData,
+    DoneData,
     EndEffectorPoseData,
     JointData,
     LanguageData,
@@ -73,6 +74,8 @@ class JointStreamBinding:
 
 
 _JOINT_SAMPLE_SIZE = 8
+# Sensor name the episode done flag is stored under.
+_DONE_STREAM_NAME = "done"
 
 
 def _smoke_validate_joint_values(joint_data: dict[str, float]) -> None:
@@ -166,6 +169,7 @@ def _publish_json_to_p2p(
         | ParallelGripperOpenAmountData
         | LanguageData
         | PointCloudData
+        | DoneData
     ),
 ) -> None:
     """Publish JSON data to P2P streaming.
@@ -199,6 +203,7 @@ def _record_json_to_daemon(
         | ParallelGripperOpenAmountData
         | LanguageData
         | PointCloudData
+        | DoneData
     ),
     timestamp_us: int,
 ) -> None:
@@ -567,6 +572,58 @@ def log_custom_1d(
         robot, DataType.CUSTOM_1D, storage_name, custom_data, timestamp_us
     )
     _publish_json_to_p2p(robot, str_id, DataType.CUSTOM_1D, custom_data)
+
+
+def log_done(
+    done: bool | int,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log the episode done flag for a robot.
+
+    Log ``done=0`` alongside each frame while the task is running and
+    ``done=1`` once it is complete, so policies can learn when to stop.
+
+    Args:
+        done: Done flag (False/0 = running, True/1 = complete)
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If done is not a boolean or 0/1
+    """
+    if not isinstance(done, (bool, np.bool_)) and not (
+        isinstance(done, (int, np.integer)) and done in (0, 1)
+    ):
+        raise ValueError(f"Done must be a boolean or 0/1. {done!r} is not.")
+    timestamp_us = resolve_timestamp_us(timestamp)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
+    str_id = f"{DataType.DONE.value}:{_DONE_STREAM_NAME}"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(
+            data_type=DataType.DONE, data_type_name=_DONE_STREAM_NAME
+        )
+        robot.add_data_stream(str_id, stream)
+
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
+
+    done_data = DoneData(timestamp_us=timestamp_us, done=bool(done))
+    stream.log(done_data, recording_epoch=robot._recording_epoch())
+    _record_json_to_daemon(
+        robot, DataType.DONE, _DONE_STREAM_NAME, done_data, timestamp_us
+    )
+    _publish_json_to_p2p(robot, str_id, DataType.DONE, done_data)
 
 
 def log_joint_positions(
