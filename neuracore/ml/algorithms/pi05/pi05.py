@@ -51,7 +51,6 @@ from neuracore.ml import (
     NeuracoreModel,
 )
 from neuracore.ml.algorithm_utils.normalizer import QuantileNormalizer
-from neuracore.ml.core.neuracore_model import DEFAULT_OUTPUT_DATA_TYPE_ORDER
 
 from .modules import PI05Policy
 from .utils import PI05Config, _load_tokenizer, build_lr_lambda, pad_vector
@@ -109,8 +108,6 @@ class Pi05(NeuracoreModel):
     the current joint positions and gripper opening. ``detach_done_encoder``
     stops the done loss from updating any of those inputs.
     """
-
-    CANONICAL_OUTPUT_DATA_TYPE_ORDER = DEFAULT_OUTPUT_DATA_TYPE_ORDER + (DataType.DONE,)
 
     def __init__(
         self,
