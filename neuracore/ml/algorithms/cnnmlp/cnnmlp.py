@@ -54,7 +54,6 @@ from neuracore.ml.algorithm_utils.modules import (
     PoseEncoder,
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
-from neuracore.ml.core.neuracore_model import DEFAULT_OUTPUT_DATA_TYPE_ORDER
 from neuracore.ml.utils.hf_hub_retry import call_with_hf_hub_retry
 from neuracore.ml.utils.pretrained_cache import ensure_pretrained_model
 
@@ -117,8 +116,6 @@ class CNNMLP(NeuracoreModel):
     ``detach_done_encoder`` stops the done loss from updating any of those
     inputs.
     """
-
-    CANONICAL_OUTPUT_DATA_TYPE_ORDER = DEFAULT_OUTPUT_DATA_TYPE_ORDER + (DataType.DONE,)
 
     @staticmethod
     def _combine_joint_stats(stats: list[JointDataStats]) -> DataItemStats:
