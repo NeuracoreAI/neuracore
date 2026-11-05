@@ -46,3 +46,11 @@ algorithm:
   gradient_checkpointing: True         # Saves VRAM (~30% extra compute). Enable if OOM during training.
   compile_model: False                 # JIT-compile model (PyTorch 2.0+). One-time compile overhead on first step.
   compile_mode: "max-autotune"         # "max-autotune" for inference deployments; "default" is safe for training.
+
+  # Done head
+  done_loss_weight: 0.1        # Weight of the done BCE loss relative to the flow-matching MSE loss
+  done_head_dim: 128           # Hidden width of the done MLP
+  done_head_dropout: 0.5       # Dropout inside the done MLP
+  detach_done_encoder: False   # Stop the done loss from updating the vision tower
+  done_use_proprio: False      # Also use joint positions and gripper opening to predict done
+  done_max_pos_weight: 50.0    # Cap on the BCE positive-class weight (1 - p) / p

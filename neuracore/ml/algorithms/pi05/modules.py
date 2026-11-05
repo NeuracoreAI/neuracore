@@ -197,12 +197,31 @@ class PI05Policy(nn.Module):
         )
         return time.to(dtype=torch.float32, device=device)
 
+    def embed_images(self, images: list[Tensor]) -> list[Tensor]:
+        """Embed each camera image with the vision tower and projector.
+
+        These are the image tokens that start the prefix sequence. They depend
+        on the observation only, so the done head can read them as well.
+
+        Args:
+            images: List of image tensors [B, C, H, W] per camera
+
+        Returns:
+            List of image token embeddings [B, num_patches, width] per camera.
+        """
+
+        def image_embed_func(img: Tensor) -> Tensor:
+            return self.paligemma_with_expert.embed_image(img)
+
+        return [self._apply_checkpoint(image_embed_func, img) for img in images]
+
     def _embed_prefix(
         self,
         images: list[Tensor],
         img_masks: list[Tensor],
         lang_tokens: Tensor,
         lang_masks: Tensor,
+        image_embs: list[Tensor] | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Embed image and language inputs for the prefix sequence.
 
@@ -211,6 +230,8 @@ class PI05Policy(nn.Module):
             img_masks: List of image masks [B] per camera
             lang_tokens: Language token IDs [B, L]
             lang_masks: Language attention mask [B, L]
+            image_embs: Optional image embeddings from ``embed_images`` for the
+                same images, so the vision tower is not run twice.
 
         Returns:
             Tuple of (embeddings, padding_masks, attention_masks).
@@ -219,12 +240,10 @@ class PI05Policy(nn.Module):
         pad_masks = []
         att_masks = []
 
-        for img, img_mask in zip(images, img_masks, strict=True):
+        if image_embs is None:
+            image_embs = self.embed_images(images)
 
-            def image_embed_func(img: Tensor) -> Tensor:
-                return self.paligemma_with_expert.embed_image(img)
-
-            img_emb = self._apply_checkpoint(image_embed_func, img)
+        for img_emb, img_mask in zip(image_embs, img_masks, strict=True):
             bsize, num_img_embs = img_emb.shape[:2]
 
             embs.append(img_emb)
@@ -316,6 +335,7 @@ class PI05Policy(nn.Module):
         actions: Tensor,
         noise: Tensor | None = None,
         time: Tensor | None = None,
+        image_embs: list[Tensor] | None = None,
     ) -> Tensor:
         """Compute flow matching loss for training.
 
@@ -327,6 +347,8 @@ class PI05Policy(nn.Module):
             actions: Target action sequence [B, chunk_size, action_dim]
             noise: Optional pre-sampled noise
             time: Optional pre-sampled diffusion time
+            image_embs: Optional precomputed image embeddings from
+                ``embed_images``
 
         Returns:
             Per-element MSE loss [B, chunk_size, action_dim].
@@ -341,7 +363,7 @@ class PI05Policy(nn.Module):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self._embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
+            images, img_masks, lang_tokens, lang_masks, image_embs
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
             self._embed_suffix(x_t, time)
@@ -406,6 +428,7 @@ class PI05Policy(nn.Module):
         lang_masks: Tensor,
         noise: Tensor | None = None,
         num_steps: int | None = None,
+        image_embs: list[Tensor] | None = None,
     ) -> Tensor:
         """Sample action sequence via Euler integration.
 
@@ -418,6 +441,8 @@ class PI05Policy(nn.Module):
             lang_masks: Language attention mask [B, L]
             noise: Optional initial noise
             num_steps: Number of Euler steps (default: config.num_inference_steps)
+            image_embs: Optional precomputed image embeddings from
+                ``embed_images``
 
         Returns:
             Sampled action sequence [B, chunk_size, action_dim].
@@ -437,7 +462,7 @@ class PI05Policy(nn.Module):
             noise = self._sample_noise(actions_shape, device)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self._embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
+            images, img_masks, lang_tokens, lang_masks, image_embs
         )
         prefix_att_2d_masks = _make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
