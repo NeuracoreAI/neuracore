@@ -41,7 +41,10 @@ class DiffusionPolicyImageEncoder(nn.Module):
             use_pretrained_weights=use_pretrained_weights
         )
         # ResNet18 without avgpool and fc layers outputs (512, 7, 7) for 224x224 input
-        self.pool = SpatialSoftmax((512, 7, 7), num_kp=spatial_softmax_num_keypoints)
+        self.feature_map_channels = 512
+        self.pool = SpatialSoftmax(
+            (self.feature_map_channels, 7, 7), num_kp=spatial_softmax_num_keypoints
+        )
         self.feature_dim = feature_dim
         self.out = nn.Linear(spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
@@ -68,11 +71,28 @@ class DiffusionPolicyImageEncoder(nn.Module):
         Returns:
             features: Encoded features of shape (batch, feature_dim).
         """
+        features, _ = self.forward_with_feature_map(x)
+        return features
+
+    def forward_with_feature_map(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode images and also return the backbone feature map.
+
+        Args:
+            x: Image tensor of shape (batch, channels, height, width).
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Encoded features of shape
+            (batch, feature_dim) and the backbone feature map of shape
+            (batch, feature_map_channels, H', W') they were pooled from.
+        """
         # Extract backbone feature.
-        x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
+        feature_map = self.backbone(x)
+        x = torch.flatten(self.pool(feature_map), start_dim=1)
         # Final linear layer with non-linearity.
         x = self.relu(self.out(x))
-        return x
+        return x, feature_map
 
 
 class SpatialSoftmax(nn.Module):
