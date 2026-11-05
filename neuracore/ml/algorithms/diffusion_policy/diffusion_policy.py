@@ -41,7 +41,6 @@ from neuracore.ml import (
     NeuracoreModel,
 )
 from neuracore.ml.algorithm_utils.normalizer import MinMaxNormalizer
-from neuracore.ml.core.neuracore_model import DEFAULT_OUTPUT_DATA_TYPE_ORDER
 
 from .modules import DiffusionConditionalUnet1d, DiffusionPolicyImageEncoder
 
@@ -120,8 +119,6 @@ class DiffusionPolicy(NeuracoreModel):
     ``detach_done_encoder`` stops the done loss from updating any of those
     inputs.
     """
-
-    CANONICAL_OUTPUT_DATA_TYPE_ORDER = DEFAULT_OUTPUT_DATA_TYPE_ORDER + (DataType.DONE,)
 
     def __init__(
         self,
