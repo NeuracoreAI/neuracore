@@ -7,11 +7,12 @@ integrates with the signalling server to route messages.
 
 import asyncio
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 from neuracore_types import RobotInstanceIdentifier
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
@@ -32,6 +33,7 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.signalling_events_consumer import (
     SignallingEventsConsumer,
 )
+from neuracore.core.streaming.p2p.signalling_session import SignallingSession
 from neuracore.core.utils.http_session import retry_connection_failures
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
@@ -70,6 +72,10 @@ class StreamManagerOrchestrator(
         self.consumer_managers: dict[
             RobotInstanceIdentifier, ClientConsumerStreamManager
         ] = {}
+        # Each provided robot instance has its own stream.
+        self.provider_consumers: dict[
+            RobotInstanceIdentifier, SignallingEventsConsumer
+        ] = {}
 
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
@@ -80,6 +86,13 @@ class StreamManagerOrchestrator(
             middlewares=(retry_connection_failures,),
         )
 
+        self._org_session = SignallingSession(
+            api_url=API_URL,
+            org_id=self.org_id,
+            auth=self.auth,
+            client_session=self.client_session,
+        )
+        self._region_endpoints: list[str] | None = None
         self.signalling_consumer = SignallingEventsConsumer(
             manager_factory=self,
             org_id=self.org_id,
@@ -87,13 +100,30 @@ class StreamManagerOrchestrator(
             auth=self.auth,
             client_session=self.client_session,
             enabled_manager=EnabledManager.any_enabled(
-                get_provide_live_data_enabled_manager(),
                 get_consume_live_data_enabled_manager(),
             ),
         )
         self._closed = False
         self._logout_listener = self._on_logout
         self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
+
+    async def region_endpoints(self) -> list[str]:
+        """Return the organization's signalling regions, asked once."""
+        if self._region_endpoints is None:
+            try:
+                await self._org_session.headers()
+            except ClientResponseError as error:
+                # A backend without the token route has no regions.
+                if error.status != 404:
+                    raise
+            self._region_endpoints = self._org_session.region_endpoints
+        return self._region_endpoints
+
+    def own_stream_ids(self) -> set[str]:
+        """Return the stream IDs of this process, which its viewers skip."""
+        return {self.signalling_consumer.local_stream_id} | {
+            consumer.local_stream_id for consumer in self.provider_consumers.values()
+        }
 
     def _on_logout(self) -> None:
         """Schedule teardown on the streaming event loop."""
@@ -109,6 +139,10 @@ class StreamManagerOrchestrator(
         self._remove_logout_listener()
 
         self.signalling_consumer.close()
+        provider_consumers = list(self.provider_consumers.values())
+        self.provider_consumers.clear()
+        for consumer in provider_consumers:
+            consumer.close()
 
         provider_managers = list(self.provider_managers.values())
         consumer_managers = list(self.consumer_managers.values())
@@ -162,14 +196,18 @@ class StreamManagerOrchestrator(
             type: The type of manager to remove. If None, removes both.
         """
         key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=robot_instance)
+        # Out of the maps before closing: closing calls back into this method.
         if type is None or type == ManagerType.CONSUMER:
-            if key in self.consumer_managers:
-                self.consumer_managers[key].close()
-                del self.consumer_managers[key]
+            consumer_manager = self.consumer_managers.pop(key, None)
+            if consumer_manager is not None:
+                consumer_manager.close()
         if type is None or type == ManagerType.PROVIDER:
-            if key in self.provider_managers:
-                self.provider_managers[key].close()
-                del self.provider_managers[key]
+            provider_manager = self.provider_managers.pop(key, None)
+            consumer = self.provider_consumers.pop(key, None)
+            if provider_manager is not None:
+                provider_manager.close()
+            if consumer is not None:
+                consumer.close()
 
     def get_consumer_manager(
         self, robot_id: str, robot_instance: int
@@ -221,8 +259,35 @@ class StreamManagerOrchestrator(
         """
         key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=robot_instance)
         if key not in self.provider_managers:
+            consumer = SignallingEventsConsumer(
+                manager_factory=self,
+                org_id=self.org_id,
+                loop=self.loop,
+                auth=self.auth,
+                client_session=self.client_session,
+                enabled_manager=EnabledManager.derived_manger(
+                    get_provide_live_data_enabled_manager(), loop=self.loop
+                ),
+                signalling_session=SignallingSession(
+                    api_url=API_URL,
+                    org_id=self.org_id,
+                    auth=self.auth,
+                    client_session=self.client_session,
+                    robot_id=robot_id,
+                    robot_instance=robot_instance,
+                ),
+                regions=self.region_endpoints,
+            )
+            self.provider_consumers[key] = consumer
+            # A stream that stops for good takes its manager with it.
+            consumer.enabled_manager.add_listener(
+                EnabledManager.DISABLED,
+                lambda: self.remove_manager(
+                    robot_id, robot_instance, ManagerType.PROVIDER
+                ),
+            )
             self.provider_managers[key] = ClientProviderStreamManager(
-                local_stream_id=self.signalling_consumer.local_stream_id,
+                local_stream_id=consumer.local_stream_id,
                 robot_id=robot_id,
                 robot_instance=robot_instance,
                 org_id=self.org_id,

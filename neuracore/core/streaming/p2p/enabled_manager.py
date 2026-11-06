@@ -65,8 +65,9 @@ class EnabledManager(AsyncIOEventEmitter):
             if not self._is_enabled:
                 return
             self._is_enabled = False
-            self.emit(self.DISABLED)
-            self.remove_all_listeners()
+        # Outside the lock: a listener may disable this manager again.
+        self.emit(self.DISABLED)
+        self.remove_all_listeners()
 
     @staticmethod
     def all_enabled(
