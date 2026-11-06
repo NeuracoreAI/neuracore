@@ -19,7 +19,6 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )
@@ -31,6 +30,10 @@ from neuracore.core.streaming.p2p.consumer.sync_point_parser import merge_sync_p
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
     get_consume_live_data_enabled_manager,
+)
+from neuracore.core.streaming.p2p.signalling_endpoint import (
+    SignallingTarget,
+    legacy_endpoint,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,12 +76,14 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         self._current_track_information: AvailableRobotInstance | None = None
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
+        self.signalling = legacy_endpoint(self.org_id, self.auth)
         self.streaming = EnabledManager.derived_manger(
             get_consume_live_data_enabled_manager(), loop=loop
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)
         self.connections: dict[str, PeerToPeerConsumerConnection] = {}
-        self.ice_config: IceConfig | None = None
+        # Each signalling stream has its own TURN credentials.
+        self.ice_configs: dict[str, IceConfig] = {}
 
     @property
     def enabled_manager(self) -> EnabledManager:
@@ -118,26 +123,26 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
                 connection.remote_stream_id, []
             )
 
-    async def _get_ice_config(self) -> IceConfig:
-        """Get or create the ICE configuration for WebRTC connections.
-
-        Fetches the ICE server configuration from the signaling server if not
-        already available and caches it.
+    async def _get_ice_config(self, target: SignallingTarget) -> IceConfig:
+        """Get, once per signalling stream, the ICE configuration.
 
         Returns:
             IceConfig: The ICE configuration containing STUN/TURN server details.
         """
-        if self.ice_config is not None:
-            return self.ice_config
+        ice_config = self.ice_configs.get(target.stream_id)
+        if ice_config is not None:
+            return ice_config
 
+        base_url, headers = await target.endpoint()
         # The response is read within a context manager so the underlying
         # connection is released back to the session pool.
         async with self.client_session.get(
-            f"{STREAM_API_URL}/org/{self.org_id}/signalling/turn_servers/{self.local_stream_id}",
-            headers=self.auth.get_headers(),
+            f"{base_url}/turn_servers/{target.stream_id}",
+            headers=headers,
         ) as response:
-            self.ice_config = IceConfig.model_validate(await response.json())
-            return self.ice_config
+            ice_config = IceConfig.model_validate(await response.json())
+        self.ice_configs[target.stream_id] = ice_config
+        return ice_config
 
     def get_latest_data(self) -> SynchronizedPoint:
         """Gets a sync point consisting of the latest data from all connections.
@@ -195,6 +200,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         remote_stream_id: str,
         connection_id: str,
         connection_details: OpenConnectionDetails,
+        target: SignallingTarget | None = None,
     ) -> EnabledManager:
         """Create a new peer-to-peer connection to a remote stream.
 
@@ -202,6 +208,8 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             remote_stream_id: ID of the remote stream to connect to
             connection_id: Unique identifier for this connection
             connection_details: The describes the type of connection to establish.
+            target: The stream that signals the connection. Defaults to this
+                manager's legacy stream.
 
         Returns:
             The enabled manager for this connection.
@@ -212,17 +220,19 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
                 remote_stream_id, []
             )
 
+        target = target or SignallingTarget(self.local_stream_id, self.signalling)
         connection = PeerToPeerConsumerConnection(
             connection_id=connection_id,
-            local_stream_id=self.local_stream_id,
+            local_stream_id=target.stream_id,
             remote_stream_id=remote_stream_id,
             connection_details=connection_details,
             client_session=self.client_session,
             expected_tracks=expected_tracks,
-            ice_config=await self._get_ice_config(),
+            ice_config=await self._get_ice_config(target),
             org_id=self.org_id,
             loop=self.loop,
             auth=self.auth,
+            signalling=target.endpoint,
         )
 
         @connection.enabled_manager.on(EnabledManager.DISABLED)
