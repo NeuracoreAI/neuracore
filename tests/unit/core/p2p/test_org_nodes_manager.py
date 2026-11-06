@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from neuracore_types import AvailableRobotCapacityInit
 
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import OrgNodesManager
 
@@ -36,7 +37,8 @@ def _manager() -> OrgNodesManager:
     manager.last_nodes = defaultdict(dict)
     manager.consumers = {}
     manager.stream_manager_orchestrator = SimpleNamespace(
-        signalling_consumer=SimpleNamespace(local_stream_id="local-stream")
+        signalling_consumer=SimpleNamespace(local_stream_id="local-stream"),
+        own_stream_ids=lambda: {"local-stream", "own-robot-stream"},
     )
     manager._apply_stream_changes = MagicMock()
     return manager
@@ -156,3 +158,18 @@ async def test_update_before_init_is_ignored() -> None:
 
     assert manager.last_update is None
     manager._apply_stream_changes.assert_not_called()
+
+
+def test_stream_map_skips_every_stream_of_this_process() -> None:
+    manager = _manager()
+    update = AvailableRobotCapacityInit.model_validate_json(
+        _init_event(
+            _track("own", stream_id="own-robot-stream"),
+            _track("viewer", stream_id="local-stream"),
+            _track("remote", stream_id="remote-stream"),
+        )
+    )
+
+    stream_map = manager.get_instance_stream_map(update)
+
+    assert list(stream_map[("robot-1", 0)]) == ["remote-stream"]

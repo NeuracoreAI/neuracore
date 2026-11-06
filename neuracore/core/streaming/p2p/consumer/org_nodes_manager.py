@@ -333,16 +333,14 @@ class OrgNodesManager(BaseSSEConsumer):
         Returns:
             InstanceStreamMap: a mapping from each robot to its set of stream ids.
         """
-        local_stream_id = (
-            self.stream_manager_orchestrator.signalling_consumer.local_stream_id
-        )
+        own_stream_ids = self.stream_manager_orchestrator.own_stream_ids()
 
         instance_stream_map: InstanceStreamMap = defaultdict(dict)
         for robot in update.robots:
             for instance in robot.instances.values():
                 nodes = {}
                 for steam_id, track_list in instance.tracks.items():
-                    if steam_id == local_stream_id:
+                    if steam_id in own_stream_ids:
                         continue
                     track_hash = hash(tuple(sorted(track.id for track in track_list)))
                     nodes[steam_id] = track_hash
