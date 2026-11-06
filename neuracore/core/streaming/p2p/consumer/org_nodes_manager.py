@@ -28,6 +28,7 @@ from neuracore_types import (
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import STREAM_API_URL
+from neuracore.core.exceptions import AuthenticationError
 from neuracore.core.streaming.base_sse_consumer import (
     BaseSSEConsumer,
     EventSourceConfig,
@@ -36,6 +37,13 @@ from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.consumer.client_consumer_stream_manager import (
     ClientConsumerStreamManager,
 )
+from neuracore.core.streaming.p2p.consumer.region_availability_consumer import (
+    RegionAvailabilityConsumer,
+)
+from neuracore.core.streaming.p2p.consumer.regional_availability import (
+    LEGACY_SOURCE,
+    RegionalAvailability,
+)
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
@@ -43,6 +51,11 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
 logger = logging.getLogger(__name__)
+
+# A dropped region's robots stay listed for one heartbeat deadline.
+DROPPED_REGION_KEEP_S = 25.0
+REGIONS_RETRY_MIN_S = 1.0
+REGIONS_RETRY_MAX_S = 30.0
 
 
 # Mapping each robot instance to its nodes and a hash over it's connections
@@ -106,6 +119,11 @@ class OrgNodesManager(BaseSSEConsumer):
         self.last_nodes: InstanceStreamMap = defaultdict(dict)
 
         self.last_update: AvailableRobotCapacityInit | None = None
+        # The legacy list merged with every region's.
+        self.availability = RegionalAvailability(keep_seconds=DROPPED_REGION_KEEP_S)
+        self.merged_update: AvailableRobotCapacityInit | None = None
+        self.region_consumers: list[RegionAvailabilityConsumer] = []
+        self.background_tracker.submit_background_coroutine(self._listen_to_regions())
 
         self._logout_listener = self._on_logout
         self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
@@ -165,7 +183,67 @@ class OrgNodesManager(BaseSSEConsumer):
             logger.warning("Ignoring robot availability update received before init")
             return
 
-        new_nodes = self.get_instance_stream_map(self.last_update)
+        self.availability.apply_init(LEGACY_SOURCE, self.last_update)
+        self._publish()
+
+    async def _listen_to_regions(self) -> None:
+        """Stream every region's robot list, if the organization has regions."""
+        delay = REGIONS_RETRY_MIN_S
+        while True:
+            try:
+                regions = await self.stream_manager_orchestrator.region_endpoints()
+                break
+            except AuthenticationError:
+                return
+            except Exception:
+                logger.warning("Could not list the signalling regions", exc_info=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, REGIONS_RETRY_MAX_S)
+            if self.enabled_manager.is_disabled():
+                return
+        if self.enabled_manager.is_disabled():
+            return
+        for region in regions:
+            self.region_consumers.append(
+                RegionAvailabilityConsumer(
+                    region_url=region,
+                    org_id=self.org_id,
+                    session=self.stream_manager_orchestrator.org_session,
+                    on_event=self._on_region_event,
+                    on_drop=self._on_region_drop,
+                    loop=self.loop,
+                    client_session=self.client_session,
+                    enabled_manager=EnabledManager.derived_manger(
+                        self.enabled_manager, loop=self.loop
+                    ),
+                )
+            )
+
+    def _on_region_event(self, region: str, message_data: str) -> None:
+        """Merge one region's availability event and publish the result."""
+        data = json.loads(message_data)
+        if RobotAvailabilityEventType(data["type"]) == RobotAvailabilityEventType.INIT:
+            self.availability.apply_init(
+                region, AvailableRobotCapacityInit.model_validate(data)
+            )
+        else:
+            self.availability.apply_update(
+                region, AvailableRobotCapacityUpdate.model_validate(data)
+            )
+        self._publish()
+
+    def _on_region_drop(self, region: str) -> None:
+        """Keep the region's robots for a while, then list without them."""
+        self.availability.drop_source(region)
+        if not self.loop.is_closed():
+            self.loop.call_later(DROPPED_REGION_KEEP_S + 0.1, self._publish)
+
+    def _publish(self) -> None:
+        """Apply the merged list to connections and consumers."""
+        if self.enabled_manager.is_disabled():
+            return
+        self.merged_update = self.availability.snapshot()
+        new_nodes = self.get_instance_stream_map(self.merged_update)
         self._apply_stream_changes(self.last_nodes, new_nodes)
         self.last_nodes = new_nodes
 
@@ -265,11 +343,15 @@ class OrgNodesManager(BaseSSEConsumer):
     def _get_last_robot_tracks(
         self, robot_id: str, robot_instance: int
     ) -> AvailableRobotInstance | None:
-        if self.last_update is None:
+        if self.merged_update is None:
             return None
 
         robot = next(
-            (robot for robot in self.last_update.robots if robot.robot_id == robot_id),
+            (
+                robot
+                for robot in self.merged_update.robots
+                if robot.robot_id == robot_id
+            ),
             None,
         )
         if robot is None:
@@ -512,6 +594,9 @@ class OrgNodesManager(BaseSSEConsumer):
         and cleans up resources.
         """
         super()._on_close()
+        for region_consumer in self.region_consumers:
+            region_consumer.close()
+        self.region_consumers.clear()
         for robot_consumer in self.consumers.values():
             robot_consumer.close()
 
@@ -519,6 +604,7 @@ class OrgNodesManager(BaseSSEConsumer):
         self.connections.clear()
         self.last_nodes.clear()
         self.last_update = None
+        self.merged_update = None
         self._remove_logout_listener()
         if not self.loop.is_closed():
             self.loop.call_soon_threadsafe(
