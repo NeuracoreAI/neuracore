@@ -38,6 +38,11 @@ from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
 from neuracore.ml import NeuracoreModel
+from neuracore.ml.datasets.done_tail import (
+    DoneTailDataset,
+    add_done_to_cross_embodiment_description,
+    should_synthesize_done,
+)
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -813,12 +818,21 @@ def _main(cfg: DictConfig) -> None:
 
         # Validate that the provided parameters are consistent and sufficient
 
-        # Prepare data types for synchronization
+        # Prepare data types for synchronization. A synthesized done flag is not
+        # in the dataset, so it is left out of synchronization and added after.
+        done_tail_s = cfg.get("synthesize_done_tail_s")
+        synthesize_done = should_synthesize_done(done_tail_s, dataset)
         cross_embodiment_union: CrossEmbodimentUnion = (
             merge_cross_embodiment_description(
                 input_cross_embodiment_description, output_cross_embodiment_description
             )
         )
+        if synthesize_done:
+            output_cross_embodiment_description = (
+                add_done_to_cross_embodiment_description(
+                    output_cross_embodiment_description
+                )
+            )
 
         # Save local metadata so CLI can inspect local runs without cloud access
         _save_local_training_metadata(
@@ -878,6 +892,15 @@ def _main(cfg: DictConfig) -> None:
 
         if setup_storage_handler is not None:
             setup_storage_handler.wait_for_pending_progress_updates()
+
+        if synthesize_done:
+            synchronized_dataset = DoneTailDataset(synchronized_dataset, done_tail_s)
+            logger.info(
+                "Synthesizing the done flag: each episode ends with %d done "
+                "frame(s) (%.3gs).",
+                synchronized_dataset.tail_length,
+                done_tail_s,
+            )
 
         # Check if distributed training is enabled and multiple GPUs are available
         world_size = torch.cuda.device_count()
