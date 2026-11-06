@@ -23,11 +23,14 @@ from neuracore_types import HandshakeMessage, MessageType, OpenConnectionDetails
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.streaming.p2p.provider.video_source import VideoSource, VideoTrack
+from neuracore.core.streaming.p2p.signalling_endpoint import (
+    SignallingEndpoint,
+    legacy_endpoint,
+)
 
 ICE_SERVERS = [
     RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -55,6 +58,7 @@ class PeerToPeerProviderConnection:
         enabled_manager: EnabledManager | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         auth: Auth | None = None,
+        signalling: SignallingEndpoint | None = None,
     ) -> None:
         """Initialize the connection.
 
@@ -72,6 +76,7 @@ class PeerToPeerProviderConnection:
                 provided.
             enabled_manager: The enabled manager for whether this should be
                 consuming. Defaults to a new enabled manger if not provided.
+            signalling: Where the messages go. Defaults to the legacy service.
 
         """
         self.id = connection_id
@@ -92,6 +97,7 @@ class PeerToPeerProviderConnection:
 
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
+        self.signalling = signalling or legacy_endpoint(self.org_id, self.auth)
         self.loop = loop or get_running_loop()
         self.enabled_manager = enabled_manager or EnabledManager(True, loop=self.loop)
         self.enabled_manager.add_listener(EnabledManager.DISABLED, self._on_close)
@@ -224,9 +230,10 @@ class PeerToPeerProviderConnection:
         """
         # The response body is ignored; the context manager ensures the
         # connection is released back to the session pool.
+        base_url, headers = await self.signalling()
         async with self.client_session.post(
-            f"{STREAM_API_URL}/org/{self.org_id}/signalling/message/submit",
-            headers=self.auth.get_headers(),
+            f"{base_url}/message/submit",
+            headers=headers,
             json=HandshakeMessage(
                 connection_id=self.id,
                 from_id=self.local_stream_id,

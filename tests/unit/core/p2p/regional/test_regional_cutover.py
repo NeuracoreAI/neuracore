@@ -77,6 +77,8 @@ def _consumer(
     consumer.local_stream_id = STREAM_ID
     consumer.signalling_session = session
     consumer.enabled_manager = EnabledManager(True, loop=asyncio.get_running_loop())
+    consumer._decided = asyncio.Event()
+    consumer._failed_over = False
 
     async def list_regions() -> list[str]:
         return regions
@@ -225,6 +227,7 @@ def test_each_provided_robot_instance_has_its_own_stream(orchestrator: Any) -> N
     assert robot_1.kwargs["signalling_session"].robot_instance == 1
     assert robot_0.kwargs["regions"] == orchestrator.region_endpoints
     assert first.local_stream_id == robot_0.local_stream_id
+    assert first.signalling == robot_0.endpoint
     assert second.local_stream_id == robot_1.local_stream_id
     assert first is orchestrator.get_provider_manager(ROBOT_ID, 0)
     assert first is not second

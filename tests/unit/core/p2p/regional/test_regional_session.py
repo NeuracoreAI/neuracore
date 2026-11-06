@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -80,6 +81,13 @@ def _consumer(session: Any, client_session: ClientSession) -> SignallingEventsCo
     consumer.connection_managers = {}
     consumer.signalling_session = session
     consumer.enabled_manager = EnabledManager(True, loop=asyncio.get_running_loop())
+    consumer._decided = asyncio.Event()
+    consumer._failed_over = False
+    consumer._decided.set()
+    consumer.manager_factory = MagicMock()
+    consumer.background_tracker = MagicMock(
+        submit_background_coroutine=asyncio.ensure_future
+    )
     return consumer
 
 
@@ -177,6 +185,31 @@ async def test_reconnect_registers_again(
 
     assert len(fake_region.registrations) == 2
     assert fake_backend.calls[-1].body["register_epoch"] is True
+
+
+async def test_reconnect_in_the_same_region_sends_the_tracks_again(
+    robot_session: Any,
+    region: Any,
+    client_session: ClientSession,
+) -> None:
+    """Given a robot whose region dropped its stream and tracks,
+    when the stream reconnects and registers in the same region,
+    then the robot's tracks are sent again.
+    """
+    _, region_url = region
+    await robot_session.register(region_url, STREAM_ID)
+    consumer = _consumer(robot_session, client_session)
+    resubmitted = asyncio.Event()
+
+    async def on_stream_resurrected() -> None:
+        resubmitted.set()
+
+    manager = MagicMock(on_stream_resurrected=on_stream_resurrected)
+    consumer.manager_factory.get_manager.return_value = manager
+
+    await consumer.on_reconnect()
+
+    await asyncio.wait_for(resubmitted.wait(), timeout=1)
 
 
 async def test_lower_epoch_rejection_is_reported(
@@ -320,6 +353,7 @@ async def test_lower_epoch_on_reconnect_stops_signalling(
     await consumer.on_reconnect()
 
     assert consumer.enabled_manager.is_disabled()
+    consumer.manager_factory.get_manager.assert_not_called()
 
 
 async def test_refused_api_key_raises_authentication_error(
