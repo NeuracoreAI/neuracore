@@ -95,9 +95,8 @@ if __name__ == "__main__":
     dataset = nc.get_dataset(dataset_name)
     robot_id = dataset.robot_ids[0]
 
-    # Here, algorithm specific configs can be added.
-    # Uses default values, if not defined.
-    algorithm_config = {
+    # Settings left out use their default values.
+    training_config = {
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "output_prediction_horizon": args.output_prediction_horizon,
@@ -122,7 +121,8 @@ if __name__ == "__main__":
         frequency=frequency,
         algorithm_name=algorithm_name,
         dataset_name=dataset_name,
-        algorithm_config=algorithm_config,
+        algorithm_config={},
+        training_config=training_config,
         input_cross_embodiment_description=input_cross_embodiment_description,
         output_cross_embodiment_description=output_cross_embodiment_description,
     )

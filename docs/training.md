@@ -59,7 +59,8 @@ job_data = nc.start_training_run(
     gpu_type="NVIDIA_TESLA_V100",
     input_cross_embodiment_description=input_cross_embodiment_description,
     output_cross_embodiment_description=output_cross_embodiment_description,
-    algorithm_config={"batch_size": 32, "epochs": 100, "output_prediction_horizon": 50},
+    training_config={"batch_size": 32, "epochs": 100, "output_prediction_horizon": 50},
+    algorithm_config={},
 )
 # Use name_auto_increment=True to auto-use MyTrainingJob_1, MyTrainingJob_2, etc. if the name already exists.
 ```
@@ -113,7 +114,10 @@ python -m neuracore.ml.train algorithm=diffusion_policy dataset_name="my_dataset
 python -m neuracore.ml.train algorithm=act algorithm.lr=5e-4 algorithm.hidden_dim=1024 dataset_name="my_dataset" training_name="my_experiment"
 
 # Auto-tune batch size
-python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_name="my_dataset" training_name="my_experiment"
+python -m neuracore.ml.train algorithm=diffusion_policy training.batch_size=auto dataset_name="my_dataset" training_name="my_experiment"
+
+# Synchronize the dataset at 20 Hz
+python -m neuracore.ml.train algorithm=act synchronization.frequency=20 dataset_name="my_dataset" training_name="my_experiment"
 
 # Hyperparameter sweeps
 python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset" training_name="my_experiment"
@@ -138,10 +142,13 @@ training_name_auto_increment: true
 dataset_name: my_dataset
 algorithm_name: diffusion_policy
 
-epochs: 100
-batch_size: auto
-frequency: 10
-validation_split: 0.2  # recording-wise split
+training:
+  epochs: 100
+  batch_size: auto
+  validation_split: 0.2  # recording-wise split
+
+synchronization:
+  frequency: 10
 
 input_data_types:
   - JOINT_POSITIONS
@@ -164,7 +171,7 @@ python -m neuracore.ml.train user=my_experiment
 You can still override any value from the command line. Command-line overrides take precedence over values in the YAML file:
 
 ```bash
-python -m neuracore.ml.train user=my_experiment epochs=50 batch_size=32
+python -m neuracore.ml.train user=my_experiment training.epochs=50 training.batch_size=32
 ```
 
 If you want to keep config files outside the package directory, add the directory to Hydra's search path. The directory should contain a `user/` subdirectory:
@@ -177,26 +184,41 @@ python -m neuracore.ml.train --config-dir configs user=my_experiment
 
 ### Configuration management
 
-There are two configs related to training. The `config/config.yaml` provides the core training parameters:
+`config/config.yaml` holds the job settings: the run name, the dataset, the algorithm and the data types. Training and synchronization settings live in two sections whose names, types, defaults and limits come from `TrainingConfig` and `SynchronizationConfig` in `neuracore_types`, the same models the API and the web dashboard use:
 
 ```yaml
-# config/config.yaml
-defaults:
-  - algorithm: diffusion_policy
-  - training: default
-  - dataset: default
+training:
+  seed: 42
+  epochs: 100
+  batch_size: auto  # or an integer
+  output_prediction_horizon: 100
+  validation_split: 0.2  # recording-wise split
+  logging_frequency: 50
+  keep_last_n_checkpoints: 2
+  device: null  # e.g., "cuda:0", "mps", "cpu"
+  # A pipeline you set replaces the default pipeline as a whole.
+  # stages picks the part of the run that applies each method: training covers
+  # the training split, inference covers validation and the packaged model.
+  preprocessing:
+    input:
+      RGB_IMAGES:
+        - method: resize_pad
+          size: [224, 224]
+          stages: [training, inference]
+        - method: color_jitter
+          brightness: 0.2
+          stages: [training]
+    output:
+      RGB_IMAGES:
+        - method: resize_pad
+          size: [224, 224]
+          stages: [training, inference]
 
-# Core training parameters
-seed: 42
-epochs: 100
-output_prediction_horizon: 100
-validation_split: 0.2  # recording-wise split
-logging_frequency: 50
-keep_last_n_checkpoints: 5
-device: null  # e.g., "cuda:0", "mps", "cpu"
-
-# Batch size (can be "auto" for automatic tuning or an integer)
-batch_size: "auto"
+synchronization:
+  frequency: 10
+  max_delay_s: 1.7976931348623157e308  # the largest float
+  allow_duplicates: true
+  trim_start_end: true
 
 # You can either specify input_data_types/output_data_types or
 # input_cross_embodiment_description/output_cross_embodiment_description
@@ -206,19 +228,17 @@ input_data_types:
 
 output_data_types:
   - "JOINT_TARGET_POSITIONS"
-
-# Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
-# You can also pass in an empty dict {} to use all available data for all robots
-input_cross_embodiment_description: null
-output_cross_embodiment_description: null
 ```
 
-The algorithm-specific config file is inside `config/algorithm`:
+Training runs reject any setting outside its model, such as an unknown key or `epochs: 0`, and any preprocessing method outside `resize_pad`, `color_jitter` and `gaussian_noise`.
+
+The algorithm-specific config file is inside `config/algorithm`. Selecting it with `algorithm=diffusion_policy` sets `algorithm_name`, which picks the algorithm class, and fills the `algorithm` section with the class arguments:
 
 ```yaml
 # @package _global_
+algorithm_name: diffusion_policy
+
 algorithm:
-  _target_: neuracore.ml.algorithms.diffusion_policy.diffusion_policy.DiffusionPolicy
   unet_down_dims: [256, 512, 1024]
   unet_kernel_size: 5
   unet_n_groups: 8

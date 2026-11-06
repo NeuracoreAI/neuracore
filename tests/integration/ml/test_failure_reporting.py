@@ -64,13 +64,11 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 20
 
-# A batch_size value that is not "auto" and not parseable as an integer.
-# It passes client-side validation (which only checks data types / algorithm
-# compatibility, not the batch_size value itself) but causes a ValueError in
-# train.py at `batch_size = int(batch_size)`, which happens *after* nc.login()
-# so our new top-level error handler can catch and report it.
-FAILURE_CNNMLP_CONFIG = {
-    "batch_size": "not_a_valid_integer",
+# A device name that passes request validation, which only checks that device
+# is a string, but makes torch.device raise in train.py after nc.login(), so
+# the top-level error handler catches and reports it.
+FAILURE_CNNMLP_TRAINING_CONFIG = {
+    "device": "not_a_device",
     "epochs": 1,
     "output_prediction_horizon": 5,
 }
@@ -80,7 +78,7 @@ class TestTrainingFailureReporting:
     """Verify that training script failures are correctly reported to the cloud.
 
     Forces a deliberate runtime failure by submitting a training job whose
-    batch_size cannot be parsed as an integer. The error occurs inside
+    device torch cannot parse. The error occurs inside
     train.py *after* nc.login() — so the new top-level error handler in
     main() is responsible for catching it and calling
     _try_report_error_to_cloud().
@@ -157,7 +155,8 @@ class TestTrainingFailureReporting:
             name=unique_name(prefix="failure_report_job"),
             dataset_name=self.dataset_name,
             algorithm_name="CNNMLP",
-            algorithm_config=FAILURE_CNNMLP_CONFIG,
+            algorithm_config={},
+            training_config=FAILURE_CNNMLP_TRAINING_CONFIG,
             gpu_type=GPU_TYPE,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,
@@ -174,7 +173,7 @@ class TestTrainingFailureReporting:
         final_status = wait_for_training(job_id=self.job_id, timeout_minutes=30)
         assert final_status == "FAILED", (
             f"Expected FAILED status, got: {final_status!r}.  "
-            "The deliberate bad batch_size should have caused a ValueError "
+            "The deliberate bad device should have caused an error "
             "in train.py that maps to a FAILED job."
         )
         logger.info(

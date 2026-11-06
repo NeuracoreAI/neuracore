@@ -41,7 +41,7 @@ def test_color_jitter_rejects_non_rgb():
         intrinsics=torch.zeros((1, 1, 3, 3), dtype=torch.float32),
     )
     with pytest.raises(TypeError, match="Unsupported batched data type"):
-        ColorJitter()(depth)
+        ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)(depth)
 
 
 def test_color_jitter_is_uniform_across_the_batch():
@@ -80,4 +80,7 @@ def test_color_jitter_returns_contiguous_frames():
 
 
 def test_color_jitter_runs_on_the_device_stage():
-    assert ColorJitter().on_cpu is False
+    assert (
+        ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05).on_cpu
+        is False
+    )

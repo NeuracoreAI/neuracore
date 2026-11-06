@@ -10,12 +10,14 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import sys
 import tempfile
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
+import hydra
 import numpy as np
 import pytest
 import torch
@@ -28,8 +30,12 @@ from neuracore_types import (
     GPUType,
     JointDataStats,
     ModelInitDescription,
+    PreprocessingStage,
+    ResizePadConfig,
+    TrainingConfig,
 )
 from omegaconf import DictConfig, OmegaConf
+from pydantic import ValidationError
 
 from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.embodiment_description_utils import extract_data_types
@@ -58,10 +64,14 @@ from neuracore.ml.utils.preprocessing import (
 )
 from neuracore.ml.utils.training_config import (
     _RESOLVED_TRAINING_RUN_NAMES,
+    PACKAGED_ALGORITHM_CLASS_PATHS,
     _resolve_algorithm_name_and_supported_data_types,
     _resolve_algorithm_name_config,
     _resolve_cross_embodiment_description,
     _resolve_training_run_name,
+    load_algorithm_arguments,
+    load_training_and_synchronization_config,
+    packaged_algorithm_class_path,
     resolve_to_complete_config,
     resolve_user_input_config,
 )
@@ -108,19 +118,9 @@ OUTPUT_CROSS_EMBODIMENT_SPEC = {
     },
 }
 
-MINIMAL_ROLE_PREPROCESSING_CFG = {
-    "input": {
-        "RGB_IMAGES": [{
-            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
-            "size": [224, 224],
-        }]
-    },
-    "output": {
-        "RGB_IMAGES": [{
-            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
-            "size": [224, 224],
-        }]
-    },
+MINIMAL_PREPROCESSING_CFG = {
+    "input": {"RGB_IMAGES": [{"method": "resize_pad", "size": [224, 224]}]},
+    "output": {"RGB_IMAGES": [{"method": "resize_pad", "size": [224, 224]}]},
 }
 
 
@@ -162,9 +162,11 @@ class TestResolvePreprocessingConfig:
         assert tuple(resolved[DataType.RGB_IMAGES][0].size) == (160, 200)
 
     def test_resolves_input_output_preprocessing_roles(self):
-        role = OmegaConf.create(MINIMAL_ROLE_PREPROCESSING_CFG)
+        training_config = TrainingConfig.model_validate(
+            {"preprocessing": MINIMAL_PREPROCESSING_CFG}
+        )
         input_cfg, output_cfg = resolve_input_output_preprocessing(
-            role, role_name="train_preprocessing"
+            training_config.preprocessing, stage=PreprocessingStage.TRAINING
         )
         assert DataType.RGB_IMAGES in input_cfg
         assert DataType.RGB_IMAGES in output_cfg
@@ -406,12 +408,14 @@ class RunTrainingTestSetup:
 
     def call_run_training(self, cfg, dataset):
         """Call run_training with the configured parameters."""
+        training_config = load_training_and_synchronization_config(cfg)[0]
         inference_input, inference_output = resolve_input_output_preprocessing(
-            cfg.inference_preprocessing, role_name="inference_preprocessing"
+            training_config.preprocessing,
+            stage=PreprocessingStage.INFERENCE,
         )
         train_input, train_output = resolve_input_output_preprocessing(
-            cfg.get("train_preprocessing", cfg.inference_preprocessing),
-            role_name="train_preprocessing",
+            training_config.preprocessing,
+            stage=PreprocessingStage.TRAINING,
         )
         return run_training(
             self.rank,
@@ -426,6 +430,21 @@ class RunTrainingTestSetup:
             train_output,
             dataset,
         )
+
+
+@pytest.fixture
+def local_validation_algorithm_name(monkeypatch, tmp_path):
+    algorithm_name = "local_validation_algorithm"
+    (tmp_path / f"{algorithm_name}.yaml").write_text("algorithm: {}\n")
+    monkeypatch.setattr(
+        "neuracore.ml.utils.training_config.ALGORITHM_CONFIG_DIR", tmp_path
+    )
+    monkeypatch.setitem(
+        PACKAGED_ALGORITHM_CLASS_PATHS,
+        algorithm_name,
+        "tests.unit.ml.test_train.LocalValidationAlgorithm",
+    )
+    return algorithm_name
 
 
 @pytest.fixture
@@ -516,15 +535,18 @@ def mock_cfg_batch_size(temp_output_dir):
         "local_output_dir": str(temp_output_dir),
         "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
         "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-        "output_prediction_horizon": 5,
         "max_batch_size": 32,
         "min_batch_size": 2,
-        "max_prefetch_decode_workers": 4,
-        "max_delay_s": 0.5,
-        "allow_duplicates": True,
-        "trim_start_end": True,
-        "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-        "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+        "training": {
+            "output_prediction_horizon": 5,
+            "max_prefetch_decode_workers": 4,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
+        },
+        "synchronization": {
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        },
     })
 
 
@@ -533,25 +555,28 @@ def mock_cfg_training(temp_output_dir) -> DictConfig:
     return OmegaConf.create({
         "algorithm_id": "test-algorithm-id",
         "local_output_dir": str(temp_output_dir),
-        "seed": 42,
-        "validation_split": 0.2,
         "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
         "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-        "output_prediction_horizon": 5,
-        "num_train_workers": 0,
-        "num_val_workers": 0,
-        "epochs": 1,
-        "logging_frequency": 10,
-        "keep_last_n_checkpoints": 3,
-        "checkpoint_saving_frequency": 5,
         "training_id": None,
         "resume_checkpoint_path": None,
-        "max_prefetch_decode_workers": 4,
-        "max_delay_s": 0.5,
-        "allow_duplicates": True,
-        "trim_start_end": True,
-        "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-        "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+        "training": {
+            "seed": 42,
+            "validation_split": 0.2,
+            "output_prediction_horizon": 5,
+            "num_train_workers": 0,
+            "num_val_workers": 0,
+            "epochs": 1,
+            "logging_frequency": 10,
+            "keep_last_n_checkpoints": 3,
+            "checkpoint_saving_frequency": 5,
+            "max_prefetch_decode_workers": 4,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
+        },
+        "synchronization": {
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        },
     })
 
 
@@ -561,8 +586,8 @@ def mock_preprocessing_configs_batch_size(
 ) -> tuple[dict[DataType, list], dict[DataType, list]]:
     """Resolve preprocessing once for batch-size tests."""
     return resolve_input_output_preprocessing(
-        mock_cfg_batch_size.inference_preprocessing,
-        role_name="inference_preprocessing",
+        load_training_and_synchronization_config(mock_cfg_batch_size)[0].preprocessing,
+        stage=PreprocessingStage.INFERENCE,
     )
 
 
@@ -736,23 +761,24 @@ class TestTrainingConfigMerge:
         monkeypatch.setattr("neuracore.ml.train._main", capture_main)
 
         cfg = OmegaConf.create({
-            "epochs": 3,
             "dataset_id": "dataset-id",
             "input_data_types": ["JOINT_VELOCITIES"],
-            "algorithm_params": {"learning_rate": 0.001},
+            "training": {
+                "epochs": 3,
+            },
         })
         main(cfg)
 
         assert len(captured_configs) == 1
-        assert captured_configs[0].epochs == 3
+        assert captured_configs[0].training.epochs == 3
         assert captured_configs[0].dataset_id == "dataset-id"
         assert "seed" not in captured_configs[0]
 
     @pytest.mark.parametrize(
         "cfg",
         [
-            {"algorithm_name": "CNNMLP", "epochs": 3},
-            {"algorithm": None, "algorithm_name": "CNNMLP", "epochs": 3},
+            {"algorithm_name": "CNNMLP", "training": {"epochs": 3}},
+            {"algorithm": None, "algorithm_name": "CNNMLP", "training": {"epochs": 3}},
         ],
     )
     def test_resolves_algorithm_name_string_to_packaged_config(self, cfg):
@@ -760,8 +786,8 @@ class TestTrainingConfigMerge:
 
         resolved_cfg = _resolve_algorithm_name_config(cfg)
 
-        assert resolved_cfg.algorithm._target_.endswith(".CNNMLP")
-        assert resolved_cfg.epochs == 3
+        assert packaged_algorithm_class_path(resolved_cfg).endswith(".CNNMLP")
+        assert resolved_cfg.training.epochs == 3
         assert resolved_cfg.algorithm.hidden_dim == 512
         assert resolved_cfg.algorithm_name == "CNNMLP"
 
@@ -1083,12 +1109,15 @@ class TestMainInstallsAlgorithmRequirements:
         monkeypatch.setattr(
             "neuracore.ml.train.resolve_user_input_config", stop_after_recording
         )
-        cfg = OmegaConf.create({"algorithm": {"_target_": "pkg.algo.Algo"}})
+        cfg = OmegaConf.create({"algorithm_name": "act"})
 
         with pytest.raises(RuntimeError, match="stop"):
             _main(cfg)
 
-        assert calls == [("install", "pkg.algo.Algo"), ("resolve", None)]
+        assert calls == [
+            ("install", PACKAGED_ALGORITHM_CLASS_PATHS["act"]),
+            ("resolve", None),
+        ]
 
 
 class TestGetModelAndAlgorithmConfig:
@@ -1098,14 +1127,13 @@ class TestGetModelAndAlgorithmConfig:
         self, model_init_description, mock_model_class, monkeypatch
     ):
         cfg = OmegaConf.create({
-            "algorithm": {
-                "_target_": "tests.unit.ml.test_train.mock_model_class",
-            },
+            "algorithm_name": "cnnmlp",
+            "algorithm": {"hidden_dim": 64},
         })
-
-        mock_instantiate = Mock(return_value=mock_model_class(model_init_description))
+        algorithm_class = Mock(return_value=mock_model_class(model_init_description))
+        mock_get_object = Mock(return_value=algorithm_class)
         monkeypatch.setattr(
-            "neuracore.ml.train.hydra.utils.instantiate", mock_instantiate
+            "neuracore.ml.train.hydra.utils.get_object", mock_get_object
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
@@ -1113,8 +1141,13 @@ class TestGetModelAndAlgorithmConfig:
         )
 
         assert isinstance(model, NeuracoreModel)
-        assert isinstance(algorithm_config, dict)
-        mock_instantiate.assert_called_once()
+        assert algorithm_config == {"hidden_dim": 64}
+        mock_get_object.assert_called_once_with(
+            PACKAGED_ALGORITHM_CLASS_PATHS["cnnmlp"]
+        )
+        algorithm_class.assert_called_once_with(
+            model_init_description=model_init_description, hidden_dim=64
+        )
 
     def test_get_model_and_algorithm_config_with_algorithm_id_and_params(
         self, model_init_description, mock_model_class, temp_output_dir, monkeypatch
@@ -1122,7 +1155,7 @@ class TestGetModelAndAlgorithmConfig:
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
             "local_output_dir": str(temp_output_dir),
-            "algorithm_params": {"param1": "value1"},
+            "algorithm": {"param1": "value1"},
         })
 
         mock_loader = Mock()
@@ -1144,7 +1177,6 @@ class TestGetModelAndAlgorithmConfig:
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
             "local_output_dir": str(temp_output_dir),
-            "algorithm_params": None,
         })
 
         mock_loader = Mock()
@@ -1166,88 +1198,38 @@ class TestGetModelAndAlgorithmConfig:
             "algorithm_id": None,
         })
 
-        with pytest.raises(ValueError, match="Either 'algorithm' or 'algorithm_id'"):
+        with pytest.raises(
+            ValueError, match="Either 'algorithm_name' or 'algorithm_id'"
+        ):
             get_model_and_algorithm_config(cfg, model_init_description)
 
-    def test_get_model_and_algorithm_config_prefers_algorithm_when_both_provided(
-        self, model_init_description, mock_model_class, monkeypatch
+    def test_get_model_and_algorithm_config_prefers_algorithm_id_when_both_provided(
+        self, model_init_description, mock_model_class, temp_output_dir, monkeypatch
     ):
         cfg = OmegaConf.create({
-            "algorithm": {"_target_": "tests.unit.ml.test_train.mock_model_class"},
+            "algorithm_name": "cnnmlp",
             "algorithm_id": "test-id",
+            "local_output_dir": str(temp_output_dir),
         })
-
-        mock_instantiate = Mock(return_value=mock_model_class(model_init_description))
+        mock_loader = Mock()
+        mock_loader.load_model.return_value = mock_model_class
         monkeypatch.setattr(
-            "neuracore.ml.train.hydra.utils.instantiate", mock_instantiate
+            "neuracore.ml.train.AlgorithmLoader", Mock(return_value=mock_loader)
         )
 
-        model, algorithm_config = get_model_and_algorithm_config(
-            cfg, model_init_description
-        )
+        model, _ = get_model_and_algorithm_config(cfg, model_init_description)
 
         assert isinstance(model, NeuracoreModel)
-        mock_instantiate.assert_called_once()
+        mock_loader.load_model.assert_called_once()
 
-    def test_get_model_with_algorithm_config_removes_target(
-        self, model_init_description, mock_model_class, monkeypatch
-    ):
+    def test_get_model_with_algorithm_target_is_rejected(self, model_init_description):
         cfg = OmegaConf.create({
-            "algorithm": {
-                "_target_": "tests.unit.ml.test_train.mock_model_class",
-                "param1": "value1",
-                "param2": "value2",
-            },
+            "algorithm_name": "cnnmlp",
+            "algorithm": {"_target_": "pkg.algo.Algo", "param1": "value1"},
         })
 
-        mock_instantiate = Mock(return_value=mock_model_class(model_init_description))
-        monkeypatch.setattr(
-            "neuracore.ml.train.hydra.utils.instantiate", mock_instantiate
-        )
-
-        model, algorithm_config = get_model_and_algorithm_config(
-            cfg, model_init_description
-        )
-
-        assert isinstance(model, NeuracoreModel)
-        assert "_target_" not in algorithm_config
-        assert algorithm_config == {"param1": "value1", "param2": "value2"}
-
-    def test_merges_algorithm_params_for_packaged_algorithm(
-        self, model_init_description, mock_model_class, monkeypatch
-    ):
-        cfg = OmegaConf.create({
-            "algorithm": {
-                "_target_": "tests.unit.ml.test_train.mock_model_class",
-                "param1": "default",
-                "param2": "value2",
-            },
-            "algorithm_params": {"param1": "override", "param3": "value3"},
-        })
-
-        mock_instantiate = Mock(return_value=mock_model_class(model_init_description))
-        monkeypatch.setattr(
-            "neuracore.ml.train.hydra.utils.instantiate", mock_instantiate
-        )
-
-        model, algorithm_config = get_model_and_algorithm_config(
-            cfg, model_init_description
-        )
-
-        assert isinstance(model, NeuracoreModel)
-        assert algorithm_config == {
-            "param1": "override",
-            "param2": "value2",
-            "param3": "value3",
-        }
-        mock_instantiate.assert_called_once_with(
-            cfg.algorithm,
-            model_init_description=model_init_description,
-            param1="override",
-            param2="value2",
-            param3="value3",
-        )
-        mock_instantiate.assert_called_once()
+        with pytest.raises(ValueError, match="algorithm_name or algorithm_id"):
+            get_model_and_algorithm_config(cfg, model_init_description)
 
 
 class TestDetermineOptimalBatchSize:
@@ -2036,8 +2018,8 @@ class TestRunTraining:
         mock_model_class,
         monkeypatch,
     ):
-        mock_cfg_training.num_train_workers = 4
-        mock_cfg_training.num_val_workers = 2
+        mock_cfg_training.training.num_train_workers = 4
+        mock_cfg_training.training.num_val_workers = 2
         setup = RunTrainingTestSetup(
             monkeypatch,
             model_init_description,
@@ -2146,8 +2128,8 @@ class TestRunTraining:
         train_method,
         val_method,
     ):
-        mock_cfg_training.num_train_workers = num_train_workers
-        mock_cfg_training.num_val_workers = num_val_workers
+        mock_cfg_training.training.num_train_workers = num_train_workers
+        mock_cfg_training.training.num_val_workers = num_val_workers
         setup = RunTrainingTestSetup(
             monkeypatch,
             model_init_description,
@@ -2240,8 +2222,8 @@ class TestRunTraining:
         mock_model_class,
         monkeypatch,
     ):
-        mock_cfg_training.seed = 42
-        mock_cfg_training.validation_split = 0.2
+        mock_cfg_training.training.seed = 42
+        mock_cfg_training.training.validation_split = 0.2
         mock_dataset.__len__ = Mock(return_value=100)
 
         # Create mock datasets for split_train_val_datasets to return
@@ -2268,8 +2250,11 @@ class TestRunTraining:
 
         assert mock_split.called
         call_kwargs = mock_split.call_args.kwargs
-        assert call_kwargs["validation_split"] == mock_cfg_training.validation_split
-        assert call_kwargs["seed"] == mock_cfg_training.seed
+        assert (
+            call_kwargs["validation_split"]
+            == mock_cfg_training.training.validation_split
+        )
+        assert call_kwargs["seed"] == mock_cfg_training.training.seed
 
     def test_run_training_raises_when_train_or_val_split_is_empty(
         self,
@@ -2310,8 +2295,8 @@ class TestRunTraining:
         """Autotuning and run_training both use min(cfg.*_workers, cpu_count())."""
         train_workers_cfg = 5
         val_workers_cfg = 3
-        mock_cfg_training.num_train_workers = train_workers_cfg
-        mock_cfg_training.num_val_workers = val_workers_cfg
+        mock_cfg_training.training.num_train_workers = train_workers_cfg
+        mock_cfg_training.training.num_val_workers = val_workers_cfg
 
         def fixed_cpu_count() -> int:
             return 100
@@ -2409,12 +2394,12 @@ class TestMain:
         "cfg_updates,expected_error_match",
         [
             (
-                {"algorithm": {"_target_": "test"}, "algorithm_id": "test-id"},
-                "Both 'algorithm' and 'algorithm_id' are provided",
+                {"algorithm_name": "cnnmlp", "algorithm_id": "test-id"},
+                "Both 'algorithm_name' and 'algorithm_id' are provided",
             ),
             (
                 {"algorithm_id": None},
-                "Neither 'algorithm' nor 'algorithm_id' is provided",
+                "Neither 'algorithm_name' nor 'algorithm_id' is provided",
             ),
             (
                 {
@@ -2441,17 +2426,20 @@ class TestMain:
             "algorithm_id": "test-algorithm-id",
             "dataset_id": "test-dataset-id",
             "local_output_dir": "/tmp/test",
-            "batch_size": 8,
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         }
         base_cfg.update(cfg_updates)
         cfg = OmegaConf.create(base_cfg)
@@ -2469,22 +2457,24 @@ class TestMain:
             "dataset_id": None,
             "dataset_name": "test-dataset-name",
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2503,22 +2493,24 @@ class TestMain:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": "test-org-id",
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2530,31 +2522,32 @@ class TestMain:
         setup.mock_get_dataset.assert_called_once_with(id="test-dataset-id")
 
     def test_main_uses_algorithm_config_when_algorithm_provided_instead_of_algorithm_id(
-        self, monkeypatch, temp_output_dir
+        self, monkeypatch, temp_output_dir, local_validation_algorithm_name
     ):
         cfg = OmegaConf.create({
-            "algorithm": {
-                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
-            },
+            "algorithm_name": local_validation_algorithm_name,
             "algorithm_id": None,
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2608,11 +2601,11 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             algorithm_jsons=algorithms_jsons,
         )
 
-    def test_uses_local_algorithm_contract_when_no_algorithm_id(self, monkeypatch):
+    def test_uses_local_algorithm_contract_when_no_algorithm_id(
+        self, monkeypatch, local_validation_algorithm_name
+    ):
         cfg = OmegaConf.create({
-            "algorithm": {
-                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
-            },
+            "algorithm_name": local_validation_algorithm_name,
             "algorithm_id": None,
         })
         algorithms_jsons: list[dict] = []
@@ -2634,31 +2627,32 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         assert supported_output_data_types == {DataType.JOINT_TARGET_POSITIONS}
 
     def test_main_uses_local_algorithm_contract_when_not_in_cloud_registry(
-        self, monkeypatch, temp_output_dir
+        self, monkeypatch, temp_output_dir, local_validation_algorithm_name
     ):
         cfg = OmegaConf.create({
-            "algorithm": {
-                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
-            },
+            "algorithm_name": local_validation_algorithm_name,
             "algorithm_id": None,
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2682,22 +2676,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2716,22 +2712,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": "cuda:1",
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": "cuda:1",
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2752,22 +2750,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 16,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 16,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2789,22 +2789,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 64,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 64,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2826,22 +2828,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2866,22 +2870,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2891,7 +2897,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
 
         setup.mock_get_dataset.assert_called_once_with(id="test-dataset-id")
 
-    def test_main_converts_string_batch_size_to_int_when_not_auto(
+    def test_main_rejects_a_numeric_string_batch_size(
         self, monkeypatch, temp_output_dir
     ):
         cfg = OmegaConf.create({
@@ -2899,31 +2905,33 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": "16",
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": "16",
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
         setup.setup_mocks(include_determine_optimal_batch_size=True)
 
-        main(cfg)
+        with pytest.raises(ValidationError, match="batch_size"):
+            main(cfg)
 
-        setup.mock_determine_optimal_batch_size.assert_not_called()
-        assert setup.mock_run_training.call_args[0][3] == 16
+        setup.mock_run_training.assert_not_called()
 
     @pytest.mark.parametrize(
         "world_size,should_use_mp_spawn",
@@ -2940,22 +2948,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch, cuda_device_count=world_size)
@@ -2989,22 +2999,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3023,22 +3035,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3067,22 +3081,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": "test-org",
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3109,22 +3125,24 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3135,11 +3153,11 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         # Verify synchronize was called with correct parameters
         setup.mock_dataset.synchronize.assert_called_once()
         call_kwargs = setup.mock_dataset.synchronize.call_args[1]
-        assert call_kwargs["frequency"] == cfg.frequency
+        assert call_kwargs["frequency"] == cfg.synchronization.frequency
         assert call_kwargs["prefetch_videos"] is True
-        assert call_kwargs["max_delay_s"] == cfg.max_delay_s
-        assert call_kwargs["allow_duplicates"] is cfg.allow_duplicates
-        assert call_kwargs["trim_start_end"] is cfg.trim_start_end
+        assert call_kwargs["max_delay_s"] == cfg.synchronization.max_delay_s
+        assert call_kwargs["allow_duplicates"] is cfg.synchronization.allow_duplicates
+        assert call_kwargs["trim_start_end"] is cfg.synchronization.trim_start_end
         # Verify data_types includes both input and output types
         expected_data_types = [
             DataType.JOINT_POSITIONS,
@@ -3157,23 +3175,25 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
             "recording_cache_dir": None,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3190,23 +3210,25 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
             "recording_cache_dir": str(custom_cache_dir),
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3224,24 +3246,26 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": "auto",
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
             "max_batch_size": 32,
             "min_batch_size": 2,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": "auto",
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -3263,7 +3287,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         det_kwargs = setup.mock_determine_optimal_batch_size.call_args.kwargs
         assert det_kwargs["dataset"] is setup.mock_pytorch_dataset
         assert det_kwargs["cfg"].dataset_id == "test-dataset-id"
-        assert det_kwargs["cfg"].batch_size == "auto"
+        assert det_kwargs["cfg"].training.batch_size == "auto"
         # Verify run_training was called with the optimal batch size
         assert setup.mock_run_training.call_args[0][3] == 16
 
@@ -3278,23 +3302,25 @@ class TestMainErrorReporting:
             "dataset_id": "test-dataset-id",
             "dataset_name": None,
             "org_id": None,
-            "device": None,
             "training_id": training_id,
             "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
             "input_data_types": {},
             "output_data_types": {},
             "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
             "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_decode_workers": 4,
-            "max_delay_s": 0.5,
-            "allow_duplicates": True,
-            "trim_start_end": True,
-            "train_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
-            "inference_preprocessing": MINIMAL_ROLE_PREPROCESSING_CFG,
+            "training": {
+                "device": None,
+                "batch_size": 8,
+                "output_prediction_horizon": 5,
+                "max_prefetch_decode_workers": 4,
+                "preprocessing": MINIMAL_PREPROCESSING_CFG,
+            },
+            "synchronization": {
+                "frequency": 30,
+                "max_delay_s": 0.5,
+                "allow_duplicates": True,
+                "trim_start_end": True,
+            },
         })
 
     def test_calls_try_report_error_to_cloud_when_training_id_set_and_run_training_raises(  # noqa: E501
@@ -3428,3 +3454,102 @@ class TestMainErrorReporting:
         # The full traceback string should include the exception type and message
         assert "RuntimeError" in captured[0]
         assert "crash!" in captured[0]
+
+
+TRAINING_CONFIG_DIR = str(Path(__file__).resolve().parents[3] / "neuracore/ml/config")
+
+
+def _compose_training_config(overrides):
+    with hydra.initialize_config_dir(config_dir=TRAINING_CONFIG_DIR, version_base=None):
+        return hydra.compose("config", overrides=overrides)
+
+
+class TestStructuredDefaults:
+    def test_composed_config_validates_with_defaults(self):
+        cfg = _compose_training_config([])
+        training_config, synchronization_config = (
+            load_training_and_synchronization_config(cfg)
+        )
+        assert training_config == TrainingConfig()
+        assert synchronization_config.frequency == 10
+
+    @pytest.mark.parametrize(
+        "batch_size_override, expected_batch_size", [("auto", "auto"), ("64", 64)]
+    )
+    def test_batch_size_override_keeps_its_type(
+        self, batch_size_override, expected_batch_size
+    ):
+        cfg = _compose_training_config([f"++training.batch_size={batch_size_override}"])
+        training_config = load_training_and_synchronization_config(cfg)[0]
+        assert training_config.batch_size == expected_batch_size
+
+    def test_preprocessing_override_from_backend_round_trips(self):
+        override = (
+            '++training={batch_size:"auto",preprocessing:{input:{RGB_IMAGES:'
+            '[{method:"resize_pad",size:[128,96],stages:["inference"]}]},'
+            'output:{RGB_IMAGES:[{method:"resize_pad",size:[128,96]}]}}}'
+        )
+        cfg = _compose_training_config([override])
+        training_config = load_training_and_synchronization_config(cfg)[0]
+        assert training_config.preprocessing["input"][DataType.RGB_IMAGES] == [
+            ResizePadConfig(size=(128, 96), stages=[PreprocessingStage.INFERENCE])
+        ]
+
+    def test_preprocessing_override_replaces_the_default_pipeline(self):
+        override = (
+            '++training={preprocessing:{input:{RGB_IMAGES:[{method:"resize_pad",'
+            'size:[128,96]}]},output:{RGB_IMAGES:[{method:"resize_pad",size:[128,96]}]}}}'
+        )
+        cfg = _compose_training_config([override])
+        training_config = load_training_and_synchronization_config(cfg)[0]
+        assert set(training_config.preprocessing["input"]) == {DataType.RGB_IMAGES}
+
+    def test_synchronization_override_renders_null_and_float_max(self):
+        cfg = _compose_training_config([
+            "++synchronization={frequency:10,"
+            f"max_delay_s:{sys.float_info.max!r},allow_duplicates:true,"
+            "trim_start_end:true,trim_no_movement_at_start_threshold:null}"
+        ])
+        synchronization_config = load_training_and_synchronization_config(cfg)[1]
+        assert synchronization_config.trim_no_movement_at_start_threshold is None
+        assert synchronization_config.max_delay_s == sys.float_info.max
+
+    def test_top_level_training_key_is_rejected_on_the_command_line(self):
+        with pytest.raises(hydra.errors.ConfigCompositionException):
+            _compose_training_config(["epochs=5"])
+
+    def test_invalid_training_value_is_rejected(self):
+        cfg = _compose_training_config(["++training.epochs=0"])
+        with pytest.raises(ValidationError):
+            load_training_and_synchronization_config(cfg)
+
+    def test_algorithm_override_merges_into_packaged_algorithm(self):
+        cfg = _compose_training_config(
+            ["algorithm=cnnmlp", "++algorithm.hidden_dim=256"]
+        )
+        assert cfg.algorithm_name == "cnnmlp"
+        assert packaged_algorithm_class_path(cfg).endswith(".CNNMLP")
+        assert load_algorithm_arguments(cfg)["hidden_dim"] == 256
+
+    def test_algorithm_override_for_custom_algorithm_has_no_packaged_class(self):
+        cfg = _compose_training_config([
+            "algorithm_id=custom-algorithm-id",
+            '++algorithm={param1:"value1"}',
+        ])
+        assert packaged_algorithm_class_path(cfg) is None
+        assert load_algorithm_arguments(cfg) == {"param1": "value1"}
+
+    def test_training_key_in_algorithm_section_is_rejected(self):
+        cfg = _compose_training_config(["algorithm=cnnmlp", "++algorithm.epochs=5"])
+        with pytest.raises(ValidationError, match="training_config"):
+            load_algorithm_arguments(cfg)
+
+    def test_algorithm_params_is_rejected_from_python(self):
+        with pytest.raises(ValueError, match="algorithm.<key>"):
+            resolve_user_input_config(
+                OmegaConf.create({"algorithm_params": {"hidden_dim": 256}})
+            )
+
+    def test_top_level_training_key_is_rejected_from_python(self):
+        with pytest.raises(ValueError, match="epochs to training.epochs"):
+            resolve_user_input_config(OmegaConf.create({"epochs": 5}))

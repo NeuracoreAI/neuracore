@@ -116,6 +116,8 @@ def _load_local_hydra_metadata(run_path: Path) -> tuple[str, str]:
     algorithm = "unknown"
     if "algorithm_id" in cfg and cfg.algorithm_id:
         algorithm = str(cfg.algorithm_id)
+    elif "algorithm_name" in cfg and cfg.algorithm_name:
+        algorithm = str(cfg.algorithm_name)
     elif "algorithm" in cfg and hasattr(cfg.algorithm, "_target_"):
         algorithm = str(cfg.algorithm._target_)
 
@@ -293,7 +295,9 @@ def _render_local_inspect(metadata: dict) -> None:
         )
     )
 
-    sync_details = metadata.get("synchronization_details", {})
+    sync_details = metadata.get(
+        "synchronization_config", metadata.get("synchronization_details", {})
+    )
     if sync_details or metadata.get("frequency") is not None:
         frequency = sync_details.get("frequency", metadata.get("frequency", "N/A"))
         max_delay = sync_details.get("max_delay_s")

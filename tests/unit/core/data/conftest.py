@@ -155,7 +155,7 @@ def mock_prefetch_transport(monkeypatch):
             "/synchronize/trigger-synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=recording_id,
-                synchronization_details=self.synchronization_details,
+                synchronization_config=self.synchronization_config,
             ).model_dump(mode="json"),
             headers=get_auth().get_headers(),
         )

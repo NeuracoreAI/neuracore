@@ -1,4 +1,5 @@
 defaults:
+  - structured_defaults
   - _self_
   - optional user: null
   - algorithm: null
@@ -18,34 +19,8 @@ dataset_id:
 algorithm_name:
 algorithm_id:
 
-algorithm_params: null
-
-# Core training parameters
-seed: 42
-epochs: 100
-output_prediction_horizon: 100
-validation_split: 0.2
-# How many points to run and save their trajectory rollouts. 0 disables
-# rollout saving. Metric validation still covers every validation sample.
-validation_rollout_points: 16
-# Write rollout snapshots when epoch % validation_rollout_frequency == 0.
-validation_rollout_frequency: 5
-frequency: 10
-allow_duplicates: true
-
 # Resume training
 resume_checkpoint_path: null  # Path to checkpoint to resume from
-
-logging_frequency: 50
-# Frequency (in steps) for host and accelerator utilisation under system/.
-# Sampled far less often than the model metrics: each sample costs syscalls and
-# an NVML query, and utilisation moves slowly enough that a fine cadence buys
-# nothing. 0 disables it.
-system_logging_frequency: 200
-keep_last_n_checkpoints: 2
-# Retain checkpoints whose epoch is divisible by this.
-checkpoint_saving_frequency: 5
-device: null  # e.g., "cuda:0", "mps", "cpu"
 
 input_data_types:
 output_data_types:
@@ -56,83 +31,6 @@ input_cross_embodiment_description: {
 output_cross_embodiment_description: {
 
 }
-
-# Batch size (can be "auto" for automatic tuning or an integer)
-batch_size: "auto"
-
-# Cache fully built training samples under ~/.neuracore/training/sample_cache,
-# keyed by a hash of everything that changes what a sample contains. Skips
-# frame decode and tensor construction on every epoch after the first, and on
-# any later run of the same configuration. Disable to always rebuild.
-dataset_sample_cache: true
-
-num_train_workers: 4
-num_val_workers: 2
-
-# Threads the prefetch uses to decode videos with ffmpeg. Downloading does not
-# use these threads.
-max_prefetch_decode_workers: 4
-
-# Network requests the prefetch keeps outstanding at once, all from a single
-# thread. Raise this, rather than max_prefetch_decode_workers, to make the prefetch
-# faster; throughput flattens out beyond ~16.
-num_concurrent_prefetch_requests: 16
-
-max_delay_s: null
-trim_start_end: true
-
-# If set, drop frames at the start of each episode while every joint position
-# stays within this threshold of its value in the first frame.
-trim_no_movement_at_start_threshold: null
-
-# Dict[str, Dict[DataType, List[MethodConfig]]], e.g.:
-# for images, we must have a resize step to reshape all images from different sources to the same size.
-# train_preprocessing is used on the training split (may include augmentations).
-# inference_preprocessing is used for validation and packaged into the model archive.
-#
-# ORDERING: methods do not necessarily run in the order listed here. Each method
-# declares, via its `on_cpu` attribute, whether it runs per sample in a
-# DataLoader worker or per batch once the batch is on the training device, and
-# every worker-side method runs before every device-side one. Relative order is
-# preserved within each of those two groups.
-train_preprocessing:
-  input:
-    RGB_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-      - _target_: neuracore.ml.preprocessing.methods.color_jitter.ColorJitter
-        brightness: 0.2
-        contrast: 0.2
-        saturation: 0.2
-        hue: 0.05
-      - _target_: neuracore.ml.preprocessing.methods.gaussian_noise.GaussianNoise
-        std: 5.0
-    DEPTH_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-  output:
-    RGB_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-    DEPTH_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-
-inference_preprocessing:
-  input:
-    RGB_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-    DEPTH_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-  output:
-    RGB_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
-    DEPTH_IMAGES:
-      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
-        size: [224, 224]
 
 # Resolve the name separately from the full path so Hydra can still own
 # hydra.run.dir creation while Neuracore controls duplicate-name behavior.

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from neuracore_types import PreprocessingStage
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
 
@@ -22,6 +23,7 @@ from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
+from neuracore.ml.utils.training_config import load_training_and_synchronization_config
 
 logger = logging.getLogger(__name__)
 
@@ -788,7 +790,9 @@ def find_optimal_batch_size(
         )
         min_batch_size = len(train_dataset)
 
-    num_train_workers = min(cfg.num_train_workers, cpu_count())
+    num_train_workers = min(
+        load_training_and_synchronization_config(cfg)[0].num_train_workers, cpu_count()
+    )
 
     device_desc = str(device)
     if "cuda" in device.type and torch.cuda.is_available():
@@ -894,7 +898,9 @@ def is_valid_batch_size(
             "clamping to train dataset size"
         )
 
-    num_train_workers = min(cfg.num_train_workers, cpu_count())
+    num_train_workers = min(
+        load_training_and_synchronization_config(cfg)[0].num_train_workers, cpu_count()
+    )
 
     logger.info(
         f"Validating batch_size: {batch_size}, "
@@ -929,24 +935,25 @@ def _split_train_val_dataset(
 
     Args:
         cfg: Training config providing ``validation_split``, ``seed``, and
-            ``inference_preprocessing``.
+            ``preprocessing``.
         dataset: Full synchronized dataset with train preprocessing.
 
     Returns:
         ``(train_dataset, val_dataset)`` subsets from
         ``split_train_val_datasets``.
     """
+    training_config = load_training_and_synchronization_config(cfg)[0]
     (
         inference_input_preprocessing_config,
         inference_output_preprocessing_config,
     ) = resolve_input_output_preprocessing(
-        cfg.get("inference_preprocessing"),
-        role_name="inference_preprocessing",
+        training_config.preprocessing,
+        stage=PreprocessingStage.INFERENCE,
     )
     return split_train_val_datasets(
         dataset,
-        validation_split=cfg.validation_split,
-        seed=cfg.seed,
+        validation_split=training_config.validation_split,
+        seed=training_config.seed,
         inference_input_preprocessing_config=inference_input_preprocessing_config,
         inference_output_preprocessing_config=inference_output_preprocessing_config,
     )

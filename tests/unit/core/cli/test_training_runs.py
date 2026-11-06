@@ -64,7 +64,7 @@ def training_jobs_response():
                     "JOINT_TARGET_POSITIONS": {0: "joint_1", 1: "joint_2"},
                 }
             },
-            "synchronization_details": {
+            "synchronization_config": {
                 "frequency": 10,
                 "max_delay_s": 0.5,
                 "allow_duplicates": True,
@@ -101,7 +101,7 @@ def training_jobs_response():
             "resume_points": [],
             "input_cross_embodiment_description": {},
             "output_cross_embodiment_description": {},
-            "synchronization_details": {
+            "synchronization_config": {
                 "frequency": 20,
                 "max_delay_s": 1e20,
                 "allow_duplicates": False,
@@ -133,7 +133,7 @@ def training_jobs_response():
             "resume_points": [],
             "input_cross_embodiment_description": {},
             "output_cross_embodiment_description": {},
-            "synchronization_details": {
+            "synchronization_config": {
                 "frequency": 10,
                 "max_delay_s": 1.0,
                 "allow_duplicates": True,
