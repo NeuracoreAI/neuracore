@@ -13,8 +13,8 @@ post-mutation re-sync:
   removing and replacing half the recordings, and
 * :func:`test_recording_pagination_forward_and_backward` — forward and backward
   ``Dataset`` traversal agree on a dataset spanning more than one page.
-* :func:`test_recording_tags_add_and_remove`: user tags and the deprecated
-  status calls change the tags of a saved recording.
+* :func:`test_recording_tags_add_and_remove`: user tags are added to and
+  removed from a saved recording.
 
 Each synchronization scenario drives the high-level ``Dataset.synchronize()``:
 success returns a ``SynchronizedDataset``, while the two failure classes raise a
@@ -43,12 +43,7 @@ from collections.abc import Iterator
 
 import numpy as np
 import pytest
-from neuracore_types import (
-    FLAGGED_TAG_NAME,
-    DataType,
-    RecordingStatus,
-    RecordingTagSource,
-)
+from neuracore_types import DataType, RecordingTagSource
 
 import neuracore as nc
 from neuracore.core.data.dataset import PAGE_SIZE, Dataset
@@ -518,16 +513,8 @@ def test_recording_tags_add_and_remove() -> None:
         recording.add_tag("Needs Review")
         assert _user_tag_names(recording) == {"needs-review"}
 
-        recording.remove_tag("needs-review")
-        assert _user_tag_names(recording) == set()
-
-        with pytest.warns(DeprecationWarning):
-            recording.set_status(RecordingStatus.FLAGGED)
-        assert _user_tag_names(recording) == {FLAGGED_TAG_NAME}
-
         stored = next(iter(nc.get_dataset(dataset.name)))
-        assert _user_tag_names(stored) == {FLAGGED_TAG_NAME}
+        assert _user_tag_names(stored) == {"needs-review"}
 
-        with pytest.warns(DeprecationWarning):
-            recording.set_status(RecordingStatus.NORMAL)
+        recording.remove_tag("needs-review")
         assert _user_tag_names(recording) == set()

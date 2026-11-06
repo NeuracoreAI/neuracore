@@ -4,12 +4,10 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from neuracore_types import (
-    FLAGGED_TAG_NAME,
     Codec,
     CrossEmbodimentUnion,
     DataType,
     RecordingMetadata,
-    RecordingStatus,
     RecordingTag,
     RecordingTagRequest,
     SynchronizationDetails,
@@ -23,7 +21,6 @@ from neuracore.core.exceptions import AuthenticationError, SynchronizationError
 from neuracore.core.utils.download import download_bytes
 from neuracore.core.utils.embodiment_description_utils import extract_data_types
 from neuracore.core.utils.http_session import thread_local_session
-from neuracore.utils import deprecated
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
@@ -242,7 +239,7 @@ class Recording:
     @property
     def tags(self) -> list[RecordingTag]:
         """Tags of this recording in its dataset, as last read from the cloud."""
-        return list(self.metadata.tags or [])
+        return list(self.metadata.tags)
 
     def add_tag(self, name: str) -> None:
         """Add a user tag to this recording in its dataset.
@@ -281,29 +278,6 @@ class Recording:
         """
         tag = RecordingTagRequest(name=name)
         self._change_dataset_entry("DELETE", _TAGS_ROUTE, params=tag.model_dump())
-
-    @deprecated(f"Use add_tag or remove_tag with the {FLAGGED_TAG_NAME!r} tag.")
-    def set_status(self, status: RecordingStatus) -> None:
-        """Flag or unflag a recording programmatically.
-
-        This call is blocking. FLAGGED adds the user tag `flagged` and NORMAL
-        removes it.
-
-        Args:
-            status: The status to set the recording to e.g. `RecordingStatus.FLAGGED`
-
-        Raises:
-            ValueError: If the status is QA_FLAGGED. Only QA writes QA tags.
-            RuntimeError: If there is an error updating the metadata in the cloud.
-            ConfigError: If there is an error trying to get the config
-            AuthenticationError: If there is an error with authentication
-        """
-        if status == RecordingStatus.QA_FLAGGED:
-            raise ValueError("Only QA can set QA_FLAGGED")
-        if status == RecordingStatus.FLAGGED:
-            self.add_tag(FLAGGED_TAG_NAME)
-        else:
-            self.remove_tag(FLAGGED_TAG_NAME)
 
     def set_notes(self, notes: str) -> None:
         """Update a recordings notes programmatically.
