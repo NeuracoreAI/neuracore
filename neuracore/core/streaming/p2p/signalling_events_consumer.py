@@ -30,6 +30,7 @@ from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     ManagerType,
 )
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.streaming.p2p.signalling_endpoint import SignallingTarget
 from neuracore.core.streaming.p2p.signalling_session import (
     LowerEpochError,
     SignallingSession,
@@ -99,6 +100,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         self.regions = regions
         # Set once the stream knows its service: legacy, or registered.
         self._decided = asyncio.Event()
+        self._opened = asyncio.Event()
         self._failed_over = False
         self.enabled_manager.add_listener(EnabledManager.DISABLED, self._decided.set)
 
@@ -158,6 +160,14 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             reason: Why the region closed the stream.
         """
         logger.info(f"Signalling stream closed: {reason}")
+
+    async def on_open(self) -> None:
+        """Mark the stream open: messages to it are delivered."""
+        self._opened.set()
+
+    async def wait_open(self) -> None:
+        """Wait until the stream has opened once."""
+        await self._opened.wait()
 
     async def endpoint(self) -> tuple[str, dict[str, str]]:
         """Return this stream's signalling base URL and headers.
@@ -318,6 +328,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             remote_stream_id=message.from_id,
             connection_id=message.connection_id,
             connection_details=connection_details,
+            target=SignallingTarget(self.local_stream_id, self.endpoint),
         )
 
         @connection_enabled.on(EnabledManager.DISABLED)
