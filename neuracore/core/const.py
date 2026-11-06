@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 from warnings import warn
 
 API_URL = (os.getenv("NEURACORE_API_URL") or "https://api.neuracore.com/api").strip()
@@ -23,6 +24,19 @@ API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.com/api")
 # what the load balancer can route on: the organization id sits in the middle of
 # the path, which it cannot match.
 STREAM_API_URL = f"{API_URL}/stream"
+
+
+def shared_signalling_url(api_url: str) -> str | None:
+    """Return the shared signalling URL of an `https://...api.<domain>/api` URL."""
+    url = urlparse(api_url.strip())
+    host = url.hostname or ""
+    if url.scheme != "https" or not (host.startswith("api.") or ".api." in host):
+        return None
+    return f"https://{host.replace('api.', 'signalling.', 1)}"
+
+
+# Robots register through it, so the nearest healthy region takes them.
+SIGNALLING_URL = os.getenv("NEURACORE_SIGNALLING_URL") or shared_signalling_url(API_URL)
 
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
 DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
