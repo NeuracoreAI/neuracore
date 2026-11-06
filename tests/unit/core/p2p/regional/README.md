@@ -5,6 +5,25 @@ the backend token route and one region.
 
 ## Contract
 
+`neuracore.core.streaming.p2p.consumer.regional_availability`:
+
+| Name | Behaviour |
+|---|---|
+| `LEGACY_SOURCE` | Source name of the legacy stream during cutover. |
+| `RegionalAvailability(keep_seconds, clock=time.monotonic)` | Merged robot list of all sources. |
+| `.apply_init(source, init)` | Replaces every entry of `source`. |
+| `.apply_update(source, update)` | Applies a delta to the entries of `source`. |
+| `.drop_source(source)` | The stream of `source` dropped. Its entries stay for `keep_seconds`. |
+| `.snapshot()` | `AvailableRobotCapacityInit` of the winning entry of each robot instance. |
+| `.owner_of(robot_id, robot_instance)` | Source of the winning entry, or None. |
+| `.wait_for_update(robot_id, robot_instance, timeout)` | Waits for a change of that instance; returns True if one came. |
+| `list_stream_urls(org_id, region_endpoints)` | One `available_robots` URL for each region endpoint. |
+| `connect_to_listed_region(availability, robot_id, robot_instance, open_connection, tries=3, wait_seconds=5.0)` | Connects in the owner's region; on 409 `not_present` waits for an update or `wait_seconds`, then tries again. |
+| `RobotInstanceUnavailableError` | Raised after `tries` failed tries. |
+
+Merge rule: highest epoch wins. Equal epochs: the source that sorts first wins.
+A regional entry wins over a `LEGACY_SOURCE` entry.
+
 `neuracore.core.streaming.p2p.signalling_session`:
 
 | Name | Behaviour |
