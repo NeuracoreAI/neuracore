@@ -460,6 +460,15 @@ class TestReadTimeoutRetrySession:
         assert retry.status == 2
         assert retry.allowed_methods == frozenset({"GET", "HEAD"})
 
+    def test_combined_session_retries_transient_status_on_get(self):
+        _reset_thread_local()
+        session = thread_local_session(retry_transient=True, retry_read_timeout=True)
+        with _ScriptedServer([503, 200]) as server:
+            response = session.get(server.url)
+        assert response.status_code == 200
+        assert server.call_count == 2
+        _reset_thread_local()
+
     def test_get_read_timeout_consumes_read_retry_budget(self):
         error = ReadTimeoutError(None, "/resource", "Read timed out")
 

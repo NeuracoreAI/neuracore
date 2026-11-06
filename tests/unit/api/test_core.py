@@ -389,7 +389,10 @@ def test_is_recording_upload_complete_returns_backend_state(
 
     result = api_core.backend_utils.is_recording_upload_complete("recording-123")
 
-    session_factory.assert_called_once_with(retry_read_timeout=True)
+    session_factory.assert_called_once_with(
+        retry_transient=True,
+        retry_read_timeout=True,
+    )
 
     assert result is complete
     session.get.assert_called_once_with(
@@ -436,7 +439,10 @@ def test_is_recording_upload_complete_rejects_invalid_response(
     ):
         api_core.backend_utils.is_recording_upload_complete("recording-123")
 
-    session_factory.assert_called_once_with(retry_read_timeout=True)
+    session_factory.assert_called_once_with(
+        retry_transient=True,
+        retry_read_timeout=True,
+    )
 
 
 def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
