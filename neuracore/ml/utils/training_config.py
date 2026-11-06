@@ -491,5 +491,46 @@ def resolve_to_complete_config(
         supported_input_data_types=supported_input_data_types,
         supported_output_data_types=supported_output_data_types,
     )
+    _validate_synthesize_done(
+        cfg.get("synthesize_done_tail_s"),
+        dataset=dataset,
+        algorithm_name=algorithm_name,
+        supported_output_data_types=supported_output_data_types,
+    )
 
     return cfg
+
+
+def _validate_synthesize_done(
+    tail_s: float | None,
+    dataset: Dataset,
+    algorithm_name: str,
+    supported_output_data_types: set[DataType],
+) -> None:
+    """Check a synthesized done flag can be trained before any data is fetched.
+
+    Args:
+        tail_s: Requested done tail length in seconds, or None when not set.
+        dataset: The dataset being trained on.
+        algorithm_name: Name of the algorithm being trained.
+        supported_output_data_types: Output data types the algorithm supports.
+
+    Raises:
+        ValueError: If the tail length is not positive, or the done flag would
+            be synthesized for an algorithm that cannot output DONE.
+    """
+    if tail_s is None:
+        return
+    if tail_s <= 0:
+        raise ValueError(
+            f"synthesize_done_tail_s must be a positive number of seconds, "
+            f"got {tail_s}."
+        )
+    if DataType.DONE in dataset.data_types:
+        # The logged done flags are used instead; train.py warns about it.
+        return
+    if DataType.DONE not in supported_output_data_types:
+        raise ValueError(
+            f"synthesize_done_tail_s is set, but algorithm '{algorithm_name}' "
+            "does not support DONE as an output."
+        )
