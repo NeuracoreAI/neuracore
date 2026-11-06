@@ -80,6 +80,9 @@ def _consumer(session: Any, client_session: ClientSession) -> SignallingEventsCo
     consumer.connection_managers = {}
     consumer.signalling_session = session
     consumer.enabled_manager = EnabledManager(True, loop=asyncio.get_running_loop())
+    consumer._decided = asyncio.Event()
+    consumer._failed_over = False
+    consumer._decided.set()
     return consumer
 
 
