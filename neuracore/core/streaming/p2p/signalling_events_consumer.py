@@ -97,6 +97,10 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         self.auth = auth or get_auth()
         self.signalling_session = signalling_session
         self.regions = regions
+        # Set once the stream knows its service: legacy, or registered.
+        self._decided = asyncio.Event()
+        self._failed_over = False
+        self.enabled_manager.add_listener(EnabledManager.DISABLED, self._decided.set)
 
     def on_authentication_error(self) -> None:
         """Propagate terminal authentication failure to the root owner."""
@@ -122,6 +126,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             the configuration to be used to connect to the client
         """
         session = self.signalling_session
+        registered = False
         if (
             session is not None
             and session.robot_instance is not None
@@ -129,6 +134,12 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         ):
             await self._register_first(session)
             session = self.signalling_session
+            registered = True
+        self._decided.set()
+        if registered and self._failed_over:
+            # The new region has the registration but not the tracks.
+            self._failed_over = False
+            self.background_tracker.submit_background_coroutine(self._resubmit_tracks())
         if session is None:
             return self.get_sse_client_config()
         return EventSourceConfig(
@@ -147,6 +158,35 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             reason: Why the region closed the stream.
         """
         logger.info(f"Signalling stream closed: {reason}")
+
+    async def endpoint(self) -> tuple[str, dict[str, str]]:
+        """Return this stream's signalling base URL and headers.
+
+        Raises:
+            RuntimeError: If the stream closed before it knew its service.
+        """
+        await self._decided.wait()
+        if self.enabled_manager.is_disabled():
+            raise RuntimeError("signalling stopped")
+        session = self.signalling_session
+        if session is None:
+            return self._signalling_url(), self.auth.get_headers()
+        # Headers first: they wait for a registration that may move the region.
+        headers = await session.headers()
+        return self._signalling_url(), headers
+
+    async def _resubmit_tracks(self) -> None:
+        session = self.signalling_session
+        if session is None or session.robot_id is None:
+            return
+        if session.robot_instance is None:
+            return
+        manager = self.manager_factory.get_manager(
+            type=ManagerType.PROVIDER,
+            robot_id=session.robot_id,
+            robot_instance=session.robot_instance,
+        )
+        await manager.on_stream_resurrected()
 
     def _signalling_url(self) -> str:
         session = self.signalling_session
@@ -186,6 +226,8 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             # shared URL. An open stream keeps its region.
             if fail_over:
                 session.base_url = None
+                self._decided.clear()
+                self._failed_over = True
             raise
         except LowerEpochError:
             logger.error(
@@ -233,12 +275,9 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         """Handle heartbeat events by keeping the connection alive."""
         # The response is read within a context manager so the underlying
         # connection is released back to the session pool.
-        session = self.signalling_session
-        headers = (
-            self.auth.get_headers() if session is None else await session.headers()
-        )
+        base_url, headers = await self.endpoint()
         async with self.client_session.post(
-            f"{self._signalling_url()}/alive/{self.local_stream_id}",
+            f"{base_url}/alive/{self.local_stream_id}",
             headers=headers,
             data="pong",
         ) as raw_response:

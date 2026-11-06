@@ -31,11 +31,25 @@ class RecordingClientSession:
         """Initialise the session with no recorded posts."""
         self.posts: list[tuple[str, Any]] = []
 
-    async def post(
+    def post(
         self, url: str, headers: dict | None = None, json: Any = None
-    ) -> None:
+    ) -> "RecordedResponse":
         """Record one post request."""
         self.posts.append((url, json))
+        return RecordedResponse()
+
+
+class RecordedResponse:
+    """A successful response, used as a context manager."""
+
+    async def __aenter__(self) -> "RecordedResponse":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        """Accept every request."""
 
 
 @pytest.fixture
