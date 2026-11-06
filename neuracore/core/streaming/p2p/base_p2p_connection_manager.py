@@ -10,6 +10,7 @@ from enum import Enum
 from neuracore_types import HandshakeMessage, OpenConnectionDetails
 
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.streaming.p2p.signalling_endpoint import SignallingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class BaseP2PStreamManager(ABC):
         remote_stream_id: str,
         connection_id: str,
         connection_details: OpenConnectionDetails,
+        target: SignallingTarget | None = None,
     ) -> EnabledManager:
         """Create a new peer-to-peer connection to a remote stream.
 

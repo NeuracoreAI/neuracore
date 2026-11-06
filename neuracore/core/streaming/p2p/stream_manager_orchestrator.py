@@ -76,6 +76,8 @@ class StreamManagerOrchestrator(
         self.provider_consumers: dict[
             RobotInstanceIdentifier, SignallingEventsConsumer
         ] = {}
+        # A viewer has a stream in each region of a robot it views.
+        self.viewer_consumers: dict[tuple[str, str], SignallingEventsConsumer] = {}
 
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
@@ -126,9 +128,44 @@ class StreamManagerOrchestrator(
 
     def own_stream_ids(self) -> set[str]:
         """Return the stream IDs of this process, which its viewers skip."""
-        return {self.signalling_consumer.local_stream_id} | {
-            consumer.local_stream_id for consumer in self.provider_consumers.values()
-        }
+        consumers = [
+            self.signalling_consumer,
+            *self.provider_consumers.values(),
+            *self.viewer_consumers.values(),
+        ]
+        return {consumer.local_stream_id for consumer in consumers}
+
+    def close_viewer_consumers(self, robot_id: str) -> None:
+        """Close this process's viewer streams for a robot it no longer views."""
+        for key in [key for key in self.viewer_consumers if key[1] == robot_id]:
+            self.viewer_consumers.pop(key).close()
+
+    def viewer_consumer(self, region: str, robot_id: str) -> SignallingEventsConsumer:
+        """Return this process's viewer stream for a robot in a region."""
+        key = (region, robot_id)
+        consumer = self.viewer_consumers.get(key)
+        if consumer is None or consumer.enabled_manager.is_disabled():
+            session = SignallingSession(
+                api_url=API_URL,
+                org_id=self.org_id,
+                auth=self.auth,
+                client_session=self.client_session,
+                robot_id=robot_id,
+            )
+            session.base_url = region
+            consumer = SignallingEventsConsumer(
+                manager_factory=self,
+                org_id=self.org_id,
+                loop=self.loop,
+                auth=self.auth,
+                client_session=self.client_session,
+                enabled_manager=EnabledManager.derived_manger(
+                    get_consume_live_data_enabled_manager(), loop=self.loop
+                ),
+                signalling_session=session,
+            )
+            self.viewer_consumers[key] = consumer
+        return consumer
 
     def _on_logout(self) -> None:
         """Schedule teardown on the streaming event loop."""
@@ -144,9 +181,10 @@ class StreamManagerOrchestrator(
         self._remove_logout_listener()
 
         self.signalling_consumer.close()
-        provider_consumers = list(self.provider_consumers.values())
+        consumers = [*self.provider_consumers.values(), *self.viewer_consumers.values()]
         self.provider_consumers.clear()
-        for consumer in provider_consumers:
+        self.viewer_consumers.clear()
+        for consumer in consumers:
             consumer.close()
 
         provider_managers = list(self.provider_managers.values())

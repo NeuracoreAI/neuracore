@@ -75,6 +75,7 @@ def _manager(clock: Clock) -> OrgNodesManager:
     manager.merged_update = None
     manager.enabled_manager = MagicMock(is_disabled=MagicMock(return_value=False))
     manager.region_consumers = []
+    manager._pending_connections = {}
     manager.org_id = ORG_ID
     manager.loop = MagicMock(is_closed=MagicMock(return_value=False))
     return manager
