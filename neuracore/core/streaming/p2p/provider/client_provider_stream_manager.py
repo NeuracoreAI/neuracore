@@ -28,6 +28,7 @@ from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.streaming.p2p.signalling_endpoint import (
     SignallingEndpoint,
+    SignallingTarget,
     legacy_endpoint,
 )
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
@@ -246,6 +247,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         remote_stream_id: str,
         connection_id: str,
         connection_details: OpenConnectionDetails,
+        target: SignallingTarget | None = None,
     ) -> EnabledManager:
         """Create a new peer-to-peer connection to a remote stream.
 
@@ -253,6 +255,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             remote_stream_id: ID of the remote stream to connect to
             connection_id: Unique identifier for this connection
             connection_details: The describes the type of connection to establish.
+            target: Unused: the robot's own stream signals its connections.
         """
         connection = PeerToPeerProviderConnection(
             connection_id=connection_id,

@@ -112,6 +112,10 @@ class BaseSSEConsumer(ABC):
         """
         pass
 
+    async def on_open(self) -> None:
+        """An optional handler run each time the stream opens."""
+        pass
+
     async def on_heartbeat(self) -> None:
         """An optional handler for heartbeat events."""
         pass
@@ -185,6 +189,7 @@ class BaseSSEConsumer(ABC):
                 ) as event_source:
                     sources.append(event_source)
                     reconnect_due = True
+                    await self.on_open()
                     async for event in event_source:
                         backoff_time = max(
                             STREAMING_MINIMUM_BACKOFF_TIME_S, backoff_time / 2
