@@ -15,7 +15,7 @@ def _rgb(height: int = 32, width: int = 48) -> BatchedRGBData:
 
 def test_gaussian_noise_preserves_shape():
     data = _rgb()
-    method = GaussianNoise(std=5.0)
+    method = GaussianNoise(std=5.0, clip=True)
 
     out = method(data)
 
@@ -28,7 +28,7 @@ def test_gaussian_noise_changes_pixels():
     torch.manual_seed(0)
     data = _rgb()
     original = data.frame.clone()
-    out = GaussianNoise(std=10.0)(data)
+    out = GaussianNoise(std=10.0, clip=True)(data)
 
     assert not torch.allclose(out.frame, original)
 
@@ -36,7 +36,7 @@ def test_gaussian_noise_changes_pixels():
 def test_gaussian_noise_std_zero_is_noop():
     data = _rgb()
     original = data.frame.clone()
-    out = GaussianNoise(std=0.0)(data)
+    out = GaussianNoise(std=0.0, clip=True)(data)
 
     assert out is data
     assert torch.equal(out.frame, original)
@@ -44,7 +44,7 @@ def test_gaussian_noise_std_zero_is_noop():
 
 def test_gaussian_noise_rejects_negative_std():
     with pytest.raises(ValueError, match="non-negative"):
-        GaussianNoise(std=-1.0)
+        GaussianNoise(std=-1.0, clip=True)
 
 
 def test_gaussian_noise_rejects_non_rgb():
@@ -55,4 +55,4 @@ def test_gaussian_noise_rejects_non_rgb():
         intrinsics=torch.zeros((1, 1, 3, 3), dtype=torch.float32),
     )
     with pytest.raises(TypeError, match="Unsupported batched data type"):
-        GaussianNoise()(depth)
+        GaussianNoise(std=5.0, clip=True)(depth)

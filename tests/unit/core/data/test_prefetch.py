@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from neuracore_types import DataType, SynchronizationDetails
+from neuracore_types import DataType, SynchronizationConfig
 
 import neuracore as nc
 import neuracore.core.data.frame_cache as frame_cache
@@ -29,9 +29,9 @@ def dataset_mock(mock_data_requests, tmp_path, mocked_org_id) -> Dataset:
 
 
 @pytest.fixture
-def details() -> SynchronizationDetails:
+def details() -> SynchronizationConfig:
     """Synchronization parameters matching the mocked responses."""
-    return SynchronizationDetails(frequency=30, cross_embodiment_union=None)
+    return SynchronizationConfig(frequency=30, cross_embodiment_union=None)
 
 
 def _prefetcher(dataset, details, **kwargs) -> CameraDataPrefetcher:
@@ -39,7 +39,7 @@ def _prefetcher(dataset, details, **kwargs) -> CameraDataPrefetcher:
     return CameraDataPrefetcher(
         dataset=dataset,
         recordings=recordings,
-        synchronization_details=details,
+        synchronization_config=details,
         **kwargs,
     )
 

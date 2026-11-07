@@ -19,8 +19,8 @@ class GaussianNoise(PreprocessingMethod):
 
     def __init__(
         self,
-        std: float = 5.0,
-        clip: bool = True,
+        std: float,
+        clip: bool,
     ) -> None:
         """Initialize Gaussian noise parameters.
 

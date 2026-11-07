@@ -1,5 +1,7 @@
 """Tests for the training CLI group (local and cloud)."""
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -22,7 +24,7 @@ def sample_training_jobs_response():
             "launch_time": 1704067200.0,
             "algorithm": "cnnmlp",
             "dataset_id": "dataset_123",
-            "synchronization_details": {
+            "synchronization_config": {
                 "frequency": 10,
                 "max_delay_s": 0.5,
                 "allow_duplicates": True,
@@ -37,7 +39,7 @@ def sample_training_jobs_response():
             "launch_time": 1704153600.0,
             "algorithm": "act",
             "dataset_id": "dataset_456",
-            "synchronization_details": {
+            "synchronization_config": {
                 "frequency": 20,
                 "max_delay_s": 1.0,
                 "allow_duplicates": False,
@@ -204,7 +206,7 @@ def test_training_local_inspect(tmp_path):
   "step": -1,
   "gpu_type": "NVIDIA_TESLA_T4",
   "num_gpus": 1,
-  "synchronization_details": {
+  "synchronization_config": {
     "frequency": 10,
     "max_delay_s": 1.7976931348623157e+308,
     "allow_duplicates": true,
@@ -249,6 +251,41 @@ def test_training_local_inspect(tmp_path):
     assert "JOINT_TARGET_POSITIONS" in result.output
     assert "Hardware" in result.output
     assert "Synchronization Details" in result.output
+
+
+def test_training_local_inspect_reads_synchronization_details_key(tmp_path):
+    """Inspect a local run saved with the synchronization_details key."""
+    run_dir = tmp_path / "run_local"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "training_run.json").write_text(
+        json.dumps({
+            "id": "run_local",
+            "name": "run_local",
+            "status": "RUNNING",
+            "algorithm": "cnnmlp",
+            "dataset_id": "dataset_123",
+            "local_output_dir": str(run_dir),
+            "synchronization_details": {"frequency": 25, "allow_duplicates": False},
+        })
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "training",
+            "inspect",
+            "--local",
+            "--root",
+            str(tmp_path),
+            "--training-name",
+            "run_local",
+        ],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "25 Hz" in result.output
 
 
 def test_training_list_defaults_to_all(

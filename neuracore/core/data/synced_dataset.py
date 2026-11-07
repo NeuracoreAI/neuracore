@@ -13,7 +13,7 @@ from neuracore_types import (
     CrossEmbodimentUnion,
     DatasetStatisticsJob,
     DatasetStatisticsJobStatus,
-    SynchronizationDetails,
+    SynchronizationConfig,
     SynchronizedDatasetStatistics,
 )
 from tqdm import tqdm
@@ -91,7 +91,7 @@ class SynchronizedDataset:
         self.dataset = dataset
         self.frequency = frequency
         self.cross_embodiment_union = cross_embodiment_union
-        self.synchronization_details = SynchronizationDetails(
+        self.synchronization_config = SynchronizationConfig(
             frequency=frequency,
             cross_embodiment_union=cross_embodiment_union,
             max_delay_s=max_delay_s,
@@ -146,7 +146,7 @@ class SynchronizedDataset:
         prefetcher = CameraDataPrefetcher(
             dataset=self.dataset,
             recordings=recordings,
-            synchronization_details=self.synchronization_details,
+            synchronization_config=self.synchronization_config,
             inflight_requests=self._num_concurrent_prefetch_requests,
             decode_workers=self._max_prefetch_decode_workers,
             download_camera_data=self._prefetch_videos,
@@ -165,7 +165,7 @@ class SynchronizedDataset:
                 dataset=self.dataset,
                 robot_id=recording.robot_id,
                 instance=recording.instance,
-                synchronization_details=self.synchronization_details,
+                synchronization_config=self.synchronization_config,
                 prefetch_videos=self._prefetch_videos,
                 synced_episode=episodes.get(idx),
             )
@@ -222,11 +222,11 @@ class SynchronizedDataset:
                 prefetch_videos=False,  # Avoid prefetching again
                 max_prefetch_decode_workers=self._max_prefetch_decode_workers,
                 num_concurrent_prefetch_requests=self._num_concurrent_prefetch_requests,
-                max_delay_s=self.synchronization_details.max_delay_s,
-                allow_duplicates=self.synchronization_details.allow_duplicates,
-                trim_start_end=self.synchronization_details.trim_start_end,
+                max_delay_s=self.synchronization_config.max_delay_s,
+                allow_duplicates=self.synchronization_config.allow_duplicates,
+                trim_start_end=self.synchronization_config.trim_start_end,
                 trim_no_movement_at_start_threshold=(
-                    self.synchronization_details.trim_no_movement_at_start_threshold
+                    self.synchronization_config.trim_no_movement_at_start_threshold
                 ),
                 synced_recording_cache=sliced_cache,
             )
@@ -245,7 +245,7 @@ class SynchronizedDataset:
                         dataset=self.dataset,
                         robot_id=rec.robot_id,
                         instance=rec.instance,
-                        synchronization_details=self.synchronization_details,
+                        synchronization_config=self.synchronization_config,
                         prefetch_videos=self._prefetch_videos,
                     )
                     self._synced_recording_cache[idx] = synced_recording
@@ -275,7 +275,7 @@ class SynchronizedDataset:
                     dataset=self.dataset,
                     robot_id=recording.robot_id,
                     instance=recording.instance,
-                    synchronization_details=self.synchronization_details,
+                    synchronization_config=self.synchronization_config,
                     prefetch_videos=self._prefetch_videos,
                 )
                 self._synced_recording_cache[self._recording_idx] = s

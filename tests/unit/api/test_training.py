@@ -1,10 +1,19 @@
 import pytest
 import requests
-from neuracore_types import Dataset, DataType, GPUType
+from neuracore_types import (
+    Dataset,
+    DataType,
+    GPUType,
+    SynchronizationConfig,
+    TrainingJob,
+    TrainingJobStatus,
+)
+from pydantic import ValidationError
 
 import neuracore as nc
 from neuracore.api.training import _resolve_next_name, _validate_gpu_to_algorithm
 from neuracore.core.const import API_URL
+from neuracore.core.exceptions import TrainingRunError
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
 TEST_DATASET_ID = "dataset123"
@@ -111,18 +120,25 @@ def test_validate_gpu_to_algorithm_rejects_full_size_variant():
         )
 
 
+def valid_training_job_json(**overrides):
+    """Return a full training job response body with the given overrides."""
+    training_job = TrainingJob(
+        id="train_job_123",
+        name="test_training_run",
+        dataset_id="dataset_123",
+        algorithm="CNNMLP",
+        algorithm_id="algo_123",
+        status=TrainingJobStatus.PENDING,
+        launch_time=1704067200.0,
+        synchronization_config=SynchronizationConfig(frequency=10),
+    )
+    return {**training_job.model_dump(mode="json"), **overrides}
+
+
 @pytest.fixture
 def training_job_response():
     """Create a mock training job response."""
-    return {
-        "id": "train_job_123",
-        "name": "test_training_run",
-        "dataset_id": "dataset_123",
-        "algorithm_id": "algo_123",
-        "status": "pending",
-        "created_at": "2023-01-01T00:00:00Z",
-        "updated_at": "2023-01-01T00:00:00Z",
-    }
+    return valid_training_job_json()
 
 
 @pytest.fixture
@@ -296,7 +312,7 @@ def test_start_training_run(mock_start_training_run_endpoints):
     assert job["name"] == "test_training_run"
     assert job["dataset_id"] == "dataset_123"
     assert job["algorithm_id"] == "algo_123"
-    assert job["status"] == "pending"
+    assert job["status"] == "PENDING"
 
 
 def test_get_training_job_data(
@@ -324,7 +340,7 @@ def test_get_training_job_data(
     assert job_data is not None
     assert job_data["id"] == "train_job_123"
     assert job_data["name"] == "test_training_run"
-    assert job_data["status"] == "pending"
+    assert job_data["status"] == "PENDING"
 
 
 def test_start_training_run_raises_on_duplicate_name(
@@ -364,7 +380,7 @@ def test_start_training_run_name_auto_increment(
     nc.login("test_api_key")
     mock_start_training_run_endpoints(
         # An existing job with the same name is what forces the increment.
-        existing_jobs=[{"id": "existing_123", "name": "test_training_run"}],
+        existing_jobs=[valid_training_job_json(id="existing_123")],
         job_response={
             **training_job_response,
             "name": "test_training_run_1",
@@ -413,7 +429,7 @@ def test_get_training_job_status(
     status = nc.get_training_job_status("train_job_123")
 
     # Verify status
-    assert status == "pending"
+    assert status == "PENDING"
 
 
 def test_cancel_training_job(
@@ -961,3 +977,184 @@ def test_download_training_checkpoint_rolled_off(
 
     with pytest.raises(ValueError, match="no longer available"):
         nc.download_training_checkpoint("train_job_123", output_dir=tmp_path)
+
+
+def test_start_training_run_sends_training_config_separately(
+    mock_auth_requests, mock_start_training_run_endpoints
+):
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints()
+
+    nc.start_training_run(
+        name="config_split_run",
+        dataset_name="test_dataset",
+        algorithm_name="cnnmlp",
+        algorithm_config={"hidden_dim": 256},
+        training_config={"epochs": 3},
+        gpu_type=GPUType.NVIDIA_TESLA_T4,
+        num_gpus=1,
+        frequency=10,
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+    )
+
+    request_body = _training_job_post_requests(mock_auth_requests)[0].json()
+    assert request_body["training_config"] == {"epochs": 3}
+    assert request_body["algorithm_config"] == {"hidden_dim": 256}
+
+
+@pytest.mark.parametrize(
+    "invalid_training_config", [{"epochs": 0}, {"unknown_setting": 1}]
+)
+def test_start_training_run_rejects_bad_training_config_before_sending(
+    mock_auth_requests, mock_start_training_run_endpoints, invalid_training_config
+):
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints()
+
+    with pytest.raises(ValidationError):
+        nc.start_training_run(
+            name="bad_config_run",
+            dataset_name="test_dataset",
+            algorithm_name="cnnmlp",
+            algorithm_config={},
+            training_config=invalid_training_config,
+            gpu_type=GPUType.NVIDIA_TESLA_T4,
+            num_gpus=1,
+            frequency=10,
+            input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+            output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+        )
+    assert _training_job_post_requests(mock_auth_requests) == []
+
+
+def test_start_training_run_rejects_training_key_in_algorithm_config(
+    mock_auth_requests, mock_start_training_run_endpoints
+):
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints()
+
+    with pytest.raises(ValidationError, match="seed"):
+        nc.start_training_run(
+            name="misplaced_seed_run",
+            dataset_name="test_dataset",
+            algorithm_name="cnnmlp",
+            algorithm_config={"seed": 7},
+            gpu_type=GPUType.NVIDIA_TESLA_T4,
+            num_gpus=1,
+            frequency=10,
+            input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+            output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+        )
+    assert _training_job_post_requests(mock_auth_requests) == []
+
+
+def test_training_job_response_is_validated(mock_start_training_run_endpoints):
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints(
+        job_response=valid_training_job_json(training_config={"epochs": 3})
+    )
+
+    job = nc.start_training_run(
+        name="validated_response_run",
+        dataset_name="test_dataset",
+        algorithm_name="cnnmlp",
+        algorithm_config={},
+        training_config={"epochs": 3},
+        gpu_type=GPUType.NVIDIA_TESLA_T4,
+        num_gpus=1,
+        frequency=10,
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+    )
+
+    assert job["training_config"]["epochs"] == 3
+
+
+@pytest.mark.parametrize(
+    "broken_fields",
+    [
+        {"training_config": {"epochs": 0}},
+        {"training_config": {"unknown_setting": 1}},
+        {"status": "NOT_A_STATUS"},
+    ],
+)
+def test_invalid_training_job_response_is_rejected(
+    mock_start_training_run_endpoints, broken_fields
+):
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints(
+        job_response=valid_training_job_json(**broken_fields)
+    )
+
+    with pytest.raises(TrainingRunError, match="Upgrade neuracore"):
+        nc.start_training_run(
+            name="broken_response_run",
+            dataset_name="test_dataset",
+            algorithm_name="cnnmlp",
+            algorithm_config={},
+            gpu_type=GPUType.NVIDIA_TESLA_T4,
+            num_gpus=1,
+            frequency=10,
+            input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+            output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+        )
+
+
+def test_backend_rejection_shows_only_detail_error(mock_start_training_run_endpoints):
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints(
+        job_status_code=400,
+        job_response={
+            "detail": {
+                "error": (
+                    "training_config.epochs: Input should be greater than or"
+                    " equal to 1"
+                ),
+                "exception": "internal trace",
+            }
+        },
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as raised:
+        nc.start_training_run(
+            name="rejected_run",
+            dataset_name="test_dataset",
+            algorithm_name="cnnmlp",
+            algorithm_config={},
+            gpu_type=GPUType.NVIDIA_TESLA_T4,
+            num_gpus=1,
+            frequency=10,
+            input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+            output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+        )
+    assert "training_config.epochs" in str(raised.value)
+    assert "internal trace" not in str(raised.value)
+
+
+def test_invalid_job_in_training_job_list_is_rejected(
+    mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=[valid_training_job_json(), {"id": "partial_job"}],
+        status_code=200,
+    )
+
+    with pytest.raises(TrainingRunError, match="Upgrade neuracore"):
+        nc.get_training_jobs()
+
+
+def test_invalid_job_data_response_is_rejected(
+    mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123",
+        json=valid_training_job_json(training_config={"batch_size": "large"}),
+        status_code=200,
+    )
+
+    with pytest.raises(TrainingRunError, match="Upgrade neuracore"):
+        nc.get_training_job_data("train_job_123")

@@ -102,12 +102,12 @@ EXPECTED_RECORDING_TYPES = {
 }
 EXPECTED_COMMON_TYPES = EXPECTED_RECORDING_TYPES
 
-OVERFIT_CNNMLP_CONFIG = {
+OVERFIT_CNNMLP_TRAINING_CONFIG = {
     "batch_size": 64,
     "epochs": 400,
     "output_prediction_horizon": 1,
-    "lr": 1e-4,
 }
+OVERFIT_CNNMLP_CONFIG = {"lr": 1e-4}
 
 L1_LOSS_THRESHOLD = 0.05
 L1_LOSS_METRIC_KEY = "train/epoch/loss/l1_loss"
@@ -419,6 +419,7 @@ class TestDatasetMutationTraining:
             dataset_name=self.dataset_name,
             algorithm_name="CNNMLP",
             algorithm_config=OVERFIT_CNNMLP_CONFIG,
+            training_config=OVERFIT_CNNMLP_TRAINING_CONFIG,
             gpu_type=GPU_TYPE,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,
@@ -458,6 +459,7 @@ class TestDatasetMutationTraining:
             dataset_name=self.corrupt_dataset_name,
             algorithm_name="CNNMLP",
             algorithm_config=OVERFIT_CNNMLP_CONFIG,
+            training_config=OVERFIT_CNNMLP_TRAINING_CONFIG,
             gpu_type=GPU_TYPE,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,
@@ -584,6 +586,7 @@ class TestDatasetMutationTraining:
             dataset_name=self.dataset_name,
             algorithm_name="CNNMLP",
             algorithm_config=OVERFIT_CNNMLP_CONFIG,
+            training_config=OVERFIT_CNNMLP_TRAINING_CONFIG,
             gpu_type=GPU_TYPE,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,

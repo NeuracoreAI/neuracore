@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from neuracore_types import DataType
-from omegaconf import DictConfig, OmegaConf
+from neuracore_types import (
+    DataType,
+    PreprocessingMethodConfig,
+    PreprocessingPipeline,
+    PreprocessingStage,
+)
+from omegaconf import DictConfig
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
@@ -16,6 +21,13 @@ from neuracore.ml.preprocessing.base import (
     PreprocessingConfiguration,
     PreprocessingMethod,
 )
+from neuracore.ml.preprocessing.methods import ColorJitter, GaussianNoise, ResizePad
+
+PREPROCESSING_METHOD_CLASSES_BY_NAME: dict[str, type[PreprocessingMethod]] = {
+    "resize_pad": ResizePad,
+    "color_jitter": ColorJitter,
+    "gaussian_noise": GaussianNoise,
+}
 
 
 def validate_preprocessing_configuration(
@@ -67,41 +79,76 @@ def resolve_preprocessing_config(
     return resolved_config
 
 
-def resolve_input_output_preprocessing(
-    role_config: DictConfig | None,
-    *,
-    role_name: str,
-) -> tuple[PreprocessingConfiguration, PreprocessingConfiguration]:
-    """Resolve ``input`` / ``output`` preprocessing for a train or inference role.
+def build_preprocessing_method(
+    method_config: PreprocessingMethodConfig,
+) -> PreprocessingMethod:
+    """Build the preprocessing method a validated method config names.
 
     Args:
-        role_config: Mapping with ``input`` and ``output`` keys, each a
-            ``Dict[DataType, List[MethodConfig]]``.
-        role_name: Name used in error messages (e.g. ``train_preprocessing``).
+        method_config: Settings of one preprocessing step, including its
+            method name.
 
     Returns:
-        ``(input_preprocessing_config, output_preprocessing_config)``.
+        The preprocessing method instance.
     """
-    if not role_config:
+    method_class = PREPROCESSING_METHOD_CLASSES_BY_NAME[method_config.method]
+    return method_class(**method_config.model_dump(exclude={"method", "stages"}))
+
+
+def _build_preprocessing_configuration(
+    methods_by_data_type: dict[DataType, list[PreprocessingMethodConfig]],
+    stage: PreprocessingStage,
+) -> PreprocessingConfiguration:
+    methods_for_stage_by_data_type = {
+        data_type: [
+            method_config
+            for method_config in method_configs
+            if stage in method_config.stages
+        ]
+        for data_type, method_configs in methods_by_data_type.items()
+    }
+    preprocessing_config = PreprocessingConfiguration({
+        data_type: [
+            build_preprocessing_method(method_config)
+            for method_config in method_configs
+        ]
+        for data_type, method_configs in methods_for_stage_by_data_type.items()
+        if method_configs
+    })
+    validate_preprocessing_configuration(preprocessing_config=preprocessing_config)
+    return preprocessing_config
+
+
+def resolve_input_output_preprocessing(
+    preprocessing_pipeline: PreprocessingPipeline,
+    *,
+    stage: PreprocessingStage,
+) -> tuple[PreprocessingConfiguration, PreprocessingConfiguration]:
+    """Build the input and output preprocessing one stage of a run applies.
+
+    Args:
+        preprocessing_pipeline: Validated pipeline with input and output keys,
+            each mapping a data type to its ordered method configs.
+        stage: Stage whose methods to build. Methods keep their pipeline order.
+
+    Returns:
+        The input and output preprocessing configurations.
+    """
+    input_methods_by_data_type = preprocessing_pipeline.get("input")
+    if not input_methods_by_data_type:
         raise ValueError(
-            f"{role_name} configuration is missing! Please provide a "
-            f"{role_name} configuration."
+            "Preprocessing input configuration is missing! Please provide an "
+            "input preprocessing configuration under training.preprocessing.input."
         )
-    input_cfg = role_config.get("input", OmegaConf.create({}))
-    if not input_cfg:
+    output_methods_by_data_type = preprocessing_pipeline.get("output")
+    if not output_methods_by_data_type:
         raise ValueError(
-            f"{role_name} input configuration is missing! Please provide an "
-            f"input preprocessing configuration under {role_name}.input."
-        )
-    output_cfg = role_config.get("output", OmegaConf.create({}))
-    if not output_cfg:
-        raise ValueError(
-            f"{role_name} output configuration is missing! Please provide an "
-            f"output preprocessing configuration under {role_name}.output."
+            "Preprocessing output configuration is missing! Please provide an "
+            "output preprocessing configuration under training.preprocessing.output."
         )
     return (
-        resolve_preprocessing_config(input_cfg),
-        resolve_preprocessing_config(output_cfg),
+        _build_preprocessing_configuration(input_methods_by_data_type, stage),
+        _build_preprocessing_configuration(output_methods_by_data_type, stage),
     )
 
 

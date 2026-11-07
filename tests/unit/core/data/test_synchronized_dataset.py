@@ -504,17 +504,17 @@ class TestSynchronizationParameterPassthrough:
     """
 
     def _sync_details_sent_to(self, mock_requests, path: str) -> list[dict]:
-        """Collect the synchronization_details of every request to a path.
+        """Collect the synchronization_config of every request to a path.
 
         Args:
             mock_requests: The requests_mock Mocker holding the request history.
             path: Substring identifying the endpoint of interest.
 
         Returns:
-            One synchronization_details payload per matching request.
+            One synchronization_config payload per matching request.
         """
         return [
-            req.json()["synchronization_details"]
+            req.json()["synchronization_config"]
             for req in mock_requests.request_history
             if path in req.path and req.method == "POST"
         ]
@@ -565,5 +565,5 @@ class TestSynchronizationParameterPassthrough:
         sliced = synced[0:1]
 
         assert (
-            sliced.synchronization_details == synced.synchronization_details
+            sliced.synchronization_config == synced.synchronization_config
         ), "slicing must not reset the synchronization parameters"

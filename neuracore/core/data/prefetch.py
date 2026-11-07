@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiohttp
-from neuracore_types import DataType, DepthCameraData, SynchronizationDetails
+from neuracore_types import DataType, DepthCameraData, SynchronizationConfig
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import (
     SynchronizeRecordingProgress,
@@ -104,7 +104,7 @@ class CameraDataPrefetcher:
         self,
         dataset: "Dataset",
         recordings: list["Recording"],
-        synchronization_details: SynchronizationDetails,
+        synchronization_config: SynchronizationConfig,
         inflight_requests: int = DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
         decode_workers: int = 4,
         download_camera_data: bool = True,
@@ -115,7 +115,7 @@ class CameraDataPrefetcher:
         Args:
             dataset: Parent dataset, used for its org and cache directory.
             recordings: Recordings to prefetch, in dataset index order.
-            synchronization_details: Parameters the data was synchronized with.
+            synchronization_config: Parameters the data was synchronized with.
             inflight_requests: Network requests kept outstanding at once.
             decode_workers: Threads that cache camera data, decoding RGB video
                 with ffmpeg.
@@ -127,7 +127,7 @@ class CameraDataPrefetcher:
         """
         self.dataset = dataset
         self.recordings = recordings
-        self.synchronization_details = synchronization_details
+        self.synchronization_config = synchronization_config
         self.inflight_requests = max(1, inflight_requests)
         self.decode_workers = max(1, decode_workers)
         self.download_camera_data = download_camera_data
@@ -237,7 +237,7 @@ class CameraDataPrefetcher:
             f"{base_url}/trigger-synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=recording_id,
-                synchronization_details=self.synchronization_details,
+                synchronization_config=self.synchronization_config,
             ).model_dump(mode="json"),
             headers=get_auth().get_headers(),
         ) as response:

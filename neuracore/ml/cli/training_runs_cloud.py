@@ -412,7 +412,7 @@ def run_inspect(
         typer.echo(_format_cross_embodiment_description(output_description))
 
         # Synchronization Details
-        sync_details = job.synchronization_details
+        sync_details = job.synchronization_config
         if sync_details is not None:
             typer.echo("\n--- Synchronization Details ---")
             typer.echo(f"  Frequency:        {sync_details.frequency} Hz")

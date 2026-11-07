@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from neuracore_types import Codec, CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
-from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationDetails
+from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationConfig
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -164,7 +164,7 @@ class Recording:
             recording_name=self.name,
             robot_id=self.robot_id,
             instance=self.instance,
-            synchronization_details=SynchronizationDetails(
+            synchronization_config=SynchronizationConfig(
                 frequency=frequency,
                 cross_embodiment_union=cross_embodiment_union,
                 max_delay_s=max_delay_s,

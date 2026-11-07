@@ -170,18 +170,18 @@ def cleanup_training_jobs() -> None:
 atexit.register(cleanup_training_jobs)
 
 
-def build_algorithm_config(algorithm_config_entry: dict) -> dict:
+def build_training_config(algorithm_config_entry: dict) -> dict:
     """Only override the fields this test is responsible for."""
-    algorithm_config = {
+    training_config = {
         "batch_size": "auto",
         "epochs": 1,
     }
-    output_prediction_horizon = algorithm_config_entry["algorithm_config"].get(
+    output_prediction_horizon = algorithm_config_entry.get("training_config", {}).get(
         "output_prediction_horizon"
     )
     if output_prediction_horizon is not None:
-        algorithm_config["output_prediction_horizon"] = output_prediction_horizon
-    return algorithm_config
+        training_config["output_prediction_horizon"] = output_prediction_horizon
+    return training_config
 
 
 @pytest.mark.parametrize(
@@ -212,16 +212,17 @@ class TestAutoBatchSize:
 
         timestamp = int(time.time())
         logger.info(f"[{test_case}] Launching training job")
-        algorithm_config = build_algorithm_config(algorithm_config_entry)
+        training_config = build_training_config(algorithm_config_entry)
         logger.info(
             f"[{test_case}] Training config overrides: "
-            f"{pprint.pformat(algorithm_config)}"
+            f"{pprint.pformat(training_config)}"
         )
         job_data = nc.start_training_run(
             name=f"{TRAINING_NAME} - {test_case} - {timestamp}",
             dataset_name=DATASET_NAME,
             algorithm_name=algorithm_name,
-            algorithm_config=algorithm_config,
+            algorithm_config={},
+            training_config=training_config,
             gpu_type=gpu_type,
             num_gpus=NUM_GPUS,
             frequency=DEFAULT_FREQUENCY,

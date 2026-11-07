@@ -13,11 +13,14 @@ import requests
 from neuracore_types import (
     CrossEmbodimentDescription,
     GPUType,
-    SynchronizationDetails,
+    SynchronizationConfig,
     TrainingCheckpoint,
+    TrainingConfig,
+    TrainingJob,
     TrainingJobRequest,
     estimate_min_disk_size_gb,
 )
+from pydantic import ValidationError
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.utils.download import download_with_progress
@@ -35,6 +38,41 @@ from neuracore.core.utils.training_input_args_validation import (
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.data.dataset import Dataset
+from ..core.exceptions import TrainingRunError
+
+UNREADABLE_TRAINING_JOB_MESSAGE = (
+    "The backend returned a training job this neuracore version cannot read."
+    " Upgrade neuracore."
+)
+
+
+def _raise_for_training_request_status(response: requests.Response) -> None:
+    """Raise HTTPError carrying the backend's safe error summary."""
+    if response.ok:
+        return
+    error_message = extract_error_detail(response) or (
+        f"The training request failed with status {response.status_code}."
+    )
+    raise requests.exceptions.HTTPError(error_message, response=response)
+
+
+def validate_training_job_response(response_body: Any) -> dict[str, Any]:
+    """Return a training job response body after checking it is a TrainingJob.
+
+    Args:
+        response_body: Decoded JSON body of a training job response.
+
+    Returns:
+        The response body unchanged.
+
+    Raises:
+        TrainingRunError: If the body is not a valid training job.
+    """
+    try:
+        TrainingJob.model_validate(response_body)
+    except ValidationError as error:
+        raise TrainingRunError(UNREADABLE_TRAINING_JOB_MESSAGE) from error
+    return response_body
 
 
 def _resolve_next_name(base_name: str, existing_names: set[str]) -> str:
@@ -155,6 +193,7 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
+    training_config: TrainingConfig | dict[str, Any] | None = None,
     input_cross_embodiment_description: CrossEmbodimentDescription | None = None,
     output_cross_embodiment_description: CrossEmbodimentDescription | None = None,
     max_delay_s: float = sys.float_info.max,
@@ -171,10 +210,13 @@ def start_training_run(
         name: Name of the training run
         dataset_name: Name of the dataset to use for training
         algorithm_name: Name of the algorithm to use for training
-        algorithm_config: Configuration parameters for the algorithm
+        algorithm_config: Constructor arguments of the algorithm
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
+        training_config: Settings that control how training runs, such as
+            epochs, batch_size and preprocessing. Settings left out take the
+            backend's cloud defaults.
         input_cross_embodiment_description: Input cross-embodiment description.
         output_cross_embodiment_description: Output cross-embodiment description.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
@@ -188,7 +230,7 @@ def start_training_run(
         resume_from_job_id: ID of a training job whose latest checkpoint this run
             continues from. The algorithm, data types, number of data slots per
             data type and output prediction horizon must match that job, and
-            ``algorithm_config["epochs"]`` must exceed the epoch it reached.
+            ``training_config["epochs"]`` must exceed the epoch it reached.
         wait_for_gpu: If True, queue the job even when no GPUs are free and keep
             retrying provisioning until capacity is available.
 
@@ -197,10 +239,18 @@ def start_training_run(
 
     Raises:
         ValueError: If dataset or algorithm is not found
+        pydantic.ValidationError: If training_config or algorithm_config is
+            invalid
         requests.exceptions.HTTPError: If the API request fails
         requests.exceptions.RequestException: If there is a network problem
-                ConfigError: If there is an error trying to get the current org
+        TrainingRunError: If the backend returns an unreadable training job
+        ConfigError: If there is an error trying to get the current org
     """
+    validated_training_config = (
+        training_config
+        if isinstance(training_config, TrainingConfig)
+        else TrainingConfig.model_validate(training_config or {})
+    )
     if name_auto_increment:
         jobs = get_training_jobs()
         existing_names = {j["name"] for j in jobs if isinstance(j.get("name"), str)}
@@ -256,10 +306,11 @@ def start_training_run(
         name=name,
         algorithm_id=algorithm_id,
         algorithm_config=algorithm_config,
+        training_config=validated_training_config,
         gpu_type=GPUType(gpu_type),
         num_gpus=num_gpus,
         disk_size_gb=disk_size_gb,
-        synchronization_details=SynchronizationDetails(
+        synchronization_config=SynchronizationConfig(
             frequency=frequency,
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
@@ -282,14 +333,17 @@ def start_training_run(
     response = session.post(
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
-        json=data.model_dump(mode="json"),
+        json={
+            **data.model_dump(mode="json", exclude={"training_config"}),
+            "training_config": validated_training_config.model_dump(
+                mode="json", exclude_unset=True
+            ),
+        },
         timeout=(5.0, 60.0),
     )
 
-    response.raise_for_status()
-
-    job_data = response.json()
-    return job_data
+    _raise_for_training_request_status(response)
+    return validate_training_job_response(response.json())
 
 
 def resume_training_run(job_id: str, additional_epochs: int) -> dict:
@@ -308,6 +362,7 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
         ValueError: If the request cannot reach the backend or the backend
             responds with an error status. The message carries the error
             detail reported by the backend when one is available.
+        TrainingRunError: If the backend returns an unreadable training job.
     """
     auth = get_auth()
     org_id = get_current_org()
@@ -325,7 +380,7 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
         detail = extract_error_detail(response)
         error_message = detail or f"{response.status_code} {response.reason}"
         raise ValueError(f"Error resuming job {job_id}: {error_message}")
-    return response.json()
+    return validate_training_job_response(response.json())
 
 
 def get_training_jobs() -> list[dict]:
@@ -336,6 +391,7 @@ def get_training_jobs() -> list[dict]:
 
     Raises:
         requests.exceptions.HTTPError: If the API request fails.
+        TrainingRunError: If the backend returns an unreadable training job.
         ConfigError: If there is an error trying to get the current org.
     """
     auth = get_auth()
@@ -345,8 +401,8 @@ def get_training_jobs() -> list[dict]:
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
     )
-    response.raise_for_status()
-    return response.json()
+    _raise_for_training_request_status(response)
+    return [validate_training_job_response(job) for job in response.json()]
 
 
 def get_training_job_data(job_id: str) -> dict:
@@ -362,6 +418,7 @@ def get_training_job_data(job_id: str) -> dict:
         ValueError: If the job is not found
         requests.exceptions.HTTPError: If the API request returns an error status
         requests.exceptions.RequestException: If there is a network problem
+        TrainingRunError: If the backend returns an unreadable training job
         ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
@@ -372,12 +429,12 @@ def get_training_job_data(job_id: str) -> dict:
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
             headers=auth.get_headers(),
         )
-        response.raise_for_status()
-        return response.json()
+        _raise_for_training_request_status(response)
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
             raise ValueError("Job not found") from e
         raise
+    return validate_training_job_response(response.json())
 
 
 def get_training_job_status(job_id: str) -> str:
