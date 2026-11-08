@@ -85,6 +85,12 @@ trim_start_end: true
 # stays within this threshold of its value in the first frame.
 trim_no_movement_at_start_threshold: null
 
+# If set, train a DONE output on a dataset that does not log one: each episode
+# is extended after synchronization by this many seconds of its last frame,
+# labelled done, and every real frame is labelled not done. Ignored, with a
+# warning, when the dataset already logs DONE.
+synthesize_done_tail_s: null
+
 # Dict[str, Dict[DataType, List[MethodConfig]]], e.g.:
 # for images, we must have a resize step to reshape all images from different sources to the same size.
 # train_preprocessing is used on the training split (may include augmentations).
