@@ -15,6 +15,7 @@
 //! the recordings that were minted while nothing was listening arrive too.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,17 +54,19 @@ impl RecordingNotificationsHandle {
 ///
 /// Returns the receiver the dispatcher selects on alongside its IPC inbox, and
 /// the task handle. The channel is bounded so a busy dispatcher slows this task
-/// rather than letting notifications queue without limit.
+/// rather than letting notifications queue without limit. `subscribed` is true
+/// only while the stream is open.
 pub fn spawn_recording_notifications(
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    subscribed: Arc<AtomicBool>,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (
     mpsc::Receiver<RecordingCommand>,
     RecordingNotificationsHandle,
 ) {
     let (tx, rx) = mpsc::channel::<RecordingCommand>(64);
-    let join = tokio::spawn(run(client, org_rx, tx, shutdown_rx));
+    let join = tokio::spawn(run(client, org_rx, tx, subscribed, shutdown_rx));
     (rx, RecordingNotificationsHandle { join })
 }
 
@@ -71,6 +74,7 @@ async fn run(
     client: Arc<ApiClient>,
     mut org_rx: OrgIdRx,
     tx: mpsc::Sender<RecordingCommand>,
+    subscribed: Arc<AtomicBool>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     let stream_client = match reqwest::Client::builder().build() {
@@ -106,7 +110,7 @@ async fn run(
                 backoff = RECONNECT_MIN;
                 continue;
             }
-            outcome = consume(&stream_client, &client, &org_id, &tx) => outcome,
+            outcome = consume(&stream_client, &client, &org_id, &tx, &subscribed) => outcome,
         };
 
         match outcome {
@@ -138,6 +142,23 @@ async fn run(
     }
 }
 
+/// Holds `subscribed` true while the stream is open; clears it on any exit,
+/// including the future being dropped.
+struct SubscribedGuard<'a>(&'a AtomicBool);
+
+impl<'a> SubscribedGuard<'a> {
+    fn set(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for SubscribedGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Why a subscription stopped.
 enum StreamEnded {
     /// The dispatcher's receiver is gone — nothing left to feed.
@@ -154,6 +175,7 @@ async fn consume(
     client: &ApiClient,
     org_id: &str,
     tx: &mpsc::Sender<RecordingCommand>,
+    subscribed: &AtomicBool,
 ) -> Result<(), StreamEnded> {
     let token = client
         .auth()
@@ -179,6 +201,7 @@ async fn consume(
     }
 
     tracing::info!(org_id, "subscribed to recording notifications");
+    let _subscribed = SubscribedGuard::set(subscribed);
     let mut response = response;
     let mut buffer: Vec<u8> = Vec::new();
     let mut opened = HashSet::new();
@@ -569,5 +592,62 @@ mod tests {
     fn ignores_unparsable_and_unhandled_frames() {
         assert!(parse_notification("not json").is_empty());
         assert!(parse_notification(r#"{"type":"SAVED","payload":{}}"#).is_empty());
+    }
+
+    async fn wait_for(flag: &AtomicBool, want: bool, within: Duration) {
+        tokio::time::timeout(within, async {
+            while flag.load(Ordering::Acquire) != want {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("subscribed never became {want}"));
+    }
+
+    #[tokio::test]
+    async fn subscribed_holds_only_while_the_stream_is_open() {
+        use crate::api::auth::StaticAuthProvider;
+        use crate::api::client::ApiClientOptions;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let auth = Arc::new(StaticAuthProvider::new("test"));
+        let client = Arc::new(ApiClient::new(ApiClientOptions::new(base_url), auth).unwrap());
+        let (_org_tx, org_rx) = tokio::sync::watch::channel(Some("org".to_string()));
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let subscribed = Arc::new(AtomicBool::new(false));
+        let (_notifications_rx, handle) =
+            spawn_recording_notifications(client, org_rx, Arc::clone(&subscribed), shutdown_rx);
+
+        let within = Duration::from_secs(5);
+        let (mut socket, _) = tokio::time::timeout(within, listener.accept())
+            .await
+            .expect("notifier never connected")
+            .unwrap();
+        let mut request = [0u8; 4096];
+        let _ = tokio::time::timeout(within, socket.read(&mut request))
+            .await
+            .expect("notifier sent no request")
+            .unwrap();
+        assert!(!subscribed.load(Ordering::Acquire));
+
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                  transfer-encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        wait_for(&subscribed, true, within).await;
+
+        // Cleared at once, not after the reconnect backoff.
+        drop(socket);
+        wait_for(&subscribed, false, RECONNECT_MIN / 2).await;
+
+        shutdown_tx.send(ShutdownSignal::Sigterm).unwrap();
+        tokio::time::timeout(within, handle.join())
+            .await
+            .expect("notifier did not stop");
     }
 }

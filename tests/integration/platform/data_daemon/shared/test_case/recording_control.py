@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import neuracore as nc
+import neuracore.data_daemon.daemon_control as daemon_control
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
@@ -107,6 +108,32 @@ def await_gate(
                 pass
             time.sleep(REMOTE_GATE_POLL_INTERVAL_S)
         raise AssertionError(overdue)
+
+
+def _await_daemon_notifications_subscribed() -> None:
+    """Wait until the daemon hears recordings started from the web.
+
+    Before then a remote start reaches this host only on the next subscribe, so
+    the propagation SLA would also time the daemon's startup.
+    """
+    data_bridge = daemon_control._import_data_bridge()
+    assert data_bridge is not None, "The native extension must import here"
+    with Timer(
+        REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+        label="remote.notifications_wait",
+        always_log=True,
+        assert_deadline=False,
+    ):
+        subscribed = (
+            data_bridge.wait_until_ready(
+                REMOTE_CONTROL_REQUEST_TIMEOUT_S, notifications_subscribed=True
+            )
+            is not None
+        )
+    assert subscribed, (
+        "the daemon did not subscribe to recording notifications in "
+        f"{REMOTE_CONTROL_REQUEST_TIMEOUT_S}s"
+    )
 
 
 class RecordingController(ABC):
@@ -205,6 +232,7 @@ class RemoteRecordingController(RecordingController):
         super().__init__(spec, robot)
         self._dataset_id = nc.get_dataset(spec.dataset_name).id
         self._cloud_recording_id: str | None = None
+        _await_daemon_notifications_subscribed()
 
     def open(self, capture_start_s: float) -> ControlBracket:
         """Ask the backend to start a recording, then wait to be told it did."""

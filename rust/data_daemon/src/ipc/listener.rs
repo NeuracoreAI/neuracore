@@ -16,6 +16,8 @@
 //! the later `serve_recording_state_queries` borrow is itself held across an
 //! await.)
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use data_daemon_shared::{
@@ -72,6 +74,7 @@ pub async fn run(
     dispatcher_tx: mpsc::Sender<Envelope>,
     recording_state: RecordingState,
     store: SqliteStateStore,
+    notifications_subscribed: Arc<AtomicBool>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
@@ -117,7 +120,7 @@ pub async fn run(
         // A health reply is the SDK launcher's readiness contract: reaching this
         // point proves the daemon has opened IPC, spawned the dispatcher, and
         // entered the listener loop that drains commands.
-        serve_health(transport.health_server());
+        serve_health(transport.health_server(), &notifications_subscribed);
 
         // -- Answer version queries ---------------------------------------------
         // The SDK compares this answer with its own installed version, so a
@@ -151,8 +154,12 @@ pub async fn run(
     }
 }
 
-/// Drain every pending health query, answering each with this daemon's PID.
-fn serve_health(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
+/// Drain every pending health query, answering each with this daemon's PID
+/// and whether it is subscribed to recording notifications.
+fn serve_health(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    notifications_subscribed: &AtomicBool,
+) {
     loop {
         let active = match server.receive() {
             Ok(Some(active)) => active,
@@ -174,6 +181,7 @@ fn serve_health(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
         let reply = HealthReply {
             pid: std::process::id(),
             nonce: request.nonce,
+            notifications_subscribed: notifications_subscribed.load(Ordering::Acquire),
         };
         match reply.encode() {
             Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {

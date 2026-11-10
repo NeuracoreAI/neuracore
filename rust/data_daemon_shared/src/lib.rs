@@ -854,6 +854,10 @@ pub struct HealthReply {
     pub pid: u32,
     /// Echo of [`HealthRequest::nonce`].
     pub nonce: u64,
+    /// Whether the daemon is subscribed to the backend's recording
+    /// notifications. Until it is, recordings started from the web do not
+    /// reach this host.
+    pub notifications_subscribed: bool,
 }
 
 /// Request sent over [`service_name::VERSION`] asking the daemon which
@@ -968,6 +972,7 @@ mod tests {
         let reply = HealthReply {
             pid: 1234,
             nonce: 42,
+            notifications_subscribed: true,
         };
         assert_eq!(
             HealthReply::decode(&reply.encode().unwrap()).unwrap(),

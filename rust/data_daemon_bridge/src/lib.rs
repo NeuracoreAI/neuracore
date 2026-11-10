@@ -601,10 +601,19 @@ fn recording_state<'py>(
 }
 
 /// Wait until the Rust daemon answers a side-effect-free IPC health probe.
+///
+/// With `notifications_subscribed`, also wait until the daemon is subscribed to
+/// recording notifications.
 #[pyfunction]
-#[pyo3(signature = (timeout_s))]
-fn wait_until_ready(py: Python<'_>, timeout_s: f64) -> PyResult<Option<u32>> {
-    py.detach(|| -> PyResult<Option<u32>> { Ok(wait_until_ready_impl(timeout_s)?) })
+#[pyo3(signature = (timeout_s, *, notifications_subscribed = false))]
+fn wait_until_ready(
+    py: Python<'_>,
+    timeout_s: f64,
+    notifications_subscribed: bool,
+) -> PyResult<Option<u32>> {
+    py.detach(|| -> PyResult<Option<u32>> {
+        Ok(wait_until_ready_impl(timeout_s, notifications_subscribed)?)
+    })
 }
 
 /// Ask the running daemon which neuracore version it was built from.

@@ -7,6 +7,7 @@
 //! SIGTERM/SIGINT to broadcast a graceful shutdown.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -409,6 +410,7 @@ fn run_daemon(
             // the next periodic tick. Order is also load-bearing for
             // ordered shutdown: dropping the dispatcher first guarantees
             // no new `TraceWritten` lands while the coordinators drain.
+            let notifications_subscribed = Arc::new(AtomicBool::new(false));
             let (cloud_handles, notifications_rx) = if config_for_runtime.offline.unwrap_or(false) {
                 tracing::info!("offline mode — skipping cloud coordinator spawn");
                 (None, None)
@@ -425,6 +427,7 @@ fn run_daemon(
                             org_id.clone(),
                             shutdown_tx.clone(),
                             config_rx.clone(),
+                            Arc::clone(&notifications_subscribed),
                         );
                         (Some(handles), Some(notifications_rx))
                     }
@@ -507,6 +510,7 @@ fn run_daemon(
                 dispatcher_tx.clone(),
                 recording_state,
                 state_store.clone(),
+                notifications_subscribed,
                 shutdown_tx.subscribe(),
             )
             .await;

@@ -110,7 +110,13 @@ fn poll_until<T>(
 
 /// Block (with the GIL released by the caller) until the daemon answers a
 /// side-effect-free health probe or `timeout_s` elapses.
-pub(crate) fn wait_until_ready(timeout_s: f64) -> Result<Option<u32>, ProducerError> {
+///
+/// With `notifications_subscribed`, also wait until the daemon is subscribed to
+/// recording notifications.
+pub(crate) fn wait_until_ready(
+    timeout_s: f64,
+    notifications_subscribed: bool,
+) -> Result<Option<u32>, ProducerError> {
     let nonce = now_ns() as u64;
     let request_bytes = HealthRequest { nonce }.encode()?;
     poll_until(
@@ -125,7 +131,10 @@ pub(crate) fn wait_until_ready(timeout_s: f64) -> Result<Option<u32>, ProducerEr
                     "health",
                     |payload| {
                         let reply = HealthReply::decode(payload)?;
-                        Ok((reply.pid > 0 && reply.nonce == nonce).then_some(reply.pid))
+                        let subscribed =
+                            reply.notifications_subscribed || !notifications_subscribed;
+                        Ok((reply.pid > 0 && reply.nonce == nonce && subscribed)
+                            .then_some(reply.pid))
                     },
                 )
             })

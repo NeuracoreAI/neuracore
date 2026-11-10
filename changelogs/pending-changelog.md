@@ -16,3 +16,5 @@ Timestamps are now kept as integer microseconds. Every `timestamp` argument stil
 Recordings that several machines record into are now saved with every machine's traces, and `stop_recording(wait=True)` returns once all of them have uploaded. A machine that misses a recording's stop while disconnected from the backend now finishes its part when it reconnects.
 
 Tag recordings in a dataset. `recording.add_tag(name)` and `recording.remove_tag(name)` add and remove user tags, and `recording.tags` lists the user and QA tags of a recording. `recording.set_status` is deprecated: `FLAGGED` adds the tag `flagged`, `NORMAL` removes it, and `QA_FLAGGED` raises `ValueError`. `recording.set_notes` no longer sends the status.
+
+The data daemon health reply now tells if the daemon is subscribed to recording notifications. This release cannot use a data daemon from an earlier release. Stop a running daemon with `neuracore data-daemon stop` before you upgrade.

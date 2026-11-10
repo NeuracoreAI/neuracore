@@ -6,6 +6,7 @@
 //! them in a defined order at shutdown.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -76,6 +77,7 @@ pub(crate) fn spawn_cloud_coordinators(
     fallback_org_id: Option<String>,
     shutdown_tx: crate::lifecycle::shutdown::ShutdownBroadcaster,
     config_rx: ConfigRx,
+    notifications_subscribed: Arc<AtomicBool>,
 ) -> (CloudHandles, tokio::sync::mpsc::Receiver<RecordingCommand>) {
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusUpdate>();
     // Watch the SDK config for the current org; every coordinator reads the
@@ -146,8 +148,12 @@ pub(crate) fn spawn_cloud_coordinators(
         org_rx.clone(),
         shutdown_tx.subscribe(),
     );
-    let (notifications_rx, recording_notifications) =
-        spawn_recording_notifications(client, org_rx, shutdown_tx.subscribe());
+    let (notifications_rx, recording_notifications) = spawn_recording_notifications(
+        client,
+        org_rx,
+        notifications_subscribed,
+        shutdown_tx.subscribe(),
+    );
 
     (
         CloudHandles {
