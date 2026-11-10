@@ -7,6 +7,7 @@
 //! resume on recovery.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -62,15 +63,19 @@ pub fn spawn_connection_monitor(
                     break;
                 }
                 _ = ticker.tick() => {
-                    match client.health_check().await {
+                    let started = Instant::now();
+                    let probe = client.health_check().await;
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    match probe {
                         Ok(true) => {
                             if state != ConnectionState::Up {
                                 state = ConnectionState::Up;
-                                tracing::info!("backend connection restored");
+                                tracing::info!(elapsed_ms, "backend connection restored");
                                 bus.publish(DaemonEvent::ConnectionStateChanged(state));
                             }
                         }
-                        Ok(false) | Err(_) => {
+                        failed => {
+                            tracing::debug!(elapsed_ms, ?failed, "backend health probe failed");
                             if state != ConnectionState::Down {
                                 state = ConnectionState::Down;
                                 tracing::warn!("backend connection lost");
