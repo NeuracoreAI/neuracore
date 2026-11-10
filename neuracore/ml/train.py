@@ -2,6 +2,7 @@
 
 import copy
 import gc
+import io
 import json
 import logging
 import os
@@ -137,6 +138,30 @@ def _serialize_cross_embodiment_union(
             key = data_type.name if hasattr(data_type, "name") else str(data_type)
             serializable[robot_id][key] = list(names)
     return serializable
+
+
+def _log_sample_size(dataset: PytorchSynchronizedDataset) -> None:
+    """Temp benchmark shim: log the size of one built training sample.
+
+    Serialized exactly as the sample cache stores it (torch.save), so it is the
+    size of one sample-cache file, for whatever embodiment the run uses.
+    """
+    buffer = io.BytesIO()
+    torch.save(dataset[0], buffer)
+    logger.info(f"[sample-size] one sample: {buffer.tell()} bytes")
+
+
+def _log_sample_cache_sizes(dataset: PytorchSynchronizedDataset) -> None:
+    """Temp benchmark shim: log the spread of train sample-cache file sizes."""
+    if dataset._sample_cache is None:
+        return
+    sizes = [p.stat().st_size for p in dataset._sample_cache.directory.rglob("*.pt")]
+    if sizes:
+        logger.info(
+            f"[sample-size] train sample cache: {len(sizes)} files, "
+            f"min {min(sizes)} bytes, max {max(sizes)} bytes, "
+            f"total {sum(sizes)} bytes"
+        )
 
 
 def _save_local_training_metadata(
@@ -963,6 +988,7 @@ def _main(cfg: DictConfig) -> None:
             output_preprocessing_config=train_output_preprocessing_config,
             sample_cache=cfg.get("dataset_sample_cache", True),
         )
+        _log_sample_size(pytorch_dataset)
         timer.lap("build_dataset_and_stats")
 
         # Handle batch size configuration
@@ -1041,6 +1067,8 @@ def _main(cfg: DictConfig) -> None:
                 device,
             )
         timer.lap("run_training")
+        _log_sample_cache_sizes(pytorch_dataset)
+        timer.lap("sample_cache_scan")
     finally:
         timer.total()
         if log_streamer is not None:
