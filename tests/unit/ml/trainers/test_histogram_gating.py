@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 from neuracore.ml.trainers.distributed_trainer import DistributedTrainer
-from neuracore.ml.utils.validation_rollouts import ValidationRolloutConfig
 
 
 def _trainer(tmp_path: Path, **kwargs) -> DistributedTrainer:
@@ -33,9 +32,7 @@ def _trainer(tmp_path: Path, **kwargs) -> DistributedTrainer:
         storage_handler=storage_handler,
         output_dir=tmp_path,
         num_epochs=1,
-        validation_rollout_config=ValidationRolloutConfig(
-            num_points=0, frequency=1, seed=0
-        ),
+        validation_rollout_frequency=kwargs.pop("validation_rollout_frequency", 1),
         device=torch.device("cpu"),
         **kwargs,
     )
@@ -79,6 +76,18 @@ def test_enabled_histograms_reach_the_logger(tmp_path):
     trainer._log_weights(step=0)
 
     assert trainer.training_logger.log_histogram.called
+
+
+def test_zero_rollout_frequency_disables_rollouts(tmp_path):
+    trainer = _trainer(tmp_path, validation_rollout_frequency=0)
+
+    assert trainer.validation_rollout_frequency == 0
+    assert trainer._run_rollout_validation is False
+
+
+def test_trainer_rejects_negative_rollout_frequency(tmp_path):
+    with pytest.raises(ValueError, match="frequency"):
+        _trainer(tmp_path, validation_rollout_frequency=-1)
 
 
 def test_progress_bar_is_off_when_logs_go_to_the_cloud(tmp_path):

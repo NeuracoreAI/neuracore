@@ -8,7 +8,7 @@ import pytest
 import torch
 from neuracore_types import BatchedEndEffectorPoseData, BatchedJointData, DataType
 from PIL import Image
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Subset
 
 from neuracore.ml.core.ml_types import BatchedInferenceInputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
@@ -16,9 +16,7 @@ from neuracore.ml.datasets.pytorch_neuracore_dataset import SampleIdentity
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
-    ValidationRolloutConfig,
     save_validation_rollouts,
-    select_validation_rollout_indices,
     write_rollout_manifest,
 )
 
@@ -35,59 +33,6 @@ def _storage(tmp_path, monkeypatch):
         lambda: auth,
     )
     return TrainingStorageHandler(local_dir=str(tmp_path))
-
-
-def _validation_loader(validation_indices):
-    base = list(range(max(validation_indices, default=0) + 1))
-    return DataLoader(Subset(base, validation_indices))
-
-
-def _rollout_config(num_points, seed):
-    return ValidationRolloutConfig(num_points=num_points, frequency=1, seed=seed)
-
-
-def test_select_validation_rollout_indices_is_a_deterministic_sample():
-    validation_indices = list(range(40))
-    loader = _validation_loader(validation_indices)
-    config = _rollout_config(num_points=6, seed=7)
-
-    first = select_validation_rollout_indices(loader, config)
-    second = select_validation_rollout_indices(loader, config)
-
-    assert first == second
-    assert len(first) == 6
-    assert len(set(first)) == 6
-    assert set(first) <= set(validation_indices)
-
-
-def test_select_validation_rollout_indices_uses_every_sample_when_split_is_smaller():
-    validation_indices = [4, 9, 12]
-    loader = _validation_loader(validation_indices)
-    config = _rollout_config(num_points=10, seed=3)
-
-    first = select_validation_rollout_indices(loader, config)
-    second = select_validation_rollout_indices(loader, config)
-
-    assert first == second
-    assert sorted(first) == validation_indices
-
-
-def test_select_validation_rollout_indices_rejects_empty_split():
-    loader = _validation_loader([])
-
-    with pytest.raises(ValueError):
-        select_validation_rollout_indices(loader, _rollout_config(4, 0))
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("num_points", -1), ("frequency", 0), ("frequency", -1)],
-)
-def test_validation_rollout_config_rejects_invalid_settings(field, value):
-    settings = {"num_points": 2, "frequency": 5, field: value}
-
-    with pytest.raises(ValueError, match=field):
-        ValidationRolloutConfig(seed=0, **settings)
 
 
 class _ScriptedModel:
@@ -157,8 +102,7 @@ def test_save_validation_rollouts_writes_images_and_trace_json(tmp_path, monkeyp
     storage = _storage(tmp_path, monkeypatch)
     save_validation_rollouts(
         model=model,
-        dataset=dataset,
-        selected_indices=[0],
+        rollout_dataset=Subset(dataset, [0]),
         batch_size=1,
         device=torch.device("cpu"),
         inference_device_preprocessing=(
@@ -278,12 +222,12 @@ def _save(
     save_input_points: bool,
     selected_indices=None,
 ):
+    indices = (
+        list(range(len(dataset))) if selected_indices is None else selected_indices
+    )
     save_validation_rollouts(
         model=model,
-        dataset=dataset,
-        selected_indices=(
-            list(range(6)) if selected_indices is None else selected_indices
-        ),
+        rollout_dataset=Subset(dataset, indices),
         batch_size=4,
         device=torch.device("cpu"),
         inference_device_preprocessing=(

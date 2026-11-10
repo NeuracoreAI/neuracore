@@ -10,10 +10,7 @@ from torch.utils.data import Subset
 
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.trainers.distributed_trainer import DistributedTrainer
-from neuracore.ml.utils.validation_rollouts import (
-    ValidationRolloutConfig,
-    write_rollout_manifest,
-)
+from neuracore.ml.utils.validation_rollouts import write_rollout_manifest
 
 
 def _dataset() -> PytorchDummyDataset:
@@ -30,25 +27,18 @@ def _dataset() -> PytorchDummyDataset:
     )
 
 
-def _config(frequency: int) -> ValidationRolloutConfig:
-    return ValidationRolloutConfig(
-        num_points=2,
-        frequency=frequency,
-        seed=3,
-    )
-
-
-def _trainer(config: ValidationRolloutConfig) -> DistributedTrainer:
+def _trainer(frequency: int) -> DistributedTrainer:
     trainer = DistributedTrainer.__new__(DistributedTrainer)
     trainer.rank = 0
-    trainer.validation_rollout_config = config
+    trainer.validation_rollout_frequency = frequency
     trainer.num_epochs = 10
-    trainer._selected_rollout_validation_indices = [1, 3]
     trainer._input_points_saved = False
     trainer._run_rollout_validation = True
+    dataset = _dataset()
     trainer.val_loader = MagicMock()
     trainer.val_loader.batch_size = 8
-    trainer.val_loader.dataset = Subset(_dataset(), [0, 1, 2, 3])
+    trainer.val_loader.dataset = Subset(dataset, [0, 1, 2, 3])
+    trainer.rollout_dataset = Subset(dataset, [1, 3])
     trainer.device = torch.device("cpu")
     trainer.inference_device_preprocessing = (MagicMock(), MagicMock())
     trainer.output_dir = Path(".")
@@ -57,8 +47,19 @@ def _trainer(config: ValidationRolloutConfig) -> DistributedTrainer:
     return trainer
 
 
+def test_rollouts_run_the_rollout_dataset_points():
+    trainer = _trainer(5)
+
+    with patch(
+        "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",
+    ) as save:
+        trainer._save_validation_rollouts(5)
+
+    assert save.call_args.kwargs["rollout_dataset"] is trainer.rollout_dataset
+
+
 def test_input_points_are_saved_on_the_first_rollout_only():
-    trainer = _trainer(_config(frequency=5))
+    trainer = _trainer(5)
 
     with patch(
         "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",
@@ -74,7 +75,7 @@ def test_input_points_are_saved_on_the_first_rollout_only():
 
 
 def test_manifest_write_and_upload_are_queued_in_order():
-    trainer = _trainer(_config(frequency=5))
+    trainer = _trainer(5)
 
     trainer._save_rollout_validation_manifest()
 
@@ -84,35 +85,39 @@ def test_manifest_write_and_upload_are_queued_in_order():
     )
     root_dir = Path(".") / "validation_rollouts"
     expected_points = [
-        trainer.val_loader.dataset.dataset.get_sample_identity(i) for i in (1, 3)
+        trainer.rollout_dataset.dataset.get_sample_identity(i) for i in (1, 3)
     ]
     assert write_job.func is write_rollout_manifest
     assert write_job.args == (root_dir, expected_points)
     assert upload_job.func == trainer.storage_handler.upload_rollout_manifest
     assert upload_job.args == (root_dir,)
-    assert trainer._selected_rollout_validation_indices == [1, 3]
 
 
 @pytest.mark.parametrize(
-    ("rank", "config", "num_epochs", "expected"),
+    ("rank", "frequency", "has_rollouts", "num_epochs", "expected"),
     [
-        (0, _config(frequency=5), 10, True),
-        (0, _config(frequency=10), 10, True),
-        (1, _config(frequency=5), 10, False),
-        (0, ValidationRolloutConfig(num_points=0, frequency=5, seed=3), 10, False),
-        (0, _config(frequency=5), 4, False),
+        (0, 5, True, 10, True),
+        (0, 10, True, 10, True),
+        (1, 5, True, 10, False),
+        (0, 5, False, 10, False),
+        (0, 5, True, 4, False),
+        (0, 0, True, 10, False),
     ],
 )
-def test_can_run_rollout_validation(rank, config, num_epochs, expected):
-    trainer = _trainer(config)
+def test_can_run_rollout_validation(
+    rank, frequency, has_rollouts, num_epochs, expected
+):
+    trainer = _trainer(frequency)
     trainer.rank = rank
     trainer.num_epochs = num_epochs
+    if not has_rollouts:
+        trainer.rollout_dataset = None
 
     assert trainer._can_run_rollout_validation() is expected
 
 
 def test_rollout_failure_is_logged_and_does_not_stop_training(caplog):
-    trainer = _trainer(_config(frequency=1))
+    trainer = _trainer(1)
 
     with patch(
         "neuracore.ml.trainers.distributed_trainer.save_validation_rollouts",

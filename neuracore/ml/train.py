@@ -70,7 +70,6 @@ from neuracore.ml.utils.training_config import (
     validate_complete_config,
 )
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
-from neuracore.ml.utils.validation_rollouts import ValidationRolloutConfig
 
 # Environment setup
 os.environ["PJRT_DEVICE"] = "GPU"
@@ -530,12 +529,13 @@ def run_training(
 
         # Use random split with fixed seed for deterministic behavior.
         # Dataset already has train preprocessing; val is switched to inference.
-        train_dataset, val_dataset = split_train_val_datasets(
+        train_dataset, val_dataset, rollout_dataset = split_train_val_datasets(
             dataset,
             validation_split=cfg.validation_split,
             seed=cfg.seed,
             inference_input_preprocessing_config=inference_input_preprocessing_config,
             inference_output_preprocessing_config=inference_output_preprocessing_config,
+            num_rollout_episodes=int(cfg.get("validation_rollout_episodes", 0)),
         )
 
         num_train_workers = min(cfg.num_train_workers, cpu_count())
@@ -656,12 +656,6 @@ def run_training(
                 training_id=training_id,
             )
 
-        validation_rollout_config = ValidationRolloutConfig(
-            num_points=int(cfg.get("validation_rollout_points", 0)),
-            frequency=int(cfg.get("validation_rollout_frequency", 5)),
-            seed=int(cfg.seed),
-        )
-
         trainer = DistributedTrainer(
             model=model,
             train_loader=train_loader,
@@ -686,7 +680,10 @@ def run_training(
             rank=rank,
             world_size=world_size,
             device=device,
-            validation_rollout_config=validation_rollout_config,
+            validation_rollout_frequency=int(
+                cfg.get("validation_rollout_frequency", 0)
+            ),
+            rollout_dataset=rollout_dataset,
         )
 
         # A failed resume load aborts the run. Continuing would train and save

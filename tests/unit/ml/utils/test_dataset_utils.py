@@ -1,5 +1,6 @@
 """Tests for episode-level train/validation splitting."""
 
+from itertools import groupby
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,9 @@ class _FakeEpisodeDataset:
         self,
         episode_lengths: list[int],
         robot_ids: list[str] | None = None,
+        output_prediction_horizon: int = 1,
     ) -> None:
+        self.output_prediction_horizon = output_prediction_horizon
         self.episode_start_offsets: list[int] = []
         self.episode_indices: list[int] = []
         start = 0
@@ -47,13 +50,15 @@ def _split(
     dataset: _FakeEpisodeDataset,
     validation_split: float = 0.2,
     seed: int = 42,
-) -> tuple[Subset, Subset]:
+    num_rollout_episodes: int = 0,
+) -> tuple[Subset, Subset, Subset | None]:
     return split_train_val_datasets(
         dataset,  # type: ignore[arg-type]
         validation_split=validation_split,
         seed=seed,
         inference_input_preprocessing_config=_EMPTY_PREPROCESSING,
         inference_output_preprocessing_config=_EMPTY_PREPROCESSING,
+        num_rollout_episodes=num_rollout_episodes,
     )
 
 
@@ -65,7 +70,7 @@ def _episode_ids(subset: Subset) -> set[int]:
 
 def test_split_keeps_whole_episodes_on_one_side() -> None:
     dataset = _FakeEpisodeDataset([4, 4, 4, 4, 4])
-    train, val = _split(dataset, validation_split=0.2)
+    train, val, _ = _split(dataset, validation_split=0.2)
 
     train_episodes = _episode_ids(train)
     val_episodes = _episode_ids(val)
@@ -78,12 +83,12 @@ def test_split_keeps_whole_episodes_on_one_side() -> None:
 
 def test_split_is_deterministic_for_a_seed() -> None:
     dataset = _FakeEpisodeDataset([3, 5, 2, 8, 4])
-    train_a, val_a = _split(dataset, seed=7)
-    train_b, val_b = _split(dataset, seed=7)
+    train_a, val_a, _ = _split(dataset, seed=7)
+    train_b, val_b, _ = _split(dataset, seed=7)
     assert list(train_a.indices) == list(train_b.indices)
     assert list(val_a.indices) == list(val_b.indices)
 
-    train_c, val_c = _split(dataset, seed=8)
+    train_c, val_c, _ = _split(dataset, seed=8)
     assert (list(train_a.indices), list(val_a.indices)) != (
         list(train_c.indices),
         list(val_c.indices),
@@ -92,7 +97,7 @@ def test_split_is_deterministic_for_a_seed() -> None:
 
 def test_split_holds_out_at_least_one_episode_when_fraction_rounds_down() -> None:
     dataset = _FakeEpisodeDataset([2, 2, 2, 2])
-    _, val = _split(dataset, validation_split=0.1)
+    _, val, _ = _split(dataset, validation_split=0.1)
     assert len(_episode_ids(val)) == 1
 
 
@@ -101,7 +106,7 @@ def test_split_stratifies_by_robot() -> None:
         [2, 2, 2, 2, 2, 2, 2, 2],
         robot_ids=["a", "a", "a", "a", "b", "b", "b", "b"],
     )
-    train, val = _split(dataset, validation_split=0.25)
+    train, val, _ = _split(dataset, validation_split=0.25)
     val_episodes = _episode_ids(val)
     val_robots = {dataset.synchronized_dataset[ep].robot_id for ep in val_episodes}
     assert val_robots == {"a", "b"}
@@ -121,7 +126,7 @@ def test_split_rejects_when_no_robot_has_two_episodes() -> None:
 
 def test_split_rekeys_val_preprocessing_cache() -> None:
     dataset = _FakeEpisodeDataset([2, 2])
-    train, val = _split(dataset)
+    train, val, _ = _split(dataset)
     assert train.dataset is dataset
     assert val.dataset is not dataset
     assert val.dataset.cache_rebuilds == 1
@@ -145,3 +150,68 @@ def test_split_rejects_empty_sides(
     dataset = _FakeEpisodeDataset(episode_lengths)
     with pytest.raises(ValueError, match=match):
         _split(dataset, validation_split=validation_split)
+
+
+def _rollout_points(rollout: Subset) -> list[tuple[int, int]]:
+    """Return ``(episode, timestep)`` for each rollout point, in order."""
+    dataset = rollout.dataset
+    assert isinstance(dataset, _FakeEpisodeDataset)
+    points = []
+    for idx in rollout.indices:
+        episode = dataset.episode_indices[idx]
+        points.append((episode, idx - dataset.episode_start_offsets[episode]))
+    return points
+
+
+def test_split_has_no_rollouts_by_default() -> None:
+    _, _, rollout = _split(_FakeEpisodeDataset([4, 4, 4, 4, 4]))
+    assert rollout is None
+
+
+def test_split_rolls_out_val_episodes_every_horizon() -> None:
+    episode_lengths = [7, 10, 4, 9, 5]
+    dataset = _FakeEpisodeDataset(episode_lengths, output_prediction_horizon=3)
+    _, val, rollout = _split(dataset, validation_split=0.4, num_rollout_episodes=2)
+
+    assert rollout is not None
+    assert rollout.dataset is val.dataset
+    assert set(rollout.indices) <= set(val.indices)
+    points = _rollout_points(rollout)
+    episodes = [episode for episode, _ in points]
+    assert set(episodes) == _episode_ids(val)
+    # Each episode's points are contiguous and step by the horizon from 0.
+    assert len(list(groupby(episodes))) == 2
+    for episode in set(episodes):
+        expected = list(range(0, episode_lengths[episode], 3))
+        assert [t for e, t in points if e == episode] == expected
+
+
+def test_split_caps_rollout_episodes() -> None:
+    dataset = _FakeEpisodeDataset([4] * 10, output_prediction_horizon=2)
+    _, val, rollout = _split(dataset, validation_split=0.5, num_rollout_episodes=2)
+
+    assert rollout is not None
+    assert len({episode for episode, _ in _rollout_points(rollout)}) == 2
+    assert len(_episode_ids(val)) == 5
+
+
+def test_split_rolls_out_every_val_episode_when_cap_is_larger() -> None:
+    dataset = _FakeEpisodeDataset([4] * 5, output_prediction_horizon=2)
+    _, val, rollout = _split(dataset, validation_split=0.4, num_rollout_episodes=10)
+
+    assert rollout is not None
+    assert {episode for episode, _ in _rollout_points(rollout)} == _episode_ids(val)
+
+
+def test_split_rollouts_are_deterministic_for_a_seed() -> None:
+    dataset = _FakeEpisodeDataset([4] * 10, output_prediction_horizon=2)
+    _, _, first = _split(dataset, validation_split=0.5, num_rollout_episodes=2)
+    _, _, second = _split(dataset, validation_split=0.5, num_rollout_episodes=2)
+
+    assert first is not None and second is not None
+    assert list(first.indices) == list(second.indices)
+
+
+def test_split_rejects_negative_rollout_episodes() -> None:
+    with pytest.raises(ValueError, match="num_rollout_episodes"):
+        _split(_FakeEpisodeDataset([4, 4]), num_rollout_episodes=-1)

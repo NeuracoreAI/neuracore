@@ -397,7 +397,7 @@ class RunTrainingTestSetup:
         mock_val_dataset = Mock(unsafe=True)
         mock_val_dataset.__len__ = Mock(return_value=20)
         self.mock_split_train_val = Mock(
-            return_value=(mock_train_dataset, mock_val_dataset)
+            return_value=(mock_train_dataset, mock_val_dataset, None)
         )
         self.monkeypatch.setattr(
             "neuracore.ml.train.split_train_val_datasets",
@@ -2259,7 +2259,7 @@ class TestRunTraining:
         setup.setup_mocks()
 
         def mock_split_side_effect(dataset, validation_split, seed, **kwargs):
-            return (mock_train_dataset, mock_val_dataset)
+            return (mock_train_dataset, mock_val_dataset, None)
 
         mock_split = Mock(side_effect=mock_split_side_effect)
         monkeypatch.setattr("neuracore.ml.train.split_train_val_datasets", mock_split)
@@ -2336,6 +2336,7 @@ class TestRunTraining:
             return (
                 torch.utils.data.TensorDataset(torch.zeros(train_size, 1)),
                 torch.utils.data.TensorDataset(torch.zeros(val_size, 1)),
+                None,
             )
 
         mock_autotuner_instance = MagicMock()
@@ -2381,7 +2382,7 @@ class TestRunTraining:
         mock_val_dataset.__len__ = Mock(return_value=20)
 
         def mock_split_train(dataset, validation_split, seed, **kwargs):
-            return (mock_train_dataset, mock_val_dataset)
+            return (mock_train_dataset, mock_val_dataset, None)
 
         monkeypatch.setattr("neuracore.ml.train.DataLoader", tracking_dataloader)
         monkeypatch.setattr(

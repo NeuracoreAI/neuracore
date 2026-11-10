@@ -1,11 +1,10 @@
-"""Save a fixed sample of validation timesteps as trajectory rollouts."""
+"""Save rollouts of a fixed sample of validation episodes."""
 
 from __future__ import annotations
 
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -15,7 +14,7 @@ import torch
 from neuracore_types import BatchedDepthData, BatchedNCData, BatchedRGBData, DataType
 from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
-from torch.utils.data import DataLoader
+from torch.utils.data import Subset
 
 from neuracore.core.utils.depth_utils import depth_to_log_gray
 from neuracore.ml.core.ml_types import BatchedInferenceInputs
@@ -51,77 +50,6 @@ _PAYLOAD_FIELDS = (
 )
 
 
-@dataclass(frozen=True)
-class ValidationRolloutConfig:
-    """How many validation samples to save as rollouts, and how often.
-
-    Attributes:
-        num_points: How many validation timesteps to save each time. 0
-            disables validation rollouts.
-        frequency: Save rollouts when ``epoch % frequency == 0``.
-        seed: Seed for which timesteps are saved. The same seed keeps those
-            timesteps fixed across epochs.
-    """
-
-    num_points: int
-    frequency: int
-    seed: int
-
-    def __post_init__(self) -> None:
-        """Reject settings that are invalid."""
-        if self.num_points < 0:
-            raise ValueError(
-                "Validation rollout num_points must be at least 0, "
-                f"got {self.num_points}."
-            )
-        if self.frequency <= 0:
-            raise ValueError(
-                "Validation rollout frequency must be greater than 0, "
-                f"got {self.frequency}."
-            )
-
-
-def select_validation_rollout_indices(
-    validation_dataset_loader: DataLoader,
-    validation_rollout_config: ValidationRolloutConfig,
-) -> list[int]:
-    """Randomly select validation samples from the validation loader's dataset.
-
-    Args:
-        validation_dataset_loader: Validation loader whose dataset is a
-            ``Subset``; its ``indices`` are the candidates.
-        validation_rollout_config: Supplies ``num_points`` (how many indices to
-            draw) and ``seed`` (seed for the random draw).
-
-    Returns:
-        Indices drawn from the validation subset without replacement, at most
-        ``num_points`` of them.
-
-    Raises:
-        ValueError: If ``num_points`` is not positive or the split is empty.
-    """
-    validation_indices = validation_dataset_loader.dataset.indices
-    num_points = validation_rollout_config.num_points
-    available = len(validation_indices)
-    if num_points <= 0:
-        raise ValueError(f"num_points must be positive, got {num_points}.")
-    if available == 0:
-        raise ValueError(
-            "Cannot select validation rollout points from an empty validation split."
-        )
-    if num_points > available:
-        logger.warning(
-            "Requested %s validation rollout point(s), but the validation split "
-            "only has %s sample(s). Using all of them.",
-            num_points,
-            available,
-        )
-        num_points = available
-    generator = np.random.default_rng(validation_rollout_config.seed)
-    positions = generator.choice(available, size=num_points, replace=False)
-    return [validation_indices[int(position)] for position in positions]
-
-
 def rollout_root_dir(output_dir: Path) -> Path:
     """Return the directory that holds every validation rollout file."""
     return output_dir / ROLLOUT_ROOT_DIR
@@ -146,8 +74,7 @@ def _output_point_path(epoch_dir: Path, point: SampleIdentity) -> Path:
 
 def save_validation_rollouts(
     model: NeuracoreModel,
-    dataset: PytorchNeuracoreDataset,
-    selected_indices: Sequence[int],
+    rollout_dataset: Subset,
     batch_size: int | None,
     device: torch.device,
     inference_device_preprocessing: tuple[
@@ -158,14 +85,14 @@ def save_validation_rollouts(
     storage_handler: TrainingStorageHandler,
     save_input_points: bool,
 ) -> None:
-    """Run inference on the selected points and queue their prediction files.
+    """Run inference on the rollout subset and queue their prediction files.
 
     File writes and uploads run on the storage handler's rollout worker.
 
     Args:
         model: Unwrapped model, put in eval mode for this call only.
-        dataset: Validation dataset.
-        selected_indices: Dataset indices to run.
+        rollout_dataset: Validation points to roll out. Indices address the
+            underlying ``PytorchNeuracoreDataset``.
         batch_size: Points per ``forward`` call.
         device: Device the model is on.
         inference_device_preprocessing: Device-side input and output
@@ -181,14 +108,10 @@ def save_validation_rollouts(
         )
         batch_size = 1
 
+    dataset = cast(PytorchNeuracoreDataset, rollout_dataset.dataset)
+    selected_indices = rollout_dataset.indices
     root_dir = rollout_root_dir(output_dir)
     epoch_dir = _epoch_output_dir(root_dir, epoch)
-    logger.info(
-        "Running %s validation rollout point(s) for epoch %s in batches of %s",
-        len(selected_indices),
-        epoch,
-        batch_size,
-    )
     was_training = model.training
     model.eval()
     try:

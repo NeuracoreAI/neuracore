@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections import defaultdict
 from copy import copy
 from typing import TYPE_CHECKING, cast
 
-import torch
 from torch.utils.data import Subset
 
 from neuracore.core.data.synced_recording import SynchronizedRecording
@@ -56,12 +56,6 @@ def _count_val_episodes(n_episodes: int, validation_split: float) -> int:
     return min(max(n_val, 1), n_episodes - 1)
 
 
-def _shuffle_indices(n: int, generator: torch.Generator) -> list[int]:
-    if n == 0:
-        return []
-    return torch.randperm(n, generator=generator).tolist()
-
-
 def _assign_episodes(
     validation_split: float,
     seed: int,
@@ -69,11 +63,11 @@ def _assign_episodes(
 ) -> tuple[list[int], list[int]]:
     """Return ``(train_episode_indices, val_episode_indices)``.
 
-    Shuffle and split within each robot so a multi-recording embodiment is
-    not held out entirely. Single-recording robots stay in train. If no
-    robot has two episodes to split, raise ValueError.
+    Hold out a random subset of each robot's episodes so a multi-recording
+    embodiment is not held out entirely. Single-recording robots stay in
+    train. If no robot has two episodes to split, raise ValueError.
     """
-    generator = torch.Generator().manual_seed(seed)
+    rng = random.Random(seed)
 
     episode_groups_by_robot: dict[str, list[int]] = defaultdict(list)
     for episode_idx, robot_id in enumerate(robot_ids):
@@ -83,17 +77,17 @@ def _assign_episodes(
     val_episodes: list[int] = []
     for robot_id in sorted(episode_groups_by_robot):
         members = episode_groups_by_robot[robot_id]
-        order = [members[i] for i in _shuffle_indices(len(members), generator)]
-        if len(order) < 2:
-            train_episodes.extend(order)
+        if len(members) < 2:
+            train_episodes.extend(members)
             logger.warning(
                 "Robot %s has only one episode, so it is not held out for validation.",
                 robot_id,
             )
             continue
-        n_val = _count_val_episodes(len(order), validation_split)
-        val_episodes.extend(order[:n_val])
-        train_episodes.extend(order[n_val:])
+        n_val = _count_val_episodes(len(members), validation_split)
+        held_out = rng.sample(members, n_val)
+        train_episodes.extend(episode for episode in members if episode not in held_out)
+        val_episodes.extend(held_out)
 
     if not val_episodes:
         counts = ", ".join(
@@ -118,13 +112,52 @@ def _collect_sample_indices(
     return indices
 
 
+def _collect_rollout_indices(
+    val_episodes: list[int],
+    episode_ranges: list[range],
+    num_rollout_episodes: int,
+    seed: int,
+    stride: int,
+) -> list[int]:
+    """Collect the points a robot would see running a few val episodes.
+
+    Picks ``num_rollout_episodes`` val episodes at random. In each, keeps the
+    samples at timesteps ``0, stride, 2 * stride, ...``: the inputs a policy
+    gets if it starts at timestep 0 and executes ``stride`` actions before
+    reading the next input.
+    """
+    if stride <= 0:
+        raise ValueError(f"Rollout stride must be positive, got {stride}.")
+    if num_rollout_episodes > len(val_episodes):
+        logger.warning(
+            "Requested %s validation rollout episode(s), but the validation split "
+            "only has %s episode(s). Using all of them.",
+            num_rollout_episodes,
+            len(val_episodes),
+        )
+        num_rollout_episodes = len(val_episodes)
+    rollout_episodes = random.Random(seed).sample(val_episodes, num_rollout_episodes)
+    indices: list[int] = []
+    for episode_idx in rollout_episodes:
+        indices.extend(episode_ranges[episode_idx][::stride])
+    logger.info(
+        "Selected %s validation rollout episode(s),"
+        " with a total of %s points and a stride of %s.",
+        num_rollout_episodes,
+        len(indices),
+        stride,
+    )
+    return indices
+
+
 def split_train_val_datasets(
     dataset: PytorchSynchronizedDataset,
     validation_split: float,
     seed: int,
     inference_input_preprocessing_config: PreprocessingConfiguration,
     inference_output_preprocessing_config: PreprocessingConfiguration,
-) -> tuple[Subset, Subset]:
+    num_rollout_episodes: int = 0,
+) -> tuple[Subset, Subset, Subset | None]:
     """Split by whole recordings; val uses inference preprocessing.
 
     ``validation_split`` is a fraction of episodes, not frames. Every sample
@@ -135,6 +168,10 @@ def split_train_val_datasets(
     subset is rebased onto a shallow copy configured with inference
     preprocessing.
 
+    The rollout subset holds a few val episodes, sampled every
+    ``output_prediction_horizon`` timesteps, for validation rollouts. Those
+    episodes stay in val as well.
+
     Args:
         dataset: Full synchronized dataset with train preprocessing.
         validation_split: Fraction of recordings to hold out for validation.
@@ -142,14 +179,22 @@ def split_train_val_datasets(
         seed: RNG seed for the deterministic episode shuffle.
         inference_input_preprocessing_config: Preprocessing applied to val inputs.
         inference_output_preprocessing_config: Preprocessing applied to val outputs.
+        num_rollout_episodes: How many val episodes to roll out. 0 turns
+            validation rollouts off.
 
     Returns:
-        ``(train_subset, val_subset)`` as ``torch.utils.data.Subset`` instances.
+        ``(train_subset, val_subset, rollout_subset)`` as
+        ``torch.utils.data.Subset`` instances. ``rollout_subset`` shares val's
+        dataset, and is None when ``num_rollout_episodes`` is 0.
     """
     if not 0 < validation_split < 1:
         raise ValueError(
             f"validation_split is {validation_split}; "
             "it must be strictly between 0 and 1."
+        )
+    if num_rollout_episodes < 0:
+        raise ValueError(
+            f"num_rollout_episodes must be at least 0, got {num_rollout_episodes}."
         )
 
     ranges = _get_episode_sample_ranges(dataset)
@@ -207,4 +252,15 @@ def split_train_val_datasets(
     val_base.rebuild_sample_cache()
     val_dataset = Subset(val_base, val_indices)
 
-    return train_dataset, val_dataset
+    rollout_dataset = None
+    if num_rollout_episodes > 0:
+        rollout_indices = _collect_rollout_indices(
+            val_episodes,
+            ranges,
+            num_rollout_episodes,
+            seed,
+            stride=dataset.output_prediction_horizon,
+        )
+        rollout_dataset = Subset(val_base, rollout_indices)
+
+    return train_dataset, val_dataset, rollout_dataset
