@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use data_daemon_shared::seconds_to_microseconds;
 use serde::Deserialize;
@@ -155,20 +155,27 @@ async fn consume(
     org_id: &str,
     tx: &mpsc::Sender<RecordingCommand>,
 ) -> Result<(), StreamEnded> {
+    let started = Instant::now();
     let token = client
         .auth()
         .bearer_token()
         .await
         .map_err(|error| StreamEnded::Failed(format!("auth: {error}")))?;
+    let auth_ms = started.elapsed().as_millis() as u64;
     let url = client.url(&format!("/stream/org/{org_id}/recording/notifications"));
 
+    let requested = Instant::now();
     let response = stream_client
         .get(&url)
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|error| StreamEnded::Failed(error.to_string()))?;
+        .map_err(|error| {
+            let request_ms = requested.elapsed().as_millis();
+            StreamEnded::Failed(format!("{error:?} (after {request_ms} ms)"))
+        })?;
+    let request_ms = requested.elapsed().as_millis() as u64;
 
     let status = response.status();
     if !status.is_success() {
@@ -178,7 +185,12 @@ async fn consume(
         return Err(StreamEnded::Failed(format!("stream returned {status}")));
     }
 
-    tracing::info!(org_id, "subscribed to recording notifications");
+    tracing::info!(
+        org_id,
+        auth_ms,
+        request_ms,
+        "subscribed to recording notifications"
+    );
     let mut response = response;
     let mut buffer: Vec<u8> = Vec::new();
     let mut opened = HashSet::new();
