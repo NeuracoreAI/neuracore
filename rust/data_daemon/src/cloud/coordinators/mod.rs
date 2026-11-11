@@ -52,7 +52,7 @@ pub(crate) async fn discard_recording_locally(
 /// Stop sending anything for a recording the backend answered 404 for.
 ///
 /// Fails its unfinished uploads and aborts those in flight, but keeps its
-/// files: a 404 carries no error code, so it may be a saved or reaped
+/// files: a 404 carries no error type, so it may be a saved or reaped
 /// recording, or not about the recording at all. Idempotent.
 pub(crate) async fn stop_uploading_not_found_recording(
     store: &Arc<SqliteStateStore>,

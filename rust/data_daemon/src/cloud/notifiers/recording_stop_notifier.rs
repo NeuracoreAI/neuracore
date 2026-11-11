@@ -225,7 +225,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/stop"))
             .respond_with(ResponseTemplate::new(410).set_body_json(serde_json::json!({
-                "detail": { "error": "Recording has been cancelled.", "error_code": "RECORDING_CANCELLED" }
+                "detail": { "error": "Recording has been cancelled.", "error_type": "RECORDING_CANCELLED" }
             })))
             .mount(&server)
             .await;

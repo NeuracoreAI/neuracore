@@ -932,7 +932,7 @@ mod tests {
         let events = sweep_twice_against(
             &store,
             ResponseTemplate::new(410).set_body_json(serde_json::json!({
-                "detail": { "error": "Recording has been cancelled.", "error_code": "RECORDING_CANCELLED" }
+                "detail": { "error": "Recording has been cancelled.", "error_type": "RECORDING_CANCELLED" }
             })),
         )
         .await;
