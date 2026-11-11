@@ -20,3 +20,5 @@ The data daemon keeps the tag names of a stop in its state store and sends them 
 `nc.stop_recording` takes an optional `tags` list of user tag names, so a script tags a recording when it stops it. The names are normalized like `recording.add_tag`, and a name given twice gives one tag. An invalid name raises `ValueError` and the recording does not stop. The tags also reach a recording that was made offline.
 
 Breaking change: `nc.connect_robot` raises `ValidationError` if the URDF has a visual mesh that is not STL or DAE, because the web viewer shows only these formats. The error lists each unsupported mesh file. Convert these meshes to STL or DAE before you connect the robot.
+
+`nc.login()` no longer fails when the Neuracore server cannot be reached: it warns and continues offline, using the saved API key without checking it, and saves the given key only when none is saved. Authenticated requests to the server then raise `ServerUnreachableError`, a subclass of `AuthenticationError`. `nc.stop_recording(wait=True)` while offline stops the recording and raises `ServerUnreachableError` straight away instead of waiting.
