@@ -22,3 +22,5 @@ The data daemon keeps the tag names of a stop in its state store and sends them 
 Breaking change: `nc.connect_robot` raises `ValidationError` if the URDF has a visual mesh that is not STL or DAE, because the web viewer shows only these formats. The error lists each unsupported mesh file. Convert these meshes to STL or DAE before you connect the robot.
 
 Resuming a multi-GPU training job downloads the checkpoint on rank 0 only, then the other ranks load that local file, so they cannot truncate it while another rank is reading it.
+
+`nc.login()` no longer fails when the Neuracore server cannot be reached: it warns and continues offline, using the saved API key without checking it, and saves the given key only when none is saved. Authenticated requests to the server then raise `ServerUnreachableError`, a subclass of `AuthenticationError`. `nc.stop_recording(wait=True)` while offline stops the recording and raises `ServerUnreachableError` straight away instead of waiting.

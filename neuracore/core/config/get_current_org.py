@@ -13,6 +13,21 @@ from neuracore.core.exceptions import (
 )
 
 
+def get_saved_org() -> str | None:
+    """Get the current organization without asking the user or the server.
+
+    Returns:
+        The `NEURACORE_ORG_ID` environment variable if set, otherwise the
+        saved current organization's id, or None if neither is set.
+
+    Raises:
+        ConfigError: If there is an error trying to get the config
+    """
+    if "NEURACORE_ORG_ID" in os.environ:
+        return os.environ["NEURACORE_ORG_ID"]
+    return get_config_manager().config.current_org_id or None
+
+
 def get_current_org() -> str:
     """Get the current organization from storage or interactively select it.
 
