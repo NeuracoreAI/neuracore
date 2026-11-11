@@ -72,3 +72,43 @@ class TestRobotArchive:
 
         with pytest.raises(RobotError, match="Unable to archive robot"):
             robot.set_archived(True)
+
+    def test_unarchive_before_init_finds_the_archived_robot_by_name(
+        self, mock_auth_requests
+    ):
+        """set_archived(False) works before init by finding the archived robot."""
+        robot_list = mock_auth_requests.post(
+            f"{API_URL}/org/{ORG_ID}/robots/list",
+            json={
+                "data": [
+                    {"id": "other-id", "name": "other"},
+                    {"id": ROBOT_ID, "name": ROBOT_NAME},
+                ],
+                "total": 2,
+            },
+        )
+        archive = _register_robot_archive(mock_auth_requests)
+        robot = Robot(ROBOT_NAME, instance=0, org_id=ORG_ID, shared=True)
+
+        robot.set_archived(False)
+
+        assert "mode=archived" in robot_list.last_request.query
+        assert "is_shared=true" in robot_list.last_request.query
+        assert archive.last_request.json() == {"archived": False}
+        assert robot.archived is False
+
+    def test_unarchive_before_init_raises_when_no_archived_robot_has_the_name(
+        self, mock_auth_requests
+    ):
+        """set_archived(False) before init raises if the name is not archived."""
+        mock_auth_requests.post(
+            f"{API_URL}/org/{ORG_ID}/robots/list",
+            json={"data": [{"id": "other-id", "name": "other"}], "total": 1},
+        )
+        archive = _register_robot_archive(mock_auth_requests)
+        robot = Robot(ROBOT_NAME, instance=0, org_id=ORG_ID)
+
+        with pytest.raises(RobotError, match="No archived robot is named"):
+            robot.set_archived(False)
+
+        assert not archive.called

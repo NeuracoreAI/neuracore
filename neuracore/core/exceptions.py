@@ -52,6 +52,10 @@ class RobotError(Exception):
     """Raised for robot-related errors."""
 
 
+class RobotArchivedError(RobotError):
+    """Raised when the server refuses a connection because the robot is archived."""
+
+
 class DatasetError(Exception):
     """Exception raised for errors in the dataset module."""
 

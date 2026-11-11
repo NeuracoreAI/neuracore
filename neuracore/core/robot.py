@@ -29,7 +29,12 @@ from neuracore.data_daemon import bridge as recording_context
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
-from .exceptions import AuthenticationError, RobotError, ValidationError
+from .exceptions import (
+    AuthenticationError,
+    RobotArchivedError,
+    RobotError,
+    ValidationError,
+)
 
 if TYPE_CHECKING:
     from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
@@ -224,7 +229,9 @@ class Robot:
                 e.response is not None
                 and extract_error_type(e.response) == _ROBOT_ARCHIVED_ERROR_TYPE
             ):
-                raise RobotError(_ROBOT_ARCHIVED_MESSAGE.format(robot_name=self.name))
+                raise RobotArchivedError(
+                    _ROBOT_ARCHIVED_MESSAGE.format(robot_name=self.name)
+                )
             raise RobotError(f"Failed to initialize robot: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
@@ -806,19 +813,28 @@ class Robot:
         Archiving hides the robot from the default robots list while keeping the
         robot record and URDF package so recordings can still be visualized.
 
+        Unarchiving works before init(), because the server refuses to connect
+        to an archived robot: the robot is then found by name among the
+        archived robots.
+
         Args:
             archived: True to archive, False to unarchive.
 
         Raises:
-            RobotError: If the robot has not been initialized or the server
-                rejects the update.
+            RobotError: If archiving a robot that has not been initialized, if
+                no archived robot has this name, or if the server rejects the
+                update.
         """
-        if self.id is None:
+        if self.id is not None:
+            robot_id = self.id
+        elif archived:
             raise RobotError("Robot not initialized. Call init() first.")
+        else:
+            robot_id = self._archived_robot_id()
         try:
             session = thread_local_session()
             response = session.put(
-                f"{API_URL}/org/{self.org_id}/robots/{self.id}/archive",
+                f"{API_URL}/org/{self.org_id}/robots/{robot_id}/archive",
                 json={"archived": archived},
                 params={"is_shared": str(self.shared).lower()},
                 headers=self._auth.get_headers(),
@@ -836,6 +852,20 @@ class Robot:
                 detail = extract_error_detail(e.response)
             action = "archive" if archived else "unarchive"
             raise RobotError(f"Failed to {action} robot: {detail or str(e)}")
+
+    def _archived_robot_id(self) -> str:
+        """Find the ID of the archived robot with this robot's name.
+
+        Raises:
+            RobotError: If no archived robot has this name.
+        """
+        archived_robots = list_organization_robots(
+            self.org_id, is_shared=self.shared, mode="archived"
+        )
+        for robot in archived_robots:
+            if robot["name"] == self.name:
+                return robot["id"]
+        raise RobotError(f"No archived robot is named '{self.name}'.")
 
     def list_instance_ids(self) -> list[int]:
         """Return registered instance IDs for this robot.

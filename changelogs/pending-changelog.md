@@ -10,3 +10,6 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+The importer can import into a robot again after a previous import archived it.
+It unarchives the robot for the import and archives it again when the import ends.

@@ -14,6 +14,7 @@ from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import (
     AuthenticationError,
+    RobotArchivedError,
     RobotError,
     VersionMismatchError,
 )
@@ -351,7 +352,7 @@ def test_connect_robot_refuses_an_archived_robot(
         status_code=409,
     )
 
-    with pytest.raises(RobotError) as raised:
+    with pytest.raises(RobotArchivedError) as raised:
         nc.connect_robot("test_robot")
 
     assert str(raised.value) == ARCHIVED_ROBOT_ERROR

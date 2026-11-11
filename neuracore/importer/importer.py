@@ -20,7 +20,7 @@ from rich.logging import RichHandler
 import neuracore as nc
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.exceptions import DatasetError
+from neuracore.core.exceptions import DatasetError, RobotArchivedError
 from neuracore.core.robot import Robot, list_organization_robots
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
@@ -155,6 +155,42 @@ def _robot_exists(robot_name: str) -> bool:
     return False
 
 
+def _connect_import_robot(
+    robot_name: str,
+    urdf_path: str | None,
+    mjcf_path: str | None,
+    overwrite: bool,
+    shared: bool,
+) -> tuple[Robot, bool]:
+    """Connect to the import robot, unarchiving it if the server refuses it.
+
+    The importer archives the robots it creates, so importing into the same
+    robot again finds it archived.
+
+    Returns:
+        The connected robot, and whether this call unarchived it.
+
+    Raises:
+        RobotError: If the robot is archived and cannot be unarchived.
+    """
+
+    def connect() -> Robot:
+        return nc.connect_robot(
+            robot_name=robot_name,
+            urdf_path=urdf_path,
+            mjcf_path=mjcf_path,
+            overwrite=overwrite,
+            shared=shared,
+        )
+
+    try:
+        return connect(), False
+    except RobotArchivedError:
+        logger.info("Robot '%s' is archived; unarchiving it to import.", robot_name)
+        Robot(robot_name=robot_name, instance=0, shared=shared).set_archived(False)
+        return connect(), True
+
+
 def _run_import(
     dataset_config: Path,
     dataset_dir: Path,
@@ -276,7 +312,7 @@ def _run_import(
         mjcf_path = None
 
     robot_existed_before = _robot_exists(robot_config.name)
-    robot = nc.connect_robot(
+    robot, unarchived_for_import = _connect_import_robot(
         robot_name=robot_config.name,
         urdf_path=urdf_path,
         mjcf_path=mjcf_path,
@@ -346,6 +382,13 @@ def _run_import(
                     robot.id,
                 )
                 robot.set_archived(True)
+        elif unarchived_for_import:
+            logger.info(
+                "Import complete; archiving robot '%s' (id=%s) again.",
+                robot.name,
+                robot.id,
+            )
+            robot.set_archived(True)
 
     logger.info("Finished importing dataset.")
 
