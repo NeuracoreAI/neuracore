@@ -59,8 +59,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use dashmap::DashMap;
 use data_daemon_shared::{
-    video_boundary, BatchedDataItem, Envelope, FrameCalibration, FrameDtype, LiveRecording, Source,
-    NANOSECONDS_PER_MICROSECOND,
+    video_boundary, BatchedDataItem, Envelope, FrameCalibration, FrameDtype, LiveRecording,
+    LocalDataset, LocalRobot, Source, NANOSECONDS_PER_MICROSECOND,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -239,6 +239,19 @@ struct AnnouncedRecording {
     start_timestamp_us: i64,
     /// The recording this announcement opened, once it has.
     recording_index: Option<i64>,
+    /// The robot and dataset details a `StartLocalRecording` carried.
+    local: LocalIds,
+}
+
+/// What a `StartLocalRecording` says about a robot or dataset made offline.
+///
+/// Empty for every other start: the ids are then cloud ids already.
+#[derive(Debug, Clone, Default)]
+struct LocalIds {
+    /// Set when the source's robot id is a local id.
+    robot: Option<LocalRobot>,
+    /// Set when the dataset id is a local id.
+    dataset: Option<LocalDataset>,
 }
 
 /// A recording lifecycle event the *backend* originated, delivered over the
@@ -590,11 +603,39 @@ impl Dispatcher {
                     None,
                     publish_timestamp_ns,
                     timestamp_us,
+                    LocalIds::default(),
                 )
                 .await;
                 // The envelope came over local IPC, so the producer that sent
                 // it is here: this start is itself the proof an announcement
                 // off the notification stream has to wait for data to get.
+                self.open_announced_window(&source, publish_timestamp_ns, recv_at)
+                    .await;
+            }
+            // A start for a robot or dataset made offline: handled exactly as
+            // `StartRecording`, and the row also keeps their details.
+            Envelope::StartLocalRecording {
+                robot_id,
+                robot_instance,
+                dataset_id,
+                publish_timestamp_ns,
+                timestamp_us,
+                local_robot,
+                local_dataset,
+            } => {
+                let source = (robot_id, robot_instance);
+                self.announce_recording(
+                    source.clone(),
+                    dataset_id,
+                    None,
+                    publish_timestamp_ns,
+                    timestamp_us,
+                    LocalIds {
+                        robot: local_robot,
+                        dataset: local_dataset,
+                    },
+                )
+                .await;
                 self.open_announced_window(&source, publish_timestamp_ns, recv_at)
                     .await;
             }
@@ -775,8 +816,9 @@ impl Dispatcher {
     /// Announce a recording for `source`. The window opens when the source is
     /// known to be here — see [`Dispatcher::open_announced_window`].
     ///
-    /// Both origins land here unchanged: a producer's `StartRecording` envelope
-    /// and the backend's notification stream.
+    /// Both origins land here unchanged: a producer's `StartRecording` (or
+    /// `StartLocalRecording`, whose `local` details reach the row) and the
+    /// backend's notification stream.
     async fn announce_recording(
         &mut self,
         source: Source,
@@ -784,6 +826,7 @@ impl Dispatcher {
         recording_id: Option<String>,
         publish_timestamp_ns: i64,
         timestamp_us: i64,
+        local: LocalIds,
     ) {
         if let Some(recording_id) = recording_id.as_deref() {
             if self
@@ -805,6 +848,7 @@ impl Dispatcher {
             open_at_ns: publish_timestamp_ns,
             start_timestamp_us: timestamp_us,
             recording_index: None,
+            local,
         };
         tracing::debug!(robot_id = source.0, "recording announced");
         self.announced.0.insert(source, announced);
@@ -903,6 +947,8 @@ impl Dispatcher {
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),
             start: caller_timestamp(announced.open_at_ns, announced.start_timestamp_us),
+            local_robot: announced.local.robot.as_ref(),
+            local_dataset: announced.local.dataset.as_ref(),
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -1027,6 +1073,7 @@ impl Dispatcher {
                     Some(recording_id),
                     start_timestamp_ns,
                     start_timestamp_us,
+                    LocalIds::default(),
                 )
                 .await;
             }
@@ -2158,7 +2205,7 @@ mod tests {
     use super::*;
     use crate::cloud::ConfigRefreshRequest;
     use crate::encoding::video_encoder::VideoEncoder;
-    use crate::state::{SqliteStateStore, TraceWriteStatus};
+    use crate::state::{OfflineState, SqliteStateStore, StateStore, TraceWriteStatus};
     use crate::storage::budget::{StorageBudget, StoragePolicy};
     use crate::storage::paths::TracePath;
     use std::path::PathBuf;
@@ -2408,6 +2455,99 @@ mod tests {
         let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, serde_json::json!([{"i": 0}, {"i": 1}, {"i": 2}]));
+    }
+
+    #[tokio::test]
+    async fn a_local_start_routes_like_a_start_and_keeps_its_details() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context, shutdown_rx);
+
+        tx.send(Envelope::StartLocalRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            dataset_id: Some("local-dataset-1".into()),
+            publish_timestamp_ns: 100,
+            timestamp_us: 7,
+            local_robot: Some(LocalRobot {
+                name: "arm".into(),
+                shared: false,
+                overwrite_urdf: false,
+            }),
+            local_dataset: Some(LocalDataset {
+                name: "warehouse".into(),
+                shared: true,
+                description: None,
+                tags: vec!["shelf-a".into()],
+            }),
+        })
+        .await
+        .unwrap();
+        for index in 0..3i64 {
+            tx.send(datum("robot-1", 100 + index, index)).await.unwrap();
+        }
+        tx.send(stop("robot-1", 200)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let row = &recordings[0];
+        assert_eq!(row.start_timestamp_us, Some(7));
+        assert_eq!(row.dataset_id.as_deref(), Some("local-dataset-1"));
+        assert_eq!(row.offline, Some(OfflineState::Resolving));
+        let robot = store.get_local_robot("robot-1", 0).await.unwrap().unwrap();
+        assert_eq!((robot.name.as_str(), robot.shared), ("arm", false));
+        let dataset = store
+            .get_local_dataset("local-dataset-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dataset.name, "warehouse");
+        assert!(dataset.shared);
+        assert_eq!(dataset.tags, vec!["shelf-a".to_string()]);
+        let traces = store
+            .list_traces_for_recording(row.recording_index)
+            .await
+            .unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].write_status, TraceWriteStatus::Written);
+    }
+
+    #[tokio::test]
+    async fn an_online_start_is_not_offline() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context, shutdown_rx);
+
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(stop("robot-1", 200)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let row = store
+            .recordings_for_source("robot-1", 0)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(row.offline, None);
+        assert_eq!(
+            store
+                .get_recording_offline(row.recording_index)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

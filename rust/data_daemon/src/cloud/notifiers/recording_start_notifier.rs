@@ -287,6 +287,7 @@ mod tests {
                     publish_timestamp_ns: 1_700_000_000_000_000_000,
                     timestamp_us: Some(1_600_000_000_123_457),
                 },
+                ..NewRecording::default()
             })
             .await
             .expect("create recording")

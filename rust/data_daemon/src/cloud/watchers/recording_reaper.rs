@@ -164,6 +164,7 @@ mod tests {
             robot_instance: Some(instance),
             dataset_id: Some("ds-1"),
             start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
+            ..NewRecording::default()
         }
     }
 

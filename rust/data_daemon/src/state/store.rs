@@ -9,14 +9,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use data_daemon_shared::NANOSECONDS_PER_MICROSECOND;
+use data_daemon_shared::{LocalDataset, LocalRobot, NANOSECONDS_PER_MICROSECOND};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::state::schema::{LocalDatasetRow, LocalRobotRow};
 use crate::state::schema::{
-    ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
-    TraceUploadStatus, TraceWriteStatus,
+    LocalIdStatus, OfflineState, ProgressReportStatus, RecordingOfflineRow, RecordingRow,
+    TraceErrorCode, TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
 };
 
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
@@ -100,6 +102,12 @@ pub struct NewRecording<'a> {
     pub dataset_id: Option<&'a str>,
     /// The recording's start.
     pub start: RecordingTimestamp,
+    /// Set when `robot_id` is a local id: the robot's details, kept in
+    /// `local_robots` so the daemon can register it later.
+    pub local_robot: Option<&'a LocalRobot>,
+    /// Set when `dataset_id` is a local id: the dataset's details, kept in
+    /// `local_datasets` so the daemon can find or create it later.
+    pub local_dataset: Option<&'a LocalDataset>,
 }
 
 /// Persistence interface for daemon state.
@@ -429,12 +437,21 @@ pub trait StateStore: Send + Sync {
     /// whose upload was failed.
     async fn mark_recording_not_found(&self, recording_index: i64) -> Result<u64, StateStoreError>;
 
-    /// Delete a recording and all of its trace rows in a single transaction.
+    /// Delete a recording, all of its trace rows and its `recording_offline`
+    /// row in a single transaction.
     ///
     /// Called by the recording reaper once a recording is fully settled (every
     /// trace uploaded and the backend notified), after its on-disk artefacts
     /// have been removed. Returns the number of trace rows deleted.
     async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError>;
+
+    /// What a recording started offline needs before it can start on the
+    /// backend, or `None` for a recording started online.
+    #[allow(dead_code)] // Read by the offline resolver.
+    async fn get_recording_offline(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingOfflineRow>, StateStoreError>;
 }
 
 /// Optional fields to update on a trace row.
@@ -802,12 +819,25 @@ impl StateStore for SqliteStateStore {
     ) -> Result<RecordingRow, StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
+        // A local robot is keyed by the recording's robot id and instance,
+        // and a local dataset by its dataset id: without them there is
+        // nothing to resolve.
+        let local_robot = match (new.local_robot, new.robot_id) {
+            (Some(robot), Some(robot_id)) => Some((robot, robot_id)),
+            _ => None,
+        };
+        let local_dataset = match (new.local_dataset, new.dataset_id) {
+            (Some(dataset), Some(dataset_id)) => Some((dataset, dataset_id)),
+            _ => None,
+        };
+        let offline = (local_robot.is_some() || local_dataset.is_some())
+            .then_some(OfflineState::Resolving.as_str());
         let result = sqlx::query(
             "INSERT INTO recordings ( \
                  robot_id, robot_instance, dataset_id, \
                  start_timestamp_us, start_publish_timestamp_ns, \
-                 created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6)",
+                 created_at, last_updated, offline \
+             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6, ?8)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
@@ -816,10 +846,52 @@ impl StateStore for SqliteStateStore {
         .bind(new.start.publish_timestamp_ns)
         .bind(now)
         .bind(NANOSECONDS_PER_MICROSECOND)
+        .bind(offline)
         .execute(&mut *tx)
         .await?;
-
         let recording_index = result.last_insert_rowid();
+
+        if offline.is_some() {
+            sqlx::query("INSERT INTO recording_offline (recording_index) VALUES (?1)")
+                .bind(recording_index)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // A robot or dataset an earlier recording used keeps its row: what
+        // the backend said about it holds for this recording too.
+        if let Some((robot, robot_id)) = local_robot {
+            sqlx::query(
+                "INSERT OR IGNORE INTO local_robots \
+                     (robot_id, instance, name, shared, overwrite_urdf, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(robot_id)
+            .bind(new.robot_instance.unwrap_or_default())
+            .bind(&robot.name)
+            .bind(robot.shared)
+            .bind(robot.overwrite_urdf)
+            .bind(LocalIdStatus::Pending.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+        if let Some((dataset, dataset_id)) = local_dataset {
+            let tags = serde_json::to_string(&dataset.tags)
+                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO local_datasets \
+                     (dataset_id, name, shared, description, tags, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(dataset_id)
+            .bind(&dataset.name)
+            .bind(dataset.shared)
+            .bind(dataset.description.as_deref())
+            .bind(tags)
+            .bind(LocalIdStatus::Pending.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+
         let row = Self::fetch_recording_locked(&mut tx, recording_index)
             .await?
             .ok_or_else(|| sqlx::Error::RowNotFound)?;
@@ -1747,12 +1819,59 @@ impl StateStore for SqliteStateStore {
             .execute(&mut *tx)
             .await?
             .rows_affected();
+        sqlx::query("DELETE FROM recording_offline WHERE recording_index = ?1")
+            .bind(recording_index)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM recordings WHERE recording_index = ?1")
             .bind(recording_index)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(traces_deleted)
+    }
+
+    async fn get_recording_offline(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingOfflineRow>, StateStoreError> {
+        let row = sqlx::query("SELECT * FROM recording_offline WHERE recording_index = ?1")
+            .bind(recording_index)
+            .fetch_optional(&self.read_pool)
+            .await?;
+        Ok(row
+            .map(|row| RecordingOfflineRow::from_row(&row))
+            .transpose()?)
+    }
+}
+
+/// Reads only tests need.
+#[cfg(test)]
+impl SqliteStateStore {
+    /// A robot instance connected offline, by its local id.
+    pub(crate) async fn get_local_robot(
+        &self,
+        robot_id: &str,
+        instance: i64,
+    ) -> Result<Option<LocalRobotRow>, StateStoreError> {
+        let row = sqlx::query("SELECT * FROM local_robots WHERE robot_id = ?1 AND instance = ?2")
+            .bind(robot_id)
+            .bind(instance)
+            .fetch_optional(&self.read_pool)
+            .await?;
+        Ok(row.map(|row| LocalRobotRow::from_row(&row)).transpose()?)
+    }
+
+    /// A dataset selected offline, by its local id.
+    pub(crate) async fn get_local_dataset(
+        &self,
+        dataset_id: &str,
+    ) -> Result<Option<LocalDatasetRow>, StateStoreError> {
+        let row = sqlx::query("SELECT * FROM local_datasets WHERE dataset_id = ?1")
+            .bind(dataset_id)
+            .fetch_optional(&self.read_pool)
+            .await?;
+        Ok(row.map(|row| LocalDatasetRow::from_row(&row)).transpose()?)
     }
 }
 
@@ -1824,6 +1943,274 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upgrade_leaves_existing_rows_online() {
+        // Rows written before migration 0006 were all started online.
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let earlier_migrations = tempdir.path().join("migrations");
+        std::fs::create_dir(&earlier_migrations).unwrap();
+        for entry in
+            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations")).unwrap()
+        {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if name.as_str() < "0006" {
+                std::fs::copy(entry.path(), earlier_migrations.join(name)).unwrap();
+            }
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(earlier_migrations.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "INSERT INTO recordings (robot_id, dataset_id, created_at, last_updated) \
+             VALUES ('cloud-robot', 'cloud-dataset', ?1, ?1)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = SqliteStateStore::open(&path).await.expect("open store");
+        let row = store.list_recordings().await.unwrap().remove(0);
+        assert_eq!(row.offline, None);
+        assert_eq!(
+            store
+                .get_recording_offline(row.recording_index)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    fn arm(shared: bool) -> LocalRobot {
+        LocalRobot {
+            name: "arm".into(),
+            shared,
+            overwrite_urdf: false,
+        }
+    }
+
+    fn warehouse() -> LocalDataset {
+        LocalDataset {
+            name: "warehouse".into(),
+            shared: false,
+            description: Some("pick and place".into()),
+            tags: vec!["day-1".into(), "shelf-a".into()],
+        }
+    }
+
+    #[tokio::test]
+    async fn a_local_start_keeps_the_robot_and_dataset_apart_from_the_recording() {
+        let (store, _tempdir) = open_store().await;
+        let robot = LocalRobot {
+            overwrite_urdf: true,
+            ..arm(true)
+        };
+
+        let row = store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(2),
+                dataset_id: Some("local-dataset-1"),
+                start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
+                local_robot: Some(&robot),
+                local_dataset: Some(&warehouse()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(row.robot_id.as_deref(), Some("local-robot-1"));
+        assert_eq!(row.dataset_id.as_deref(), Some("local-dataset-1"));
+        assert_eq!(row.offline, Some(OfflineState::Resolving));
+        assert_eq!(
+            store
+                .get_recording_offline(row.recording_index)
+                .await
+                .unwrap(),
+            Some(RecordingOfflineRow {
+                recording_index: row.recording_index,
+                cloud_robot_id: None,
+                cloud_dataset_id: None,
+                failure: None,
+                failure_kind: None,
+                failure_name: None,
+            })
+        );
+        assert_eq!(
+            store.get_local_robot("local-robot-1", 2).await.unwrap(),
+            Some(LocalRobotRow {
+                robot_id: "local-robot-1".into(),
+                instance: 2,
+                name: "arm".into(),
+                shared: true,
+                overwrite_urdf: true,
+                cloud_robot_id: None,
+                status: LocalIdStatus::Pending,
+                detail: None,
+                next_attempt_at: None,
+            })
+        );
+        assert_eq!(
+            store.get_local_dataset("local-dataset-1").await.unwrap(),
+            Some(LocalDatasetRow {
+                dataset_id: "local-dataset-1".into(),
+                name: "warehouse".into(),
+                shared: false,
+                description: Some("pick and place".into()),
+                tags: vec!["day-1".into(), "shelf-a".into()],
+                cloud_dataset_id: None,
+                status: LocalIdStatus::Pending,
+                detail: None,
+                next_attempt_at: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_robot_with_a_cloud_dataset_needs_only_the_robot() {
+        let (store, _tempdir) = open_store().await;
+
+        let row = store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(0),
+                dataset_id: Some("cloud-dataset-1"),
+                local_robot: Some(&arm(false)),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(row.offline, Some(OfflineState::Resolving));
+        assert!(store
+            .get_local_robot("local-robot-1", 0)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store.get_local_dataset("cloud-dataset-1").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn recordings_of_one_robot_and_dataset_share_their_rows() {
+        let (store, _tempdir) = open_store().await;
+        for _ in 0..2 {
+            store
+                .create_recording(NewRecording {
+                    robot_id: Some("local-robot-1"),
+                    robot_instance: Some(0),
+                    dataset_id: Some("local-dataset-1"),
+                    local_robot: Some(&arm(false)),
+                    local_dataset: Some(&warehouse()),
+                    ..NewRecording::default()
+                })
+                .await
+                .unwrap();
+        }
+        // Another instance of the robot is its own row.
+        store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(1),
+                dataset_id: Some("local-dataset-1"),
+                local_robot: Some(&arm(false)),
+                local_dataset: Some(&warehouse()),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+
+        let count = |table: &'static str| {
+            let pool = store.read_pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(count("recording_offline").await, 3);
+        assert_eq!(count("local_robots").await, 2);
+        assert_eq!(count("local_datasets").await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_online_start_is_not_offline() {
+        let (store, _tempdir) = open_store().await;
+
+        let row = store
+            .create_recording(NewRecording {
+                robot_id: Some("cloud-robot-1"),
+                dataset_id: Some("cloud-dataset-1"),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(row.offline, None);
+        assert_eq!(
+            store
+                .get_recording_offline(row.recording_index)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_recording_deletes_its_offline_row_but_not_the_shared_ones() {
+        let (store, _tempdir) = open_store().await;
+        let row = store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(0),
+                dataset_id: Some("local-dataset-1"),
+                local_robot: Some(&arm(false)),
+                local_dataset: Some(&warehouse()),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+
+        store
+            .delete_recording_cascade(row.recording_index)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_recording_offline(row.recording_index)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store
+            .get_local_robot("local-robot-1", 0)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_local_dataset("local-dataset-1")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn an_observed_stop_keeps_the_caller_clock_of_the_start() {
         // A start on a zero-based caller clock, stopped by the daemon itself 2 s
         // of publish time later: the stop continues the caller's clock.
@@ -1863,6 +2250,7 @@ mod tests {
                 robot_instance: Some(instance),
                 dataset_id: Some("ds-1"),
                 start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
+                ..NewRecording::default()
             })
             .await
             .expect("create_recording")

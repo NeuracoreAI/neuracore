@@ -17,7 +17,8 @@
 //!
 //! - [`start_recording`] / [`stop_recording`] / [`cancel_recording`] publish
 //!   one lifecycle envelope each, carrying the lifecycle wall-clock
-//!   `*_at_ns`.
+//!   `*_at_ns`. [`start_local_recording`] is `start_recording` for a robot or
+//!   dataset made offline.
 //! - [`log_joints`] / [`log_json`] publish data envelopes tagged with the
 //!   sensor `(data_type, sensor_name)` and capture `timestamp_us`.
 //! - [`log_frame`] spools raw RGB into per-`(source, sensor)` NUT chunk files
@@ -52,7 +53,9 @@ mod query;
 mod recording_state_cache;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameCalibration, FrameDtype, NANOSECONDS_PER_MICROSECOND};
+use data_daemon_shared::{
+    Envelope, FrameCalibration, FrameDtype, LocalDataset, LocalRobot, NANOSECONDS_PER_MICROSECOND,
+};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -85,6 +88,107 @@ fn start_recording(
     dataset_name: Option<String>,
     timestamp_us: Option<i64>,
 ) -> PyResult<i64> {
+    publish_start(
+        py,
+        robot_id,
+        robot_instance,
+        timestamp_us,
+        |robot_id, publish_timestamp_ns, timestamp_us| Envelope::StartRecording {
+            robot_id,
+            robot_instance,
+            robot_name,
+            dataset_id,
+            dataset_name,
+            publish_timestamp_ns,
+            timestamp_us,
+        },
+    )
+}
+
+/// [`start_recording`] for a recording whose robot or dataset was made
+/// offline and so has only a local id.
+///
+/// Publishes [`Envelope::StartLocalRecording`], which opens the window and
+/// inserts the row exactly as `StartRecording` does and also carries what the
+/// daemon needs to find or create the robot and dataset once it can reach the
+/// backend. The robot details are sent when `local_robot_name` is set, and the
+/// dataset details when `local_dataset_name` is set, which needs the local
+/// `dataset_id` the recording is filed under. Returns the capture timestamp,
+/// as [`start_recording`] does.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    robot_id,
+    robot_instance,
+    dataset_id,
+    timestamp_us,
+    local_robot_name=None,
+    local_robot_shared=false,
+    local_robot_overwrite_urdf=false,
+    local_dataset_name=None,
+    local_dataset_shared=false,
+    local_dataset_description=None,
+    local_dataset_tags=Vec::new(),
+))]
+fn start_local_recording(
+    py: Python<'_>,
+    robot_id: &str,
+    robot_instance: i64,
+    dataset_id: Option<String>,
+    timestamp_us: Option<i64>,
+    local_robot_name: Option<String>,
+    local_robot_shared: bool,
+    local_robot_overwrite_urdf: bool,
+    local_dataset_name: Option<String>,
+    local_dataset_shared: bool,
+    local_dataset_description: Option<String>,
+    local_dataset_tags: Vec<String>,
+) -> PyResult<i64> {
+    if local_dataset_name.is_some() && dataset_id.is_none() {
+        // The daemon would hold the dataset's details with no id to resolve.
+        return Err(PyValueError::new_err(
+            "dataset_id must be set with local_dataset_name",
+        ));
+    }
+    let local_robot = local_robot_name.map(|name| LocalRobot {
+        name,
+        shared: local_robot_shared,
+        overwrite_urdf: local_robot_overwrite_urdf,
+    });
+    let local_dataset = local_dataset_name.map(|name| LocalDataset {
+        name,
+        shared: local_dataset_shared,
+        description: local_dataset_description,
+        tags: local_dataset_tags,
+    });
+    publish_start(
+        py,
+        robot_id,
+        robot_instance,
+        timestamp_us,
+        |robot_id, publish_timestamp_ns, timestamp_us| Envelope::StartLocalRecording {
+            robot_id,
+            robot_instance,
+            dataset_id,
+            publish_timestamp_ns,
+            timestamp_us,
+            local_robot,
+            local_dataset,
+        },
+    )
+}
+
+/// Publish the start envelope `make` builds and note the start locally.
+///
+/// `make` gets the robot id, the publish-clock window open and the capture
+/// timestamp. Returns the capture timestamp.
+fn publish_start(
+    py: Python<'_>,
+    robot_id: &str,
+    robot_instance: i64,
+    timestamp_us: Option<i64>,
+    make: impl FnOnce(String, i64, i64) -> Envelope + Send,
+) -> PyResult<i64> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
@@ -96,15 +200,7 @@ fn start_recording(
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_us =
             timestamp_us.unwrap_or(publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND);
-        publish(&Envelope::StartRecording {
-            robot_id,
-            robot_instance,
-            robot_name,
-            dataset_id,
-            dataset_name,
-            publish_timestamp_ns,
-            timestamp_us: capture_timestamp_us,
-        })?;
+        publish(&make(robot_id, publish_timestamp_ns, capture_timestamp_us))?;
         // The daemon stores this exact value as the recording's start, so this
         // process now holds the same identity a refresh would fetch — a
         // recording bracketed here needs no query at all.
@@ -637,6 +733,7 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(start_local_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
