@@ -175,6 +175,7 @@ def mock_start_training_run_endpoints(
         job_response: dict | None = None,
         job_status_code: int = 200,
         existing_jobs: list[dict] | None = None,
+        estimate_disk_size_gb: int = 100,
     ) -> None:
         dataset = Dataset(
             id=TEST_DATASET_ID,
@@ -248,6 +249,11 @@ def mock_start_training_run_endpoints(
         mock_auth_requests.get(
             f"{org_url}/training/jobs",
             json=existing_jobs or [],
+            status_code=200,
+        )
+        mock_auth_requests.post(
+            f"{org_url}/training/estimate-disk",
+            json={"disk_size_gb": estimate_disk_size_gb},
             status_code=200,
         )
         mock_auth_requests.post(
@@ -704,13 +710,13 @@ def test_start_training_run_sends_disk_size_gb(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        disk_size_gb=1000,
+        disk_size_gb=2000,
         input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
         output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
     )
 
     post_request = _training_job_post_requests(mock_auth_requests)[0]
-    assert post_request.json()["disk_size_gb"] == 1000
+    assert post_request.json()["disk_size_gb"] == 2000
 
 
 def test_start_training_run_raises_when_disk_size_too_small(
@@ -719,7 +725,9 @@ def test_start_training_run_raises_when_disk_size_too_small(
 ):
     """start_training_run rejects disks below the estimated minimum."""
     nc.login("test_api_key")
-    mock_start_training_run_endpoints(dataset_size_bytes=2_000_000_000)
+    mock_start_training_run_endpoints(
+        dataset_size_bytes=2_000_000_000, estimate_disk_size_gb=500
+    )
 
     expected_message = (
         "Estimated minimum disk for this training job is "
@@ -747,7 +755,7 @@ def test_start_training_run_default_disk_size_gb(
     mock_auth_requests,
     mock_start_training_run_endpoints,
 ):
-    """start_training_run sends disk_size_gb=500 by default."""
+    """start_training_run sends disk_size_gb=2000 by default."""
     nc.login("test_api_key")
     mock_start_training_run_endpoints()
 
@@ -764,7 +772,7 @@ def test_start_training_run_default_disk_size_gb(
     )
 
     post_request = _training_job_post_requests(mock_auth_requests)[0]
-    assert post_request.json()["disk_size_gb"] == 500
+    assert post_request.json()["disk_size_gb"] == 2000
 
 
 def test_start_training_run_sends_resume_from_job_id(
