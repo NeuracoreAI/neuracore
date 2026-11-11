@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Generator, Iterator
 from typing import Final, Literal, Optional, Union
 
@@ -20,7 +21,7 @@ from neuracore_types import (
 from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
-from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.config.get_current_org import get_current_org, get_saved_org
 from neuracore.core.data.prefetch import DEFAULT_CONCURRENT_PREFETCH_REQUESTS
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
@@ -31,6 +32,7 @@ from ..exceptions import AuthenticationError, DatasetError
 from ..organizations import list_my_orgs
 from ..utils.http_errors import extract_error_detail
 from ..utils.http_session import thread_local_session
+from ..utils.user_warnings import warn_user
 
 # Cursor pagination is inherently sequential (each page needs the previous
 # page's cursor), so a larger page size would mean fewer serial round-trips
@@ -41,8 +43,28 @@ PAGE_SIZE = 30
 # rather than imported so the SDK's neuracore_types floor stays unchanged.
 _BACKWARD_DIRECTION: Final = "BACKWARD"
 SYNC_PROGRESS_POLL_INTERVAL_S = 5.0
+LOCAL_DATASET_ID_PREFIX: Final = "local-dataset-"
 
 logger = logging.getLogger(__name__)
+
+
+def local_dataset_id(name: str, shared: bool) -> str:
+    """Return the id a dataset has on this machine before the server is reached.
+
+    Every process works out the same id from the same name and namespace, so
+    processes recording offline agree on the dataset without talking to each
+    other. The org is left out: the data daemon uploads to the org that is
+    current when it reaches the server, and processes on one machine share it.
+
+    Args:
+        name: The dataset name.
+        shared: Whether the dataset is shared.
+
+    Returns:
+        A stable id that starts with ``LOCAL_DATASET_ID_PREFIX``.
+    """
+    key = f"neuracore:dataset:{shared}:{name}"
+    return f"{LOCAL_DATASET_ID_PREFIX}{uuid.uuid5(uuid.NAMESPACE_URL, key)}"
 
 
 class Dataset:
@@ -53,7 +75,7 @@ class Dataset:
     def __init__(
         self,
         id: str,
-        org_id: str,
+        org_id: str | None,
         name: str,
         size_bytes: int,
         tags: list[str],
@@ -61,12 +83,14 @@ class Dataset:
         is_shared: bool,
         description: str | None = None,
         recordings: list[dict] | list[Recording] | None = None,
+        is_local: bool = False,
     ):
         """Initialize a Dataset instance.
 
         Args:
             id: Unique identifier for the dataset.
-            org_id: Organization ID of the user not for the org owner of the dataset
+            org_id: Organization ID of the user not for the org owner of the dataset.
+                None only for a local dataset made with no organization selected.
             name: Human-readable name for the dataset.
             size_bytes: Total size of the dataset in bytes.
             tags: List of tags associated with the dataset.
@@ -75,6 +99,8 @@ class Dataset:
             description: Description of the dataset.
             recordings: List of recording dictionaries.
             If not provided, the dataset will be fetched from the Neuracore API.
+            is_local: Whether the dataset was made offline and is not yet
+                known to the server. Its id is then a local id.
 
         Attributes:
             cache_dir: Directory path for caching dataset recordings.
@@ -90,6 +116,7 @@ class Dataset:
         self.size_bytes = size_bytes
         self.tags = tags
         self.is_shared = is_shared
+        self.is_local = is_local
         self.description = description
         self.data_types = data_types or []
         self.cache_dir = DEFAULT_RECORDING_CACHE_DIR
@@ -515,6 +542,9 @@ class Dataset:
         shared), returns the existing dataset instead of creating a duplicate.
         If a dataset exists in the other namespace, a new dataset is created.
 
+        If the last login could not reach the server, returns a local dataset
+        instead (see :meth:`local`).
+
         Args:
             name: Unique name for the dataset.
             description: Optional description of the dataset contents and purpose.
@@ -527,6 +557,8 @@ class Dataset:
             The newly created Dataset instance, or the existing dataset if one
             already exists in the same namespace.
         """
+        if get_auth().is_offline:
+            return Dataset.local(name, description, tags, shared=shared)
         ds = Dataset.get_by_name(name, non_exist_ok=True)
         if ds is None:
             ds = Dataset._create_dataset(name, description, tags, shared=shared)
@@ -541,6 +573,46 @@ class Dataset:
         else:
             logger.info(f"Dataset '{name}' already exist.")
         return ds
+
+    @staticmethod
+    def local(
+        name: str,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        shared: bool = False,
+    ) -> "Dataset":
+        """Return a dataset made on this machine without reaching the server.
+
+        Recordings into it are kept on this machine. Once the server can be
+        reached, the data daemon finds the dataset by name, or creates it,
+        and uploads them there.
+
+        Args:
+            name: The dataset name.
+            description: Optional description, used if the dataset is created.
+            tags: Optional tags, used if the dataset is created.
+            shared: Whether the dataset is shared.
+
+        Returns:
+            A local Dataset whose id is :func:`local_dataset_id`. Its
+            ``org_id`` is None if no organization is selected.
+        """
+        org_id = get_saved_org()
+        warn_user(
+            f"Dataset '{name}' will be found, or created, once the Neuracore "
+            "server can be reached."
+        )
+        return Dataset(
+            id=local_dataset_id(name, shared),
+            org_id=org_id,
+            name=name,
+            size_bytes=0,
+            tags=tags or [],
+            data_types=[],
+            is_shared=shared,
+            description=description,
+            is_local=True,
+        )
 
     @staticmethod
     def _create_dataset(

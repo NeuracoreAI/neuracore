@@ -15,7 +15,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.exceptions import DatasetError
+from neuracore.core.exceptions import DatasetError, ServerUnreachableError
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 
@@ -27,11 +27,16 @@ logger = logging.getLogger(__name__)
 def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
     """Get a dataset by name or ID.
 
+    If the last login could not reach the server, a dataset named ``name`` is
+    returned as a local, private dataset without checking that it exists (see
+    :meth:`Dataset.local`).
+
     Args:
         name: Dataset name
         id: Dataset ID
     Raises:
         ValueError: If neither name nor ID is provided, or if the dataset is not found
+        ServerUnreachableError: If offline and the dataset is selected by ID.
     s
     Returns:
         Dataset: The requested dataset instance
@@ -41,7 +46,14 @@ def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
     if name is not None and id is not None:
         raise ValueError("Only one of name or id should be provided to get_dataset")
     _active_dataset = None
-    if id is not None:
+    if get_auth().is_offline:
+        if name is None:
+            raise ServerUnreachableError(
+                "Not connected to the Neuracore server. Select the dataset by "
+                "name while offline."
+            )
+        _active_dataset = Dataset.local(name)
+    elif id is not None:
         _active_dataset = Dataset.get_by_id(id)
     elif name is not None:
         _active_dataset = Dataset.get_by_name(name)
