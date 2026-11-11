@@ -41,9 +41,11 @@ if TYPE_CHECKING:
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_db_path
 from tests.integration.platform.data_daemon.shared.db_constants import (
+    COLUMN_DATASET_ID,
     COLUMN_EXPECTED_TRACE_COUNT,
     COLUMN_EXPECTED_TRACE_COUNT_REPORTED,
     COLUMN_LAST_UPDATED,
+    COLUMN_OFFLINE,
     COLUMN_PROGRESS_REPORTED,
     COLUMN_RECORDING_ID,
     COLUMN_RECORDING_INDEX,
@@ -54,6 +56,11 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_TRACE_ID,
     COLUMN_UPLOAD_STATUS,
     COLUMN_WRITE_STATUS,
+    LOCAL_DATASETS_TABLE,
+    LOCAL_ID_PENDING,
+    LOCAL_ROBOTS_TABLE,
+    OFFLINE_RECORDINGS_TABLE,
+    OFFLINE_RESOLVING,
     RECORDING_PROGRESS_REPORTED,
     RECORDINGS_TABLE,
     STAT_EXPECTED_TRACE_COUNT,
@@ -368,6 +375,68 @@ def assert_offline_recordings_pending(results: list[ContextResult]) -> None:
                 f"Offline recording_index {recording_index} unexpectedly already "
                 f"has cloud recording_id={row.get(COLUMN_RECORDING_ID)!r}"
             )
+
+
+def fetch_offline_details(recording_index: int) -> dict[str, Any] | None:
+    """Return what the daemon keeps about a recording started offline.
+
+    Its ``recording_offline`` row, with the name and status of the local robot
+    and dataset it used, or None for a recording started online.
+    """
+    with closing(_TEST_STORE.connect()) as conn:
+        row = conn.execute(
+            f"SELECT r.{COLUMN_OFFLINE} AS offline, "
+            "ro.cloud_robot_id, ro.cloud_dataset_id, "
+            "lr.name AS robot_name, lr.status AS robot_status, "
+            "ld.name AS dataset_name, ld.status AS dataset_status "
+            f"FROM {RECORDINGS_TABLE} r "
+            f"JOIN {OFFLINE_RECORDINGS_TABLE} ro USING ({COLUMN_RECORDING_INDEX}) "
+            f"LEFT JOIN {LOCAL_ROBOTS_TABLE} lr ON lr.robot_id = r.{COLUMN_ROBOT_ID} "
+            f"AND lr.instance = r.{COLUMN_ROBOT_INSTANCE} "
+            f"LEFT JOIN {LOCAL_DATASETS_TABLE} ld "
+            f"ON ld.dataset_id = r.{COLUMN_DATASET_ID} "
+            f"WHERE r.{COLUMN_RECORDING_INDEX} = ?",
+            (recording_index,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def assert_offline_recordings_hold_local_ids(results: list[ContextResult]) -> None:
+    """Assert each offline recording keeps its local robot and dataset.
+
+    A recording started with a robot and dataset made offline holds their
+    local ids, waits to resolve them, and the daemon keeps the names it needs
+    to find or create them once online, with no cloud ids yet.
+
+    Raises:
+        AssertionError: If a row is missing, or lacks a local id or name.
+    """
+    for result in results:
+        rows_by_index = {
+            row[COLUMN_RECORDING_INDEX]: row
+            for row in fetch_recordings_for_source(result.source[0], result.source[1])
+        }
+        for recording_index in result.recording_indexes:
+            row = rows_by_index.get(recording_index)
+            assert row is not None, (
+                f"Offline recording_index {recording_index} for source "
+                f"{result.source} has no recordings row"
+            )
+            assert str(row[COLUMN_ROBOT_ID]).startswith("local-robot-"), row
+            assert str(row[COLUMN_DATASET_ID]).startswith("local-dataset-"), row
+            expected = {
+                "offline": OFFLINE_RESOLVING,
+                "cloud_robot_id": None,
+                "cloud_dataset_id": None,
+                "robot_name": result.robot_name,
+                "robot_status": LOCAL_ID_PENDING,
+                "dataset_name": result.dataset_name,
+                "dataset_status": LOCAL_ID_PENDING,
+            }
+            actual = fetch_offline_details(recording_index)
+            assert (
+                actual == expected
+            ), f"Offline recording_index {recording_index}: {actual} != {expected}"
 
 
 def resolve_cloud_recording_ids(

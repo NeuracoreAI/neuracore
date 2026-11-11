@@ -526,6 +526,29 @@ neuracore data-daemon profile update my_profile --online
 neuracore data-daemon launch --profile my_profile
 ```
 
+### Starting without a network connection
+
+A script can also start, and record, when the Neuracore server cannot be reached at all, for example on a robot with intermittent internet. Log in, connect the robot and select the dataset as usual:
+
+```python
+nc.login()  # warns that it is continuing offline
+nc.connect_robot("arm", urdf_path="arm.urdf")
+nc.create_dataset("warehouse")
+nc.start_recording()
+# ... log data ...
+nc.stop_recording()
+```
+
+- The API key and organization saved by an earlier `neuracore login` and `neuracore select-org` are used. With none saved, run them once you are online so the recordings can upload.
+- The robot and the dataset get local ids. Every process on the machine works out the same ids from the names, so several processes can record the same robot together.
+- The daemon keeps the recordings on the machine. Once the server can be reached it uploads them, first registering the robot, uploading its description and finding or creating the dataset by name. The script does not need to be running then.
+- A robot is registered only once a recording made with it uploads. A robot connected offline and never recorded with is not registered, and its saved files are deleted a day after it was last connected.
+- Select a dataset by name: `nc.get_dataset(id=...)` needs the server. `nc.get_dataset(name)` gives a private dataset; use `nc.create_dataset(name, shared=True)` for a shared one.
+- `nc.stop_recording(wait=True)` stops the recording and raises straight away, as there is nothing to wait for until the server can be reached.
+- Every process recording one robot together must connect it the same way, all while offline or all while online. A process that connected while online uses the robot's cloud id and does not record into a recording started under its local id.
+- When the server refuses or blocks an upload (an archived robot, a rejected API key, no organization selected), the recordings wait on the machine and the reason is in the daemon log. They upload once it is fixed.
+- If the connection drops while a recording's start is being sent, that recording uploads after the daemon next restarts.
+
 ### Multi node
 
 For multi-node offline setups, collect your data using a data distribution system like ROS across multiple nodes, then use a single node to import your collected data into Neuracore.

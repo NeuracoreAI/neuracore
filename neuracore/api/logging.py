@@ -157,6 +157,16 @@ def _resolve_joint_group(
     return group
 
 
+def _streams_live_data(robot: Robot) -> bool:
+    """Whether data logged for ``robot`` is also streamed live.
+
+    A robot connected offline has no backend id to stream under.
+    """
+    return (
+        not robot.is_local and not get_provide_live_data_enabled_manager().is_disabled()
+    )
+
+
 def _publish_json_to_p2p(
     robot: Robot,
     str_id: str,
@@ -182,7 +192,7 @@ def _publish_json_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    if get_provide_live_data_enabled_manager().is_disabled():
+    if not _streams_live_data(robot):
         return
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
@@ -246,7 +256,7 @@ def _publish_video_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    if get_provide_live_data_enabled_manager().is_disabled():
+    if not _streams_live_data(robot):
         return
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
@@ -320,11 +330,12 @@ def _log_group_of_joint_data(
     if bindings_for_type is None:
         bindings_for_type = {}
         binding_cache[data_type] = bindings_for_type
-    live_data_disabled = get_provide_live_data_enabled_manager().is_disabled()
     robot_id = robot.id
     robot_instance = robot.instance
     live_data_orchestrator = (
-        None if live_data_disabled or robot_id is None else StreamManagerOrchestrator()
+        StreamManagerOrchestrator()
+        if robot_id is not None and _streams_live_data(robot)
+        else None
     )
 
     group = _resolve_joint_group(
