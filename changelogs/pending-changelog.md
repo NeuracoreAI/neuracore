@@ -10,6 +10,3 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
-
-Stopping the data daemon on macOS no longer hangs for 15 s and reports it still running
-when the process that started it has not reaped it yet.
