@@ -18,9 +18,34 @@ from neuracore.core.config.get_api_key import get_api_key
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
+from neuracore.core.utils.user_warnings import warn_user
 
 from .const import API_URL
-from .exceptions import AuthenticationError, VersionMismatchError
+from .exceptions import (
+    AuthenticationError,
+    ServerUnreachableError,
+    VersionMismatchError,
+)
+
+_OFFLINE_WITH_KEY_WARNING = (
+    "Could not reach the Neuracore server, so your API key was not verified. "
+    "Continuing offline: recordings are stored on this machine and upload once "
+    "the server can be reached."
+)
+_OFFLINE_WITHOUT_KEY_WARNING = (
+    "Could not reach the Neuracore server and no API key is saved. Continuing "
+    "offline: recordings are stored on this machine. Run `neuracore login` once "
+    "you are online so they can upload."
+)
+_OFFLINE_KEPT_SAVED_KEY_WARNING = (
+    "Could not reach the Neuracore server to verify the API key given, so the "
+    "saved one is kept for uploads. Log in again once you are online to switch "
+    "keys."
+)
+_OFFLINE_WITHOUT_ORG_WARNING = (
+    "No organization is selected. Recordings are stored on this machine; run "
+    "`neuracore select-org` once you are online so they can upload."
+)
 
 
 def _response_json_payload(response: requests.Response) -> dict[str, Any] | None:
@@ -71,6 +96,7 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         """Initialize the Auth instance and load saved configuration."""
         super().__init__()
         self._access_token = None
+        self._offline = False
 
     def login(self, api_key: str | None = None) -> None:
         """Authenticate with the Neuracore server using an API key.
@@ -80,6 +106,11 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         key generation process. Upon successful verification, saves the
         configuration for future use.
 
+        If the server cannot be reached, logs in offline instead: a warning is
+        shown and :attr:`is_offline` becomes true. When no key is saved yet,
+        the key is saved unverified so the data daemon can use it once online;
+        a saved key, which was verified, is kept.
+
         Args:
             api_key: API key for authentication. If not provided, will attempt
                 to use the NEURACORE_API_KEY environment variable or previously
@@ -88,12 +119,22 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
 
         Raises:
             AuthenticationError: If API key verification fails due to invalid
-                credentials, network issues, or server errors.
+                credentials or server errors.
             InputError: If there is an issue with the user's input when gathering
                 credentials
         """
-        api_key = api_key or os.environ.get("NEURACORE_API_KEY") or get_api_key()
-        self.validate_version()
+        api_key = (
+            api_key
+            or os.environ.get("NEURACORE_API_KEY")
+            or get_config_manager().config.api_key
+        )
+        try:
+            self.validate_version()
+        except ServerUnreachableError:
+            self._login_offline(api_key)
+            return
+        self._offline = False
+        api_key = api_key or get_api_key()
         # Verify API key with server and get access token
         try:
             session = thread_local_session(retry_transient=True)
@@ -143,14 +184,39 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
             config_manager.save_config()
 
         except requests.exceptions.ConnectionError:
-            raise AuthenticationError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
+            self._login_offline(api_key)
+            return
         except requests.exceptions.RequestException:
             raise AuthenticationError(
                 "Could not verify API key. Please check your key and try again."
             )
+
+    def _login_offline(self, api_key: str | None) -> None:
+        """Accept ``api_key`` unverified because the server cannot be reached.
+
+        The key is saved only when none is: a saved key was verified when it
+        was saved, and replacing it with one that may be mistyped would stop
+        the data daemon uploading anything once online.
+        """
+        # Imported here: get_current_org imports the CLI, which imports auth.
+        from neuracore.core.config.get_current_org import get_saved_org
+
+        self._access_token = None
+        self._offline = True
+        config_manager = get_config_manager()
+        saved_key = config_manager.config.api_key
+        if api_key is None:
+            warn_user(_OFFLINE_WITHOUT_KEY_WARNING)
+        elif saved_key is None:
+            config_manager.config.api_key = api_key
+            config_manager.save_config()
+            warn_user(_OFFLINE_WITH_KEY_WARNING)
+        elif saved_key != api_key:
+            warn_user(_OFFLINE_KEPT_SAVED_KEY_WARNING)
+        else:
+            warn_user(_OFFLINE_WITH_KEY_WARNING)
+        if get_saved_org() is None:
+            warn_user(_OFFLINE_WITHOUT_ORG_WARNING)
 
     def logout(self) -> None:
         """Clear authentication state and remove saved configuration.
@@ -162,6 +228,7 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
             ConfigError: If saving the config fails.
         """
         self._access_token = None
+        self._offline = False
         config_manager = get_config_manager()
         config_manager.config.api_key = None
         config_manager.config.current_org_id = None
@@ -178,6 +245,7 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         Raises:
             VersionMismatchError: If the server reports an incompatible client
                 version (HTTP 4xx).
+            ServerUnreachableError: If the server cannot be reached.
             AuthenticationError: If version validation fails due to server
                 communication issues (including transient HTTP 5xx after retries).
         """
@@ -213,7 +281,7 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
                 detail, response_payload=_response_json_payload(response)
             ) from exc
         except requests.exceptions.ConnectionError as exc:
-            raise AuthenticationError(str(exc)) from exc
+            raise ServerUnreachableError(str(exc)) from exc
         except requests.exceptions.RequestException as exc:
             raise AuthenticationError(str(exc)) from exc
 
@@ -237,6 +305,16 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         """
         return self._access_token is not None
 
+    @property
+    def is_offline(self) -> bool:
+        """Whether the last login could not reach the server.
+
+        Returns:
+            True after a login that continued offline, until the next login
+            that reaches the server or a logout.
+        """
+        return self._offline
+
     def get_headers(self) -> dict:
         """Get HTTP headers for authenticated API requests.
 
@@ -247,9 +325,15 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
             Dictionary containing the Authorization header with the bearer token.
 
         Raises:
+            ServerUnreachableError: If the last login could not reach the server.
             AuthenticationError: If not currently authenticated.
         """
         if not self.is_authenticated:
+            if self._offline:
+                raise ServerUnreachableError(
+                    "Not connected to the Neuracore server. Call login() again "
+                    "once you are online."
+                )
             raise AuthenticationError("Not authenticated. Please call login() first.")
         return {
             "Authorization": f"Bearer {self._access_token}",

@@ -40,6 +40,10 @@ class AuthenticationError(Exception):
         return None
 
 
+class ServerUnreachableError(AuthenticationError):
+    """The Neuracore server could not be reached, for example with no internet."""
+
+
 class VersionMismatchError(AuthenticationError):
     """Raised when the client version is incompatible with the server."""
 

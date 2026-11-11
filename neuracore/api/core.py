@@ -22,7 +22,7 @@ from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
-from ..core.exceptions import DatasetError, RobotError
+from ..core.exceptions import DatasetError, RobotError, ServerUnreachableError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
@@ -81,13 +81,16 @@ def login(api_key: str | None = None) -> None:
     variable, or previously saved configuration. The authentication state is
     maintained for subsequent API calls.
 
+    If the server cannot be reached, logs in offline with a warning instead,
+    and calls that need the server raise ``ServerUnreachableError``.
+
     Args:
         api_key: API key for authentication. If not provided, will look for
             NEURACORE_API_KEY environment variable or previously saved configuration.
 
     Raises:
         AuthenticationError: If authentication fails due to invalid credentials
-            or network issues.
+            or server errors.
         InputError: If there is an issue with the user's input.
 
     """
@@ -318,7 +321,8 @@ def stop_recording(
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
         wait: Whether to block until all data streams have finished uploading
-            to the backend storage.
+            to the backend storage. Offline, the recording is stopped and kept
+            on this machine to upload later, and nothing is waited for.
         timestamp: Optional capture time (Unix seconds) for the recording's
             stop, matching the ``log_*`` methods. When omitted, the current
             time is captured.
@@ -327,6 +331,9 @@ def stop_recording(
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
+        ServerUnreachableError: If ``wait`` is set while offline, once the
+            recording is stopped.
+        TimeoutError: If the uploads do not complete within ``wait_timeout_s``.
     """
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
@@ -338,6 +345,13 @@ def stop_recording(
     if wait_timeout_s < 0:
         raise ValueError("wait_timeout_s must be non-negative")
 
+    if wait and get_auth().is_offline:
+        robot.stop_recording(timestamp=timestamp)
+        raise ServerUnreachableError(
+            "The recording is stopped and stored on this machine. It uploads once "
+            "the Neuracore server can be reached, so it cannot be waited for "
+            "while offline."
+        )
     wait_deadline = time.monotonic() + wait_timeout_s
     cloud_recording_id = robot.get_cloud_recording_id() if wait else None
     robot.stop_recording(timestamp=timestamp)
