@@ -59,6 +59,10 @@ sys.path.append(str(THIS_DIR.parent.parent.parent.parent.parent / "examples"))
 
 logger = logging.getLogger(__name__)
 
+# Archived robots must be cleaned up too: the importer archives the robots it
+# creates, and connecting to an archived robot is refused.
+ALL_ROBOTS_LIST_MODE = "mixed"
+
 
 # ---------------------------------------------------------------------------
 # Shared mutable test state
@@ -274,8 +278,8 @@ def delete_cloud_robots(robot_names: Sequence[str]) -> None:
         ensure_login()
         org_id = get_current_org()
         robots = list_organization_robots(
-            org_id, is_shared=True
-        ) + list_organization_robots(org_id, is_shared=False)
+            org_id, is_shared=True, mode=ALL_ROBOTS_LIST_MODE
+        ) + list_organization_robots(org_id, is_shared=False, mode=ALL_ROBOTS_LIST_MODE)
         ids_by_name = {robot["name"]: robot["id"] for robot in robots}
     except Exception:  # noqa: BLE001
         logger.warning("Failed to list cloud robots for cleanup", exc_info=True)

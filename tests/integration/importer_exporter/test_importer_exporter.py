@@ -25,6 +25,9 @@ import neuracore as nc
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.organizations import list_my_orgs
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 ORG_NAME = "Service Account's Project"  # Enter your organization name.
 DATASET_NAME = "Data Upload Integrity Check"
@@ -237,4 +240,4 @@ def test_mcap_dataset_roundtrip(
         target = Dataset.get_by_name(dataset_name, non_exist_ok=True)
         if target is not None:
             target.delete()
-        nc.connect_robot(robot_name).delete()
+        delete_cloud_robot(robot_name)
