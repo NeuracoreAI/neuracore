@@ -31,10 +31,8 @@ from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
-    ValidationRolloutConfig,
     rollout_root_dir,
     save_validation_rollouts,
-    select_validation_rollout_indices,
     write_rollout_manifest,
 )
 
@@ -87,7 +85,8 @@ class DistributedTrainer:
         storage_handler: TrainingStorageHandler,
         output_dir: Path,
         num_epochs: int,
-        validation_rollout_config: ValidationRolloutConfig,
+        validation_rollout_frequency: int,
+        rollout_dataset: Subset | None = None,
         log_freq: int = 50,
         system_log_freq: int = 0,
         train_device_preprocessing: (
@@ -115,8 +114,10 @@ class DistributedTrainer:
             storage_handler: Handler for model storage
             output_dir: Directory for output files
             num_epochs: Number of epochs to train
-            validation_rollout_config: Configuration for validation rollouts.
-                A config with ``num_points=0`` disables them.
+            validation_rollout_frequency: How often to save validation rollouts
+                (in epochs). 0 disables them.
+            rollout_dataset: Validation episodes to run during rollout
+                validation. None disables rollouts.
             log_freq: Frequency to log metrics (in steps)
             system_log_freq: Frequency to log host and accelerator utilisation
                 (in steps). 0 disables it. Sampled far less often than the
@@ -188,8 +189,13 @@ class DistributedTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
-        self.validation_rollout_config = validation_rollout_config
-        self._selected_rollout_validation_indices: list[int] = []
+        if validation_rollout_frequency < 0:
+            raise ValueError(
+                "Validation rollout frequency must be 0 or more, "
+                f"got {validation_rollout_frequency}."
+            )
+        self.validation_rollout_frequency = validation_rollout_frequency
+        self.rollout_dataset = rollout_dataset
         self._input_points_saved = False
         self._run_rollout_validation = self._can_run_rollout_validation()
         self.global_train_step = 0
@@ -364,15 +370,18 @@ class DistributedTrainer:
         return avg_losses
 
     def _can_run_rollout_validation(self) -> bool:
-        """Return whether rank, rollout config and num_epochs allow rollouts."""
-        config = self.validation_rollout_config
-        if self.rank != 0 or config.num_points == 0:
+        """Return whether rank, rollout frequency and num_epochs allow rollouts."""
+        if (
+            self.rank != 0
+            or self.rollout_dataset is None
+            or self.validation_rollout_frequency == 0
+        ):
             return False
-        if config.frequency > self.num_epochs:
+        if self.validation_rollout_frequency > self.num_epochs:
             logger.warning(
                 "Validation rollout frequency is %s but only %s epoch(s) will "
                 "run, so no rollouts will be saved.",
-                config.frequency,
+                self.validation_rollout_frequency,
                 self.num_epochs,
             )
             return False
@@ -380,11 +389,10 @@ class DistributedTrainer:
 
     def _save_rollout_validation_manifest(self) -> None:
         """Queue writing and uploading the manifest of the selected rollout points."""
-        validation_subset = cast(Subset, self.val_loader.dataset)
-        validation_dataset = cast(PytorchNeuracoreDataset, validation_subset.dataset)
+        rollout_dataset = cast(Subset, self.rollout_dataset)
+        validation_dataset = cast(PytorchNeuracoreDataset, rollout_dataset.dataset)
         points = [
-            validation_dataset.get_sample_identity(i)
-            for i in self._selected_rollout_validation_indices
+            validation_dataset.get_sample_identity(i) for i in rollout_dataset.indices
         ]
         root_dir = rollout_root_dir(self.output_dir)
         self.storage_handler.submit_rollout_save(
@@ -397,13 +405,9 @@ class DistributedTrainer:
     def _save_validation_rollouts(self, epoch: int) -> None:
         """Save rollouts for the selected validation points if epoch is due."""
         try:
-            validation_dataset = cast(
-                PytorchNeuracoreDataset, self.val_loader.dataset.dataset
-            )
             save_validation_rollouts(
                 model=cast(NeuracoreModel, self.get_model_without_ddp()),
-                dataset=validation_dataset,
-                selected_indices=self._selected_rollout_validation_indices,
+                rollout_dataset=cast(Subset, self.rollout_dataset),
                 batch_size=self.val_loader.batch_size,
                 device=self.device,
                 inference_device_preprocessing=self.inference_device_preprocessing,
@@ -445,12 +449,6 @@ class DistributedTrainer:
             start_epoch = max(start_epoch, 1)
             if self._run_rollout_validation:
                 try:
-                    self._selected_rollout_validation_indices = (
-                        select_validation_rollout_indices(
-                            self.val_loader,
-                            self.validation_rollout_config,
-                        )
-                    )
                     self._save_rollout_validation_manifest()
                 except Exception:
                     logger.error(
@@ -501,7 +499,7 @@ class DistributedTrainer:
                     self.validate(epoch)
                     if (
                         self._run_rollout_validation
-                        and epoch % self.validation_rollout_config.frequency == 0
+                        and epoch % self.validation_rollout_frequency == 0
                     ):
                         self._save_validation_rollouts(epoch)
 

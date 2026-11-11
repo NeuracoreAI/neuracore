@@ -103,7 +103,7 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
     def fake_split_train_val(dataset, validation_split, seed, **kwargs):
         assert len(dataset) == 100
         assert validation_split == 0.2
-        return (DummyDataset(80), DummyDataset(20))
+        return (DummyDataset(80), DummyDataset(20), None)
 
     mock_autotuner_instance = MagicMock()
     mock_autotuner_instance.estimate_optimal_batch_size.return_value = 4
@@ -160,7 +160,7 @@ def test_find_optimal_batch_size_default_max_allows():
         n = len(dataset)
         train_size = int((1 - validation_split) * n)
         val_size = n - train_size
-        return (DummyDataset(train_size), DummyDataset(val_size))
+        return (DummyDataset(train_size), DummyDataset(val_size), None)
 
     mock_autotuner_instance = MagicMock()
     mock_autotuner_instance.estimate_optimal_batch_size.return_value = 4
@@ -612,7 +612,7 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
 
     def fake_split_train_val(dataset, validation_split, seed, **kwargs):
         assert validation_split == 0.2
-        return (DummyDataset(80), DummyDataset(20))
+        return (DummyDataset(80), DummyDataset(20), None)
 
     with (
         patch("torch.cuda.is_available", return_value=True),
@@ -668,7 +668,7 @@ def test_is_valid_batch_size_rejects_batch_that_fits_without_headroom():
         n = len(dataset)
         train_size = int((1 - validation_split) * n)
         val_size = n - train_size
-        return (DummyDataset(train_size), DummyDataset(val_size))
+        return (DummyDataset(train_size), DummyDataset(val_size), None)
 
     # Fits (no OOM) but peak reserved is 92% of total -- above the 0.9 * 0.7 =
     # 63% budget * safety threshold, so it leaves no headroom for real training.
@@ -720,7 +720,7 @@ def test_is_valid_batch_size_accepts_batch_within_headroom():
         n = len(dataset)
         train_size = int((1 - validation_split) * n)
         val_size = n - train_size
-        return (DummyDataset(train_size), DummyDataset(val_size))
+        return (DummyDataset(train_size), DummyDataset(val_size), None)
 
     # Fits at 50% of total, comfortably under the 63% budget * safety threshold.
     with (
@@ -771,7 +771,7 @@ def test_is_valid_batch_size_rejects_when_probe_ooms():
         n = len(dataset)
         train_size = int((1 - validation_split) * n)
         val_size = n - train_size
-        return (DummyDataset(train_size), DummyDataset(val_size))
+        return (DummyDataset(train_size), DummyDataset(val_size), None)
 
     with (
         patch("torch.cuda.is_available", return_value=True),
@@ -947,7 +947,7 @@ def dummy_cfg_and_dataset():
         n = len(ds)
         train_size = int((1 - validation_split) * n)
         val_size = n - train_size
-        return (DummyDataset(train_size), DummyDataset(val_size))
+        return (DummyDataset(train_size), DummyDataset(val_size), None)
 
     with (
         patch(

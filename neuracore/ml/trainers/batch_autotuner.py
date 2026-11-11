@@ -943,10 +943,11 @@ def _split_train_val_dataset(
         cfg.get("inference_preprocessing"),
         role_name="inference_preprocessing",
     )
-    return split_train_val_datasets(
+    train_dataset, val_dataset, _ = split_train_val_datasets(
         dataset,
         validation_split=cfg.validation_split,
         seed=cfg.seed,
         inference_input_preprocessing_config=inference_input_preprocessing_config,
         inference_output_preprocessing_config=inference_output_preprocessing_config,
     )
+    return train_dataset, val_dataset
