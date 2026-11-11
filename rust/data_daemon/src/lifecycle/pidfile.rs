@@ -165,13 +165,17 @@ fn is_zombie(pid: i32) -> bool {
 fn is_zombie(pid: i32) -> bool {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // A nonzero `arg` makes the kernel also look up zombie processes for
+    // PROC_PIDTBSDINFO; with 0 the call fails for exactly the processes this
+    // function must detect.
+    let find_zombies = 1;
     // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, which is
     // a live, correctly sized `proc_bsdinfo`.
     let written = unsafe {
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
-            0,
+            find_zombies,
             std::ptr::addr_of_mut!(info).cast(),
             size,
         )
