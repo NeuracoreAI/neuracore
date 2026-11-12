@@ -87,6 +87,19 @@ A `timestamp` is float seconds. The SDK rounds it to whole microseconds.
 Stored and synchronized data keeps that integer in `timestamp_us` beside
 `timestamp`, which is the same instant in seconds.
 
+To tag a recording when it stops, give the tag names to `nc.stop_recording`:
+
+```python
+nc.stop_recording(tags=["good-run", "Pick And Place"])
+```
+
+The SDK normalizes each name like `recording.add_tag` does: it removes outer
+white space, makes the name lower case and changes each run of white space to a
+hyphen. A name that is given twice gives one tag. A name that is not valid
+(empty, longer than 50 characters, or with a comma or control character) raises
+`ValueError`, and the recording does not stop. The tags are also added to a
+recording that was made offline. QA tags cannot be given this way.
+
 #### Live Data Streaming Control
 
 Data logs from your robot are automatically streamed to the web dashboard in real time for visualization and monitoring. You can stop this default behavior by calling:
