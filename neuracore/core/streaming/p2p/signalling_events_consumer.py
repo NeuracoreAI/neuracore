@@ -6,9 +6,10 @@ connection manager.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
-from aiohttp import ClientSession
+from aiohttp import ClientError, ClientSession
 from neuracore_types import (
     HandshakeMessage,
     MessageType,
@@ -18,7 +19,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import STREAM_API_URL
+from neuracore.core.const import SIGNALLING_URL, STREAM_API_URL
 from neuracore.core.streaming.base_sse_consumer import (
     BaseSSEConsumer,
     EventSourceConfig,
@@ -57,6 +58,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         client_session: ClientSession | None = None,
         auth: Auth | None = None,
         signalling_session: SignallingSession | None = None,
+        regions: Callable[[], Awaitable[list[str]]] | None = None,
     ):
         """Initialise the signalling events consumer.
 
@@ -78,6 +80,8 @@ class SignallingEventsConsumer(BaseSSEConsumer):
                 defaults to the global auth provider if not provided.
             signalling_session: In regional mode, the session whose region and
                 token the stream and heartbeats use. None: the legacy service.
+            regions: The organization's signalling regions. A robot session
+                with none uses the legacy service.
         """
         super().__init__(
             loop=loop,
@@ -92,9 +96,14 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         self.message_queue: list[HandshakeMessage] = []
         self.auth = auth or get_auth()
         self.signalling_session = signalling_session
+        self.regions = regions
 
     def on_authentication_error(self) -> None:
-        """Propagate terminal authentication failure to the root owner."""
+        """Close this robot's stream, or the orchestrator for the viewer stream."""
+        session = self.signalling_session
+        if session is not None and session.robot_instance is not None:
+            self.close()
+            return
         self.manager_factory.close()
 
     async def get_sse_client_config(self) -> EventSourceConfig:
@@ -104,6 +113,13 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             the configuration to be used to connect to the client
         """
         session = self.signalling_session
+        if (
+            session is not None
+            and session.robot_instance is not None
+            and session.base_url is None
+        ):
+            await self._register_first(session)
+            session = self.signalling_session
         if session is None:
             return EventSourceConfig(
                 url=f"{STREAM_API_URL}/org/{self.org_id}/signalling/notifications/{self.local_stream_id}",
@@ -118,7 +134,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
 
     async def on_reconnect(self) -> None:
         """In regional mode, register the robot again: a reconnect is a registration."""
-        await self._register_again()
+        await self._register_again(fail_over=True)
 
     async def on_close(self, reason: str) -> None:
         """Log the reason; the stream reconnects.
@@ -136,7 +152,22 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             raise RuntimeError("signalling session has no region")
         return f"{session.base_url}/org/{self.org_id}/signalling"
 
-    async def _register_again(self) -> None:
+    async def _register_first(self, session: SignallingSession) -> None:
+        """Register through the shared endpoint, or use legacy without regions."""
+        regions = await self.regions() if self.regions is not None else []
+        if not regions:
+            self.signalling_session = None
+            return
+        try:
+            await session.register(SIGNALLING_URL or regions[0], self.local_stream_id)
+        except LowerEpochError:
+            logger.error(
+                "The region holds this stream at a newer epoch; signalling stops"
+            )
+            self.close()
+            raise
+
+    async def _register_again(self, fail_over: bool = False) -> None:
         """Register the robot again; stop if another process holds a newer epoch."""
         session = self.signalling_session
         if session is None or session.robot_instance is None:
@@ -145,6 +176,12 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             return
         try:
             await session.register(session.base_url, self.local_stream_id)
+        except (ClientError, asyncio.TimeoutError):
+            # The region may be down: the next connection goes through the
+            # shared URL. An open stream keeps its region.
+            if fail_over:
+                session.base_url = None
+            raise
         except LowerEpochError:
             logger.error(
                 "The region holds this stream at a newer epoch; signalling stops"
