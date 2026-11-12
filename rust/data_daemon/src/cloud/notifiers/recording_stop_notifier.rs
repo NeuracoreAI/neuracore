@@ -169,7 +169,7 @@ mod tests {
             timestamp_us: Some(1_600_000_005_123_457),
         };
         store
-            .mark_recording_stopped(index, stop)
+            .mark_recording_stopped(index, stop, &[])
             .await
             .expect("mark stopped");
 
@@ -217,6 +217,77 @@ mod tests {
         handle.join().await;
     }
 
+    /// Run the stop notifier on one stopped recording and return the body of
+    /// the `/recording/stop` POST it sent.
+    async fn stop_body_for(store: &SqliteStateStore, index: i64) -> serde_json::Value {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+        bus.publish(DaemonEvent::RecordingStopped {
+            recording_index: index,
+        });
+        let received = timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if let Some(request) = received.into_iter().next() {
+                    break request;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("expected one POST within 3s");
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+        serde_json::from_slice(&received.body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn stop_post_carries_the_stored_tags() {
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-tags-1").await;
+        store
+            .mark_recording_stopped(
+                index,
+                RecordingTimestamp::observed_at(1),
+                &["good-run".to_string(), "edge".to_string()],
+            )
+            .await
+            .expect("mark stopped");
+
+        let body = stop_body_for(&store, index).await;
+
+        assert_eq!(body["tags"], serde_json::json!(["good-run", "edge"]));
+    }
+
+    #[tokio::test]
+    async fn stop_post_without_tags_has_no_tags_field() {
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-no-tags").await;
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
+            .await
+            .expect("mark stopped");
+
+        let body = stop_body_for(&store, index).await;
+
+        assert!(body.get("tags").is_none());
+    }
+
     #[tokio::test]
     async fn a_cancelled_410_settles_the_stop() {
         // A stop for a recording cancelled from the web gets 410
@@ -233,7 +304,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let index = seed_notified_recording(&store, "rec-stop-gone").await;
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .expect("mark stopped");
 
@@ -289,7 +360,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let index = seed_notified_recording(&store, "rec-offline-1").await;
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .expect("mark stopped");
 
@@ -393,7 +464,7 @@ mod tests {
             .expect("create recording")
             .recording_index;
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .expect("mark stopped");
 
@@ -444,7 +515,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let index = seed_notified_recording(&store, "rec-recovered-1").await;
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .expect("mark stopped");
 
@@ -561,7 +632,7 @@ mod tests {
 
         bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Down));
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .expect("stop");
         bus.publish(DaemonEvent::RecordingStopped {
@@ -611,7 +682,7 @@ mod tests {
         for n in 0..BACKLOG {
             let index = seed_notified_recording(&store, &format!("rec-backlog-{n}")).await;
             store
-                .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+                .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
                 .await
                 .expect("stop");
             backlog.push(index);
@@ -646,7 +717,7 @@ mod tests {
 
         let live = seed_notified_recording(&store, "rec-live").await;
         store
-            .mark_recording_stopped(live, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(live, RecordingTimestamp::observed_at(1), &[])
             .await
             .expect("stop");
         bus.publish(DaemonEvent::RecordingStopped {

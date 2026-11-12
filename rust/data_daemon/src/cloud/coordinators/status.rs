@@ -678,7 +678,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .unwrap();
         store.mark_recording_stop_notified(index).await.unwrap();

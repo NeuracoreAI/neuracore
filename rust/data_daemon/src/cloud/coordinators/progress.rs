@@ -485,7 +485,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -547,7 +547,7 @@ mod tests {
                 .unwrap();
         }
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -592,7 +592,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -665,7 +665,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -723,7 +723,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -779,7 +779,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -840,7 +840,7 @@ mod tests {
                 .unwrap();
         }
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
@@ -882,7 +882,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
         recording_index
@@ -1049,7 +1049,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
 
