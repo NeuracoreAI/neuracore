@@ -10,3 +10,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+The `StopRecording` message to the data daemon carries a list of user tag names. This is an internal change: no public function uses it yet, and the SDK and the daemon must be the same version.

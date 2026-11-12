@@ -347,12 +347,13 @@ fn log_json(
 /// stop and POSTed as the backend `end_time`, never used for window
 /// membership.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None))]
+#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None, tags = Vec::new()))]
 fn stop_recording(
     py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
     timestamp_us: Option<i64>,
+    tags: Vec<String>,
 ) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
@@ -387,6 +388,7 @@ fn stop_recording(
             robot_instance,
             publish_timestamp_ns,
             timestamp_us: capture_timestamp_us,
+            tags,
         })?;
         recording_state_cache::note_local_end(&robot_id, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
