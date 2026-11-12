@@ -21,12 +21,15 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
+from neuracore.core.streaming.p2p.signalling_endpoint import (
+    SignallingEndpoint,
+    legacy_endpoint,
+)
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
 from .global_live_data_enabled import get_provide_live_data_enabled_manager
@@ -55,6 +58,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         loop: asyncio.AbstractEventLoop,
         org_id: str | None = None,
         auth: Auth | None = None,
+        signalling: SignallingEndpoint | None = None,
     ):
         """Initialize the client streaming manager.
 
@@ -67,6 +71,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             org_id: The unique identifier for the organization. If not provided,
                 defaults to the current org.
             auth: Authentication object. If not provided, uses default auth
+            signalling: Where the robot's calls go. Defaults to the legacy service.
         """
         self.robot_id = robot_id
         self.robot_instance = robot_instance
@@ -75,6 +80,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         self.client_session = client_session
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
+        self.signalling = signalling or legacy_endpoint(self.org_id, self.auth)
         self.background_tracker = BackgroundCoroutineTracker(loop=self.loop)
 
         self.streaming = EnabledManager.derived_manger(
@@ -217,11 +223,13 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         """
         for start in range(0, len(tracks), TRACK_BATCH_MAX_SIZE):
             chunk = tracks[start : start + TRACK_BATCH_MAX_SIZE]
-            await self.client_session.post(
-                f"{STREAM_API_URL}/org/{self.org_id}/signalling/track/batch",
-                headers=self.auth.get_headers(),
+            base_url, headers = await self.signalling()
+            async with self.client_session.post(
+                f"{base_url}/track/batch",
+                headers=headers,
                 json={"tracks": [track.model_dump(mode="json") for track in chunk]},
-            )
+            ) as response:
+                response.raise_for_status()
 
     async def on_stream_resurrected(self) -> None:
         """Resubmit tracks to the signaling server."""
@@ -255,6 +263,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             client_session=self.client_session,
             auth=self.auth,
             loop=self.loop,
+            signalling=self.signalling,
         )
 
         @connection.enabled_manager.on(EnabledManager.DISABLED)

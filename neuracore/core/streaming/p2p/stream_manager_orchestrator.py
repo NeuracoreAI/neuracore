@@ -288,6 +288,7 @@ class StreamManagerOrchestrator(
             )
             self.provider_managers[key] = ClientProviderStreamManager(
                 local_stream_id=consumer.local_stream_id,
+                signalling=consumer.endpoint,
                 robot_id=robot_id,
                 robot_instance=robot_instance,
                 org_id=self.org_id,
