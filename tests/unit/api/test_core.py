@@ -11,11 +11,13 @@ from neuracore.api import core as api_core
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core import robot as core_robot
 from neuracore.core.auth import Auth, get_auth
+from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import (
     AuthenticationError,
     RobotArchivedError,
     RobotError,
+    ServerUnreachableError,
     VersionMismatchError,
 )
 from neuracore.core.robot import Robot
@@ -196,23 +198,141 @@ def test_login_version_check_service_unavailable_is_not_version_mismatch(
     assert "pip install --upgrade neuracore" not in str(exc_info.value)
 
 
-def test_login_version_check_connection_error_surfaces_cleanly(
-    monkeypatch, reset_neuracore
+def test_login_offline_saves_the_key_unverified_when_none_is_saved(
+    temp_config_dir, monkeypatch, reset_neuracore
 ):
-    def raise_connection_error(*args, **kwargs):
-        raise requests.exceptions.ConnectionError(
-            "Connection reset by peer during verify-version"
+    monkeypatch.delenv("NEURACORE_API_KEY", raising=False)
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            exc=requests.exceptions.ConnectionError("network is unreachable"),
+        )
+        verify_key = m.post(f"{API_URL}/auth/verify-api-key")
+
+        with pytest.warns(UserWarning, match="API key was not verified") as warned:
+            nc.login("test_api_key")
+
+    assert warned[0].filename == __file__
+    auth = get_auth()
+    assert auth.is_offline
+    assert not auth.is_authenticated
+    assert not verify_key.called
+    with open(temp_config_dir / "config.json") as f:
+        assert json.load(f)["api_key"] == "test_api_key"
+    with pytest.raises(ServerUnreachableError):
+        auth.get_headers()
+    nc.logout()
+
+
+def test_login_offline_keeps_a_saved_key(temp_config_dir, monkeypatch, reset_neuracore):
+    # The saved key was verified; the one given now may be mistyped, and the
+    # data daemon uploads with whatever is saved.
+    monkeypatch.delenv("NEURACORE_API_KEY", raising=False)
+    config_manager = get_config_manager()
+    config_manager.config.api_key = "saved_api_key"
+    config_manager.save_config()
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            exc=requests.exceptions.ConnectionError("network is unreachable"),
         )
 
-    monkeypatch.setattr(
-        "neuracore.core.auth.thread_local_session",
-        lambda **_kwargs: type("_Session", (), {"get": raise_connection_error})(),
-    )
+        with pytest.warns(UserWarning, match="the saved one is kept"):
+            nc.login("other_api_key")
 
-    with pytest.raises(AuthenticationError) as exc_info:
-        nc.login("test_api_key")
+    assert get_auth().is_offline
+    with open(temp_config_dir / "config.json") as f:
+        assert json.load(f)["api_key"] == "saved_api_key"
+    nc.logout()
 
-    assert "Connection reset by peer during verify-version" in str(exc_info.value)
+
+def test_login_offline_without_a_key_does_not_prompt(
+    temp_config_dir, monkeypatch, reset_neuracore
+):
+    monkeypatch.delenv("NEURACORE_API_KEY", raising=False)
+
+    def prompt(*args, **kwargs):
+        raise AssertionError("must not prompt for credentials while offline")
+
+    monkeypatch.setattr("neuracore.core.auth.get_api_key", prompt)
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            exc=requests.exceptions.ConnectionError("network is unreachable"),
+        )
+
+        with pytest.warns(UserWarning, match="neuracore login"):
+            nc.login()
+
+    assert get_auth().is_offline
+    assert not (temp_config_dir / "config.json").exists()
+    nc.logout()
+
+
+def test_login_offline_with_no_org_selected_says_to_select_one(
+    temp_config_dir, monkeypatch, reset_neuracore
+):
+    monkeypatch.delenv("NEURACORE_API_KEY", raising=False)
+    monkeypatch.delenv("NEURACORE_ORG_ID")
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            exc=requests.exceptions.ConnectionError("network is unreachable"),
+        )
+
+        with pytest.warns(UserWarning) as warned:
+            nc.login("test_api_key")
+
+    messages = [str(w.message) for w in warned]
+    assert any("API key was not verified" in message for message in messages)
+    assert any("neuracore select-org" in message for message in messages)
+    assert {w.filename for w in warned} == {__file__}
+    nc.logout()
+
+
+def test_login_offline_when_the_key_check_cannot_connect(
+    temp_config_dir, monkeypatch, reset_neuracore
+):
+    monkeypatch.delenv("NEURACORE_API_KEY", raising=False)
+    with requests_mock.Mocker() as m:
+        m.get(f"{API_URL}/auth/verify-version", status_code=200)
+        m.post(
+            f"{API_URL}/auth/verify-api-key",
+            exc=requests.exceptions.ConnectionError("connection reset"),
+        )
+
+        with pytest.warns(UserWarning, match="API key was not verified"):
+            nc.login("test_api_key")
+
+    assert get_auth().is_offline
+    nc.logout()
+
+
+def test_login_that_reaches_the_server_is_no_longer_offline(
+    temp_config_dir, monkeypatch, reset_neuracore
+):
+    monkeypatch.delenv("NEURACORE_API_KEY", raising=False)
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            exc=requests.exceptions.ConnectionError("network is unreachable"),
+        )
+        with pytest.warns(UserWarning):
+            nc.login("test_api_key")
+
+    with requests_mock.Mocker() as m:
+        m.get(f"{API_URL}/auth/verify-version", status_code=200)
+        m.post(
+            f"{API_URL}/auth/verify-api-key",
+            json={"access_token": "test_token"},
+            status_code=200,
+        )
+        m.get(f"{API_URL}/org-management/my-orgs", json=[])
+        nc.login()
+
+    auth = get_auth()
+    assert not auth.is_offline
+    assert auth.is_authenticated
 
 
 def test_login_version_check_retries_read_timeouts(monkeypatch, reset_neuracore):
@@ -594,6 +714,35 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         nc.stop_recording(wait=True, wait_timeout_s=1.0)
 
     assert poll_count == 1
+
+
+def test_stop_recording_wait_offline_stops_then_says_it_cannot_wait(
+    monkeypatch,
+) -> None:
+    stops = 0
+
+    class _FakeRobot:
+        def is_recording(self) -> bool:
+            return True
+
+        def get_cloud_recording_id(self) -> str:
+            raise AssertionError("offline there is no cloud id to wait for")
+
+        def stop_recording(self, timestamp: float | None = None) -> None:
+            nonlocal stops
+            stops += 1
+
+    monkeypatch.setattr(
+        api_core,
+        "_get_robot",
+        lambda robot_name, instance: _FakeRobot(),
+    )
+    monkeypatch.setattr(api_core, "get_auth", lambda: SimpleNamespace(is_offline=True))
+
+    with pytest.raises(ServerUnreachableError, match="stored on this machine"):
+        nc.stop_recording(wait=True)
+
+    assert stops == 1
 
 
 def test_version_check_sends_sdk_and_types_versions():
