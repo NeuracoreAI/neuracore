@@ -320,7 +320,8 @@ impl ApiClient {
 
     /// `POST /org/{org}/recording/stop` with a JSON body carrying
     /// `recording_id`, the producer-captured `end_timestamp_us` and the same
-    /// instant in seconds as `end_time`.
+    /// instant in seconds as `end_time`. Non-empty `tags` are sent as the
+    /// `tags` field; empty ones are left out of the body.
     ///
     /// The end is the recording window's real upper bound captured by the
     /// producer, so the backend reports the true duration even for recordings
@@ -330,6 +331,7 @@ impl ApiClient {
         org_id: &str,
         recording_id: &str,
         end_timestamp_us: i64,
+        tags: &[String],
     ) -> Result<(), ApiClientError> {
         self.recording_lifecycle_post(
             org_id,
@@ -337,13 +339,14 @@ impl ApiClient {
             recording_id,
             microseconds_to_seconds(end_timestamp_us),
             Some(end_timestamp_us),
+            tags,
         )
         .await
     }
 
     /// Shared body/send for the `/recording/stop` and `/recording/cancel`
     /// POSTs. They differ in the trailing URL segment (`action`) and in
-    /// `end_timestamp_us`, which only the stop carries.
+    /// `end_timestamp_us` and `tags`, which only the stop carries.
     async fn recording_lifecycle_post(
         &self,
         org_id: &str,
@@ -351,6 +354,7 @@ impl ApiClient {
         recording_id: &str,
         end_time: f64,
         end_timestamp_us: Option<i64>,
+        tags: &[String],
     ) -> Result<(), ApiClientError> {
         let path = format!("/org/{org_id}/recording/{action}");
         #[derive(Serialize)]
@@ -359,11 +363,14 @@ impl ApiClient {
             end_time: f64,
             #[serde(skip_serializing_if = "Option::is_none")]
             end_timestamp_us: Option<i64>,
+            #[serde(skip_serializing_if = "<[String]>::is_empty")]
+            tags: &'a [String],
         }
         let body = Body {
             recording_id,
             end_time,
             end_timestamp_us,
+            tags,
         };
         let _ = self
             .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
@@ -390,6 +397,7 @@ impl ApiClient {
             recording_id,
             microseconds_to_seconds(end_timestamp_us),
             None,
+            &[],
         )
         .await
     }

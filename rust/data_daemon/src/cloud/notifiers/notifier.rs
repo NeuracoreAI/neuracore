@@ -381,7 +381,7 @@ pub async fn notify_recording_lifecycle(
     let post_result = match kind {
         LifecycleKind::Stop => {
             client
-                .recording_stop(&org_id, &recording_id, stop_timestamp_us)
+                .recording_stop(&org_id, &recording_id, stop_timestamp_us, &row.stop_tags)
                 .await
         }
         LifecycleKind::Cancel => {
@@ -390,6 +390,19 @@ pub async fn notify_recording_lifecycle(
                 .await
         }
     };
+
+    if matches!(kind, LifecycleKind::Stop) && !row.stop_tags.is_empty() {
+        if let Err(error) = &post_result {
+            if error.is_recording_cancelled() || error.is_not_found() || error.is_forbidden() {
+                tracing::warn!(
+                    recording_index,
+                    recording_id,
+                    tags = ?row.stop_tags,
+                    "backend closed the stop notify without saving the recording's tags"
+                );
+            }
+        }
+    }
 
     let mark_result = match &post_result {
         Ok(()) => mark_notified(kind, store, recording_index).await,

@@ -177,6 +177,9 @@ pub struct RecordingRow {
     pub expected_trace_count_reported: i64,
     /// Progress-report lifecycle for this recording.
     pub progress_reported: ProgressReportStatus,
+    /// User tag names given with the stop, sent to the backend with
+    /// `/recording/stop`. Empty when the stop carried none.
+    pub stop_tags: Vec<String>,
     /// Set when the producer issues a stop command.
     pub stopped_at: Option<NaiveDateTime>,
     /// Set when the producer issues a cancel command. Cancelled recordings
@@ -208,6 +211,15 @@ impl RecordingRow {
     /// Decode a SQLite row into a [`RecordingRow`].
     pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         let progress_reported = parse_column::<ProgressReportStatus>(row, "progress_reported")?;
+        let stop_tags = row
+            .try_get::<Option<String>, _>("stop_tags")?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| sqlx::Error::ColumnDecode {
+                index: "stop_tags".into(),
+                source: Box::new(error),
+            })?
+            .unwrap_or_default();
         Ok(RecordingRow {
             recording_index: row.try_get("recording_index")?,
             recording_id: row.try_get("recording_id")?,
@@ -221,6 +233,7 @@ impl RecordingRow {
             expected_trace_count: row.try_get("expected_trace_count")?,
             expected_trace_count_reported: row.try_get("expected_trace_count_reported")?,
             progress_reported,
+            stop_tags,
             stopped_at: row.try_get("stopped_at")?,
             cancelled_at: row.try_get("cancelled_at")?,
             backend_start_notified_at: row.try_get("backend_start_notified_at")?,
