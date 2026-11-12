@@ -77,6 +77,16 @@ jobs:
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
       run: pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/test_archived_robot.py
 
+    - name: Run Regional Signalling Integration Tests
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+      run: |
+        if ! pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/streaming --ignore=tests/integration/platform/streaming/test_multi_node_data.py; then
+          echo "::warning::Regional signalling tests failed, but this is non-blocking."
+        fi
+
     - name: Show disk space after tests
       if: always()
       run: df -h /
