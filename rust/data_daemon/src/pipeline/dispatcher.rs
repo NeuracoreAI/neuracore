@@ -603,6 +603,7 @@ impl Dispatcher {
                 robot_instance,
                 publish_timestamp_ns,
                 timestamp_us,
+                ..
             } => {
                 self.handle_stop(
                     (robot_id, robot_instance),
@@ -2240,6 +2241,7 @@ mod tests {
             robot_instance: 0,
             publish_timestamp_ns,
             timestamp_us: publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND,
+            tags: Vec::new(),
         }
     }
 
@@ -3470,6 +3472,7 @@ mod tests {
             robot_instance: 0,
             publish_timestamp_ns: PUBLISH_STOP_NS,
             timestamp_us: CALLER_STOP_US,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
