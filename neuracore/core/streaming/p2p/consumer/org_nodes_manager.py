@@ -128,7 +128,7 @@ class OrgNodesManager(BaseSSEConsumer):
         if cached_manager is self:
             _org_node_managers.pop(self.org_id, None)
 
-    def get_sse_client_config(self) -> EventSourceConfig:
+    async def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
 
         Returns:
