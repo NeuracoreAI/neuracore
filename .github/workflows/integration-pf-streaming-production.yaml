@@ -1,4 +1,4 @@
-name: Integration PF - Consume Stream (Production)
+name: Integration PF - Streaming (Production)
 
 on:
   schedule:
@@ -56,15 +56,15 @@ jobs:
         version: ${{ steps.harness.outputs.release-tag }}
         extras: dev,ml,examples
 
-    - name: Run Consume Stream Integration Test
+    - name: Run Streaming Integration Test
       env:
         NEURACORE_API_URL: https://api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
       continue-on-error: true
       run: |
-        if ! pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/test_consume_stream.py; then
-          echo "::warning::test_consume_stream.py failed, but this is non-blocking."
+        if ! pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/streaming/test_multi_node_data.py; then
+          echo "::warning::test_multi_node_data.py failed, but this is non-blocking."
         fi
 
     - name: Run Archived Robot Integration Test
