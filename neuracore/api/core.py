@@ -9,6 +9,8 @@ recording sessions.
 import time
 from warnings import warn
 
+from neuracore_types import normalize_user_tag_name
+
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.organizations import list_my_orgs
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
@@ -301,12 +303,23 @@ def start_recording(
     robot.start_recording(active_dataset_id, timestamp=timestamp)
 
 
+def _normalize_stop_tags(tags: list[str] | None) -> list[str]:
+    """Return the tag names normalized, each once, or raise ValueError."""
+    if isinstance(tags, str):
+        raise ValueError("tags must be a list of tag names, not a string")
+    for name in tags or []:
+        if not isinstance(name, str):
+            raise ValueError(f"Tag name must be a string, not {type(name).__name__}")
+    return list(dict.fromkeys(normalize_user_tag_name(name) for name in tags or []))
+
+
 def stop_recording(
     robot_name: str | None = None,
     instance: int = 0,
     wait: bool = False,
     timestamp: float | None = None,
     wait_timeout_s: float = _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S,
+    tags: list[str] | None = None,
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -324,10 +337,15 @@ def stop_recording(
             time is captured.
         wait_timeout_s: Maximum number of seconds to wait for recording uploads
             to complete when ``wait=True``.
+        tags: Optional user tag names to add to the recording. Names are
+            normalized like ``recording.add_tag``, and a name given twice gives
+            one tag. The tags reach the recording even when it was made offline.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
+        ValueError: If a tag name is not valid. The recording is not stopped.
     """
+    stop_tags = _normalize_stop_tags(tags)
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
         warn(
@@ -340,7 +358,7 @@ def stop_recording(
 
     wait_deadline = time.monotonic() + wait_timeout_s
     cloud_recording_id = robot.get_cloud_recording_id() if wait else None
-    robot.stop_recording(timestamp=timestamp)
+    robot.stop_recording(timestamp=timestamp, tags=stop_tags)
     if not wait or not cloud_recording_id:
         return
     recording_id = cloud_recording_id

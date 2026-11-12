@@ -40,6 +40,7 @@ def run_episode(
 
     obs, info = env.reset(seed=demo.seed)
     success = False
+    step_count = 0
     t = time.time()
 
     try:
@@ -48,6 +49,7 @@ def run_episode(
             nc.start_recording()
 
         for step in demo._steps:
+            step_count += 1
             # Log current joint positions and velocities
             qpos, qvel = obs_to_joint_dict(obs, JOINT_NAMES)
             nc.log_joint_positions(qpos, timestamp=t)
@@ -93,7 +95,9 @@ def run_episode(
         if record:
             if success:
                 print("Episode successful → finalizing recording...")
-                nc.stop_recording(wait=True)
+                # The step count is known only once the episode ends, so tag it
+                # with the stop. This also works if the stop happens offline.
+                nc.stop_recording(wait=True, tags=[f"steps-{step_count}"])
             else:
                 print("Episode failed → cancelling recording...")
                 nc.cancel_recording()
