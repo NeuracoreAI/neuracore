@@ -35,6 +35,14 @@ pub const CHUNKS_DIRNAME: &str = "chunks";
 /// corrupts that recording).
 pub const SPOOL_DIRNAME: &str = ".rgb_spool";
 
+/// Top-level directory (under `recordings_root`) holding the URDF packages
+/// of robots connected offline: `{recordings_root}/.offline_robots/{local
+/// robot id}/package.zip`, written by the SDK
+/// (`neuracore/data_daemon/offline_robots.py`) and uploaded by the offline
+/// resolver. Hidden, like the spool, so `data-daemon reset` and the recording
+/// sweeps never take it for a recording.
+pub const OFFLINE_ROBOTS_DIRNAME: &str = ".offline_robots";
+
 /// Resolve the producer's video spool directory for a `(source, sensor)`
 /// stream: `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
 ///
@@ -96,6 +104,11 @@ pub fn spool_chunk_path(
 /// Resolve the top-level spool directory, whose stale chunks are reclaimed on daemon start.
 pub fn spool_root(recordings_root: &Path) -> PathBuf {
     recordings_root.join(SPOOL_DIRNAME)
+}
+
+/// Resolve the directory robots connected offline are saved under.
+pub fn offline_robots_root(recordings_root: &Path) -> PathBuf {
+    recordings_root.join(OFFLINE_ROBOTS_DIRNAME)
 }
 
 /// Build the filename for a video chunk at `chunk_index` — `chunk_NNNN.nut`.

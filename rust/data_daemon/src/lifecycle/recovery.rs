@@ -7,6 +7,7 @@
 //! `cli::launch` to bring the host into a consistent state before the new
 //! daemon starts.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -78,6 +79,157 @@ pub async fn run_startup_sweeps(store: &SqliteStateStore, recordings_root: &Path
             tracing::warn!(%error, "partial-recording sweep failed (continuing)")
         }
     }
+    // Clear what an offline `connect_robot` that died mid-save left behind,
+    // and packages of robots connected offline that nothing has recorded with
+    // for a day. A package a recording still waits on stays, whatever its age:
+    // it is uploaded when that recording's robot is registered.
+    let awaiting = match store.local_robots_awaiting_registration().await {
+        Ok(robot_ids) => Some(robot_ids),
+        Err(error) => {
+            // Without the list every saved robot looks unused: keep them all.
+            tracing::warn!(%error, "failed to list robots awaiting registration (keeping every saved robot)");
+            None
+        }
+    };
+    let offline_robots_root = crate::storage::paths::offline_robots_root(recordings_root);
+    let ages = OfflineRobotAges {
+        unfinished: Duration::from_secs(STALE_WRITE_THRESHOLD_SECS as u64),
+        unused: UNUSED_OFFLINE_ROBOT_RETENTION,
+    };
+    match tokio::task::spawn_blocking(move || {
+        reclaim_stale_offline_robot_files(&offline_robots_root, ages, awaiting.as_ref())
+    })
+    .await
+    {
+        Ok(report) if report == Default::default() => {}
+        Ok(report) => tracing::info!(
+            temp_files = report.temp_files,
+            unfinished_dirs = report.unfinished_dirs,
+            unused_dirs = report.unused_dirs,
+            "reclaimed offline robot files",
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "offline robot file reclaim panicked (continuing)")
+        }
+    }
+}
+
+/// How long the package of a robot connected offline is kept with no
+/// recording waiting on it, from the last time it was saved. A recording made
+/// later than this still uploads, and registers its robot from the name it
+/// holds, but without the robot's package.
+const UNUSED_OFFLINE_ROBOT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What [`reclaim_stale_offline_robot_files`] removed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OfflineRobotReclaim {
+    /// Temporary `*.tmp-*` files a save never renamed into place.
+    temp_files: usize,
+    /// Robot directories a save never wrote a package into.
+    unfinished_dirs: usize,
+    /// Saved packages no recording waits on, untouched for a day.
+    unused_dirs: usize,
+}
+
+/// How old offline robot files must be before
+/// [`reclaim_stale_offline_robot_files`] removes them.
+#[derive(Debug, Clone, Copy)]
+struct OfflineRobotAges {
+    /// An unfinished save: old enough that no process is still writing it.
+    unfinished: Duration,
+    /// A saved package no recording waits on.
+    unused: Duration,
+}
+
+/// Remove what an offline `connect_robot` left under `root` that will never
+/// be sent.
+///
+/// The SDK writes the package to `package.zip.tmp-<pid>-<thread>` and renames
+/// it into place, so a stray temporary file, or a robot directory with no
+/// `package.zip`, is an unfinished save. Those are removed once untouched for
+/// `ages.unfinished`, so a process still saving is left alone.
+///
+/// A directory with a package is a saved robot. Its package is uploaded when
+/// a recording made with it is registered, so it is kept while a robot in
+/// `awaiting` (local robot ids, `None` when unknown) waits, and otherwise
+/// until it is untouched for `ages.unused`.
+fn reclaim_stale_offline_robot_files(
+    root: &Path,
+    ages: OfflineRobotAges,
+    awaiting: Option<&HashSet<String>>,
+) -> OfflineRobotReclaim {
+    let now = SystemTime::now();
+    let cutoff = |age: Duration| now.checked_sub(age).unwrap_or(SystemTime::UNIX_EPOCH);
+    let unfinished_cutoff = cutoff(ages.unfinished);
+    let unused_cutoff = cutoff(ages.unused);
+    let mut report = OfflineRobotReclaim::default();
+    let robot_dirs = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        // No robot was ever connected offline.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(error) => {
+            tracing::warn!(%error, path = %root.display(), "failed to read offline robots");
+            return report;
+        }
+    };
+    for robot_dir in robot_dirs.flatten() {
+        if !robot_dir.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let robot_id = robot_dir.file_name().to_string_lossy().into_owned();
+        let robot_dir = robot_dir.path();
+        // Read before removing anything: a removal bumps the directory's time.
+        // An unreadable time counts as now, so the entry is kept.
+        let mut newest = std::fs::metadata(&robot_dir)
+            .and_then(|m| m.modified())
+            .unwrap_or(now);
+        let Ok(entries) = std::fs::read_dir(&robot_dir) else {
+            continue;
+        };
+        let mut has_package = false;
+        let mut temp_in_use = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(now);
+            if name.contains(".tmp-") {
+                if modified < unfinished_cutoff && std::fs::remove_file(entry.path()).is_ok() {
+                    report.temp_files += 1;
+                } else {
+                    temp_in_use = true;
+                }
+                continue;
+            }
+            has_package |= name == crate::cloud::offline_robots::PACKAGE_FILENAME;
+            newest = newest.max(modified);
+        }
+        if temp_in_use {
+            // A process is saving the robot right now.
+            continue;
+        }
+        let reclaimed = if has_package {
+            let waited_on = awaiting.is_none_or(|awaiting| awaiting.contains(&robot_id));
+            if waited_on || newest >= unused_cutoff {
+                continue;
+            }
+            &mut report.unused_dirs
+        } else {
+            if newest >= unfinished_cutoff {
+                continue;
+            }
+            &mut report.unfinished_dirs
+        };
+        match std::fs::remove_dir_all(&robot_dir) {
+            Ok(()) => *reclaimed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                %error,
+                path = %robot_dir.display(),
+                "failed to remove offline robot files"
+            ),
+        }
+    }
+    report
 }
 
 /// Outcome of [`reclaim_stale_pid_file`], surfaced for logging.
@@ -314,6 +466,7 @@ pub fn cleanup_stale_ipc() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -486,6 +639,187 @@ mod tests {
         assert_eq!(reclaim_stale_spool(&spool_root, Duration::from_secs(30)), 1);
         assert!(!stale.exists());
         assert!(live.exists());
+    }
+
+    /// Set `path`'s modified time to `secs` seconds ago.
+    fn age(path: &Path, secs: u64) {
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[test]
+    fn offline_robot_reclaim_with_no_offline_robots_does_nothing() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+
+        assert_eq!(
+            reclaim_offline_robots(&root, None),
+            OfflineRobotReclaim::default()
+        );
+    }
+
+    #[test]
+    fn stale_temp_files_are_removed_and_a_saved_package_kept() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        let robot = root.join("local-robot-1");
+        std::fs::create_dir_all(&robot).unwrap();
+        let package = robot.join("package.zip");
+        let stale_temp = robot.join("package.zip.tmp-111-1");
+        let live_temp = robot.join("package.zip.tmp-222-1");
+        for path in [&package, &stale_temp, &live_temp] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        for path in [&package, &stale_temp] {
+            age(path, 120);
+        }
+        age(&robot, 120);
+
+        let report = reclaim_offline_robots(&root, None);
+
+        assert_eq!(
+            report,
+            OfflineRobotReclaim {
+                temp_files: 1,
+                ..OfflineRobotReclaim::default()
+            }
+        );
+        assert!(!stale_temp.exists());
+        assert!(live_temp.exists(), "a save still in progress is left alone");
+        assert!(package.exists());
+    }
+
+    #[test]
+    fn a_stale_robot_directory_with_no_package_is_removed() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        let unfinished = root.join("local-robot-1");
+        std::fs::create_dir_all(&unfinished).unwrap();
+        let temp_package = unfinished.join("package.zip.tmp-111-1");
+        std::fs::write(&temp_package, b"x").unwrap();
+        age(&temp_package, 120);
+        age(&unfinished, 120);
+
+        let report = reclaim_offline_robots(&root, None);
+
+        assert_eq!(
+            report,
+            OfflineRobotReclaim {
+                temp_files: 1,
+                unfinished_dirs: 1,
+                unused_dirs: 0,
+            }
+        );
+        assert!(!unfinished.exists());
+    }
+
+    #[test]
+    fn a_robot_directory_being_saved_is_left_alone() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        // The package is still being written.
+        let saving = root.join("local-robot-1");
+        std::fs::create_dir_all(&saving).unwrap();
+        std::fs::write(saving.join("package.zip.tmp-111-1"), b"x").unwrap();
+        // An empty directory whose save has only just begun.
+        let empty = root.join("local-robot-2");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let report = reclaim_offline_robots(&root, None);
+
+        assert_eq!(report, OfflineRobotReclaim::default());
+        assert!(saving.join("package.zip.tmp-111-1").exists());
+        assert!(empty.exists());
+    }
+
+    /// Reclaim with the daemon's ages: 30 s for an unfinished save, a day
+    /// for a package no recording waits on.
+    fn reclaim_offline_robots(
+        root: &Path,
+        awaiting: Option<&HashSet<String>>,
+    ) -> OfflineRobotReclaim {
+        let ages = OfflineRobotAges {
+            unfinished: Duration::from_secs(30),
+            unused: UNUSED_OFFLINE_ROBOT_RETENTION,
+        };
+        reclaim_stale_offline_robot_files(root, ages, awaiting)
+    }
+
+    /// A robot's saved package, last saved `secs` ago.
+    fn saved_robot(root: &Path, robot_id: &str, secs: u64) -> PathBuf {
+        let robot = root.join(robot_id);
+        std::fs::create_dir_all(&robot).unwrap();
+        std::fs::write(robot.join("package.zip"), b"zip").unwrap();
+        age(&robot.join("package.zip"), secs);
+        age(&robot, secs);
+        robot
+    }
+
+    const DAY: u64 = 24 * 3600;
+
+    #[test]
+    fn a_package_a_recording_waits_on_is_kept_however_old() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        let robot = saved_robot(&root, "local-robot-1", 30 * DAY);
+        let awaiting = HashSet::from(["local-robot-1".to_string()]);
+
+        let report = reclaim_offline_robots(&root, Some(&awaiting));
+
+        assert_eq!(report, OfflineRobotReclaim::default());
+        assert!(robot.join("package.zip").exists());
+    }
+
+    #[test]
+    fn a_package_nothing_recorded_with_is_removed_after_a_day() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        let unused = saved_robot(&root, "local-robot-1", DAY + 60);
+        let recent = saved_robot(&root, "local-robot-2", DAY - 60);
+
+        let report = reclaim_offline_robots(&root, Some(&HashSet::new()));
+
+        assert_eq!(
+            report,
+            OfflineRobotReclaim {
+                unused_dirs: 1,
+                ..OfflineRobotReclaim::default()
+            }
+        );
+        assert!(!unused.exists());
+        assert!(
+            recent.join("package.zip").exists(),
+            "a robot saved within the day may still be recorded with"
+        );
+    }
+
+    #[test]
+    fn a_package_saved_again_within_the_day_is_kept() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        let robot = saved_robot(&root, "local-robot-1", 30 * DAY);
+        // Connected offline again an hour ago.
+        std::fs::write(robot.join("package.zip"), b"zip").unwrap();
+        age(&robot.join("package.zip"), 3600);
+
+        let report = reclaim_offline_robots(&root, Some(&HashSet::new()));
+
+        assert_eq!(report, OfflineRobotReclaim::default());
+        assert!(robot.join("package.zip").exists());
+    }
+
+    #[test]
+    fn every_package_is_kept_when_the_recordings_waiting_are_unknown() {
+        let dir = tempdir().unwrap();
+        let root = crate::storage::paths::offline_robots_root(dir.path());
+        let robot = saved_robot(&root, "local-robot-1", 30 * DAY);
+
+        let report = reclaim_offline_robots(&root, None);
+
+        assert_eq!(report, OfflineRobotReclaim::default());
+        assert!(robot.join("package.zip").exists());
     }
 
     #[test]

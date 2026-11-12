@@ -146,6 +146,7 @@ pub(crate) fn spawn_cloud_coordinators(
         event_bus.clone(),
         Arc::clone(&client),
         org_rx.clone(),
+        crate::storage::paths::offline_robots_root(&recordings_root),
         shutdown_tx.subscribe(),
     );
     let recording_cancel = spawn_recording_cancel_notifier(
