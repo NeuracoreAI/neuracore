@@ -243,6 +243,16 @@ pub trait StateStore: Send + Sync {
         stop: RecordingTimestamp,
     ) -> Result<RecordingRow, StateStoreError>;
 
+    /// Store the user tag names given with a recording's stop.
+    ///
+    /// Empty `tags` change nothing, so a stop without tags cannot erase the
+    /// tags of an earlier one.
+    async fn set_recording_stop_tags(
+        &self,
+        recording_index: i64,
+        tags: &[String],
+    ) -> Result<(), StateStoreError>;
+
     /// Stamp `backend_stop_notified_at = now` after the recording-stop
     /// notifier successfully POSTed `/recording/stop`. Idempotent: a second
     /// call leaves the existing timestamp untouched.
@@ -1413,6 +1423,29 @@ impl StateStore for SqliteStateStore {
         }
         tx.commit().await?;
         Ok(claimed)
+    }
+
+    async fn set_recording_stop_tags(
+        &self,
+        recording_index: i64,
+        tags: &[String],
+    ) -> Result<(), StateStoreError> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let json =
+            serde_json::to_string(tags).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+        sqlx::query(
+            "UPDATE recordings \
+                SET stop_tags = ?2, last_updated = ?3 \
+              WHERE recording_index = ?1",
+        )
+        .bind(recording_index)
+        .bind(json)
+        .bind(Utc::now().naive_utc())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
     }
 
     async fn mark_recording_stop_notified(

@@ -217,6 +217,103 @@ mod tests {
         handle.join().await;
     }
 
+    /// Run the stop notifier on one stopped recording and return the body of
+    /// the `/recording/stop` POST it sent.
+    async fn stop_body_for(store: &SqliteStateStore, index: i64) -> serde_json::Value {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+        bus.publish(DaemonEvent::RecordingStopped {
+            recording_index: index,
+        });
+        let received = timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if let Some(request) = received.into_iter().next() {
+                    break request;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("expected one POST within 3s");
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+        serde_json::from_slice(&received.body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn stop_post_carries_the_stored_tags() {
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-tags-1").await;
+        store
+            .set_recording_stop_tags(index, &["good-run".to_string(), "edge".to_string()])
+            .await
+            .expect("store tags");
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .await
+            .expect("mark stopped");
+
+        let body = stop_body_for(&store, index).await;
+
+        assert_eq!(body["tags"], serde_json::json!(["good-run", "edge"]));
+    }
+
+    #[tokio::test]
+    async fn stop_post_without_tags_has_no_tags_field() {
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-no-tags").await;
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .await
+            .expect("mark stopped");
+
+        let body = stop_body_for(&store, index).await;
+
+        assert!(body.get("tags").is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_tags_survive_a_store_reopen_and_an_empty_later_stop() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("state.db");
+        let store = SqliteStateStore::open(&db_path).await.expect("open store");
+        let index = seed_notified_recording(&store, "rec-restart").await;
+        store
+            .set_recording_stop_tags(index, &["kept".to_string()])
+            .await
+            .expect("store tags");
+        store
+            .set_recording_stop_tags(index, &[])
+            .await
+            .expect("empty stop");
+        store.close().await;
+
+        let reopened = SqliteStateStore::open(&db_path).await.expect("reopen");
+        let row = reopened
+            .get_recording(index)
+            .await
+            .expect("get recording")
+            .expect("row");
+
+        assert_eq!(row.stop_tags, vec!["kept".to_string()]);
+    }
+
     #[tokio::test]
     async fn a_cancelled_410_settles_the_stop() {
         // A stop for a recording cancelled from the web gets 410

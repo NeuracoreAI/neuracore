@@ -603,12 +603,13 @@ impl Dispatcher {
                 robot_instance,
                 publish_timestamp_ns,
                 timestamp_us,
-                ..
+                tags,
             } => {
                 self.handle_stop(
                     (robot_id, robot_instance),
                     publish_timestamp_ns,
                     timestamp_us,
+                    &tags,
                     recv_at,
                 )
                 .await;
@@ -1063,6 +1064,7 @@ impl Dispatcher {
                     source,
                     stop_ns,
                     stop_ns / NANOSECONDS_PER_MICROSECOND,
+                    &[],
                     recv_at,
                 )
                 .await;
@@ -1129,7 +1131,8 @@ impl Dispatcher {
                  disconnected from the backend's recording notifications"
             );
             let stop_ns = observed_at_ns.max(live_start);
-            self.handle_stop(source, stop_ns, stop_ns, recv_at).await;
+            self.handle_stop(source, stop_ns, stop_ns, &[], recv_at)
+                .await;
         }
     }
 
@@ -1173,6 +1176,7 @@ impl Dispatcher {
         source: Source,
         publish_timestamp_ns: i64,
         timestamp_us: i64,
+        tags: &[String],
         recv_at: Instant,
     ) {
         self.announced.0.remove(&source);
@@ -1205,9 +1209,16 @@ impl Dispatcher {
             window.awaiting_flush = true;
             let recording_index = window.recording_index;
             entry.closing.push(window);
-            // Persist `stopped_at` before publishing the event: the cloud
-            // stop-notifier reads this row on `RecordingStopped`, so the
-            // timestamp must be on disk first.
+            // Persist `stopped_at` and the tags before publishing the event:
+            // the cloud stop-notifier reads this row on `RecordingStopped`, so
+            // both must be on disk first.
+            if let Err(error) = self
+                .store
+                .set_recording_stop_tags(recording_index, tags)
+                .await
+            {
+                tracing::error!(%error, recording_index, "failed to store recording stop tags; the recording stops without them");
+            }
             if let Err(error) = self
                 .store
                 .mark_recording_stopped(
@@ -1255,6 +1266,13 @@ impl Dispatcher {
             // COALESCE-idempotent, so a plain re-mark would no-op; a forced
             // overwrite is required, and correct because `stop < successor
             // start`.
+            if let Err(error) = self
+                .store
+                .set_recording_stop_tags(recording_index, tags)
+                .await
+            {
+                tracing::error!(%error, recording_index, "failed to store recording stop tags; the recording stops without them");
+            }
             if let Err(error) = self
                 .store
                 .refine_recording_stop(
@@ -2970,7 +2988,7 @@ mod tests {
             .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(source.clone(), stop_ns, stop_ns, &[], opened_at)
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -3014,7 +3032,7 @@ mod tests {
             .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(source.clone(), stop_ns, stop_ns, &[], opened_at)
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -4459,6 +4477,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_stores_its_tags_on_the_recording_row() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_inbound(start("robot-1", 100), opened_at)
+            .await;
+        dispatcher
+            .handle_inbound(
+                Envelope::StopRecording {
+                    robot_id: "robot-1".into(),
+                    robot_instance: 0,
+                    publish_timestamp_ns: 200,
+                    timestamp_us: 0,
+                    tags: vec!["good-run".into()],
+                },
+                opened_at + Duration::from_millis(1),
+            )
+            .await;
+
+        let rows = store.list_recordings().await.expect("list recordings");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stop_tags, vec!["good-run".to_string()]);
+    }
+
+    #[tokio::test]
     async fn housekeep_evicts_a_closing_window_past_retention() {
         // A closing window is retained for 2·holdback (so its in-window data has
         // released) and then evicted; without this the window map — and the
@@ -4478,7 +4525,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, &[], stopped_at)
             .await;
         assert_eq!(
             dispatcher.windows.get(&source).unwrap().closing.len(),
@@ -4520,7 +4567,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, &[], stopped_at)
             .await;
 
         // Well past the retention deadline.
@@ -4566,7 +4613,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, &[], stopped_at)
             .await;
 
         let at_cap = stopped_at + FLUSH_MARKER_WAIT_CAP + Duration::from_millis(1);
@@ -4620,7 +4667,7 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, &[], stopped_at)
             .await;
 
         // The lifecycle process owns no video, so its marker lands at once.
@@ -4681,7 +4728,7 @@ mod tests {
             .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), 200, 200, opened_at)
+            .handle_stop(source.clone(), 200, 200, &[], opened_at)
             .await;
 
         // Published after the stop: past every window's upper bound.
@@ -4730,7 +4777,7 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, &[], stopped_at)
             .await;
 
         // Producer B owns no video, so its marker lands immediately.
