@@ -309,6 +309,7 @@ class Robot:
         self,
         recording_id: str | None = None,
         timestamp: float | None = None,
+        tags: list[str] | None = None,
     ) -> None:
         """Stop an active recording session.
 
@@ -322,6 +323,8 @@ class Robot:
                 stop, matching the ``log_*`` methods. It is the reported stop
                 time, not the window's upper bound, which the daemon takes from
                 the publish stamp at the send.
+            tags: Normalized user tag names for the recording, which the daemon
+                sends to the backend with the stop.
 
         Raises:
             RobotError: If the robot is not initialized.
@@ -333,18 +336,19 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         # The gate closes inside the notify, not here.
-        self._notify_daemon_of_stop(recording_id, timestamp_us=timestamp_us)
+        self._notify_daemon_of_stop(recording_id, timestamp_us=timestamp_us, tags=tags)
 
     def _notify_daemon_of_stop(
         self,
         recording_id: str | None,
         timestamp_us: int,
+        tags: list[str] | None = None,
     ) -> None:
         """Send the recording-stopped IPC message to the daemon."""
         try:
             context = self._get_daemon_recording_context()
             try:
-                context.stop_recording(timestamp_us=timestamp_us)
+                context.stop_recording(timestamp_us=timestamp_us, tags=tags)
             finally:
                 # Runs even if the notify failed.
                 context.flush_source()

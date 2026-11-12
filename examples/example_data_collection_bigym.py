@@ -93,7 +93,7 @@ def run_episode(
         if record:
             if success:
                 print("Episode successful → finalizing recording...")
-                nc.stop_recording(wait=True)
+                nc.stop_recording(wait=True, tags=["successful"])
             else:
                 print("Episode failed → cancelling recording...")
                 nc.cancel_recording()
