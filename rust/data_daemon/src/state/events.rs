@@ -103,6 +103,12 @@ pub enum DaemonEvent {
         /// Local recording index the event applies to.
         recording_index: i64,
     },
+    /// The offline resolver has the backend's ids for every robot and dataset
+    /// a recording started offline used, so it may start on the backend.
+    RecordingOfflineResolved {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
     /// Connection state to the backend changed.
     ConnectionStateChanged(ConnectionState),
 }

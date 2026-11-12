@@ -1,8 +1,8 @@
 //! Cloud-coordinator wiring for the daemon main loop.
 //!
 //! Builds the shared `ApiClient` and spawns the cloud-side coordinators
-//! (registration, upload, status, progress, recording notifiers, connection
-//! monitor, and org watcher), bundling their handles so `cli::launch` can join
+//! (registration, upload, status, progress, recording notifiers, offline
+//! resolver, connection monitor, and org watcher), bundling their handles so `cli::launch` can join
 //! them in a defined order at shutdown.
 
 use std::path::{Path, PathBuf};
@@ -13,10 +13,10 @@ use anyhow::{Context, Result};
 use crate::api::auth::FileAuthProvider;
 use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
-    spawn_org_watcher, spawn_progress_reporter, spawn_recording_cancel_notifier,
-    spawn_recording_notifications, spawn_recording_start_notifier, spawn_recording_stop_notifier,
-    spawn_registration, spawn_status_updater, spawn_uploader, ConfigRx, OrgWatcherHandle,
-    RecordingNotificationsHandle, StatusUpdate,
+    spawn_offline_resolver, spawn_org_watcher, spawn_progress_reporter,
+    spawn_recording_cancel_notifier, spawn_recording_notifications, spawn_recording_start_notifier,
+    spawn_recording_stop_notifier, spawn_registration, spawn_status_updater, spawn_uploader,
+    ConfigRx, OfflineResolverHandle, OrgWatcherHandle, RecordingNotificationsHandle, StatusUpdate,
 };
 use crate::connection::spawn_connection_monitor;
 use crate::pipeline::dispatcher::RecordingCommand;
@@ -34,6 +34,7 @@ pub(crate) struct CloudHandles {
     recording_stop: crate::cloud::NotifierHandle,
     recording_cancel: crate::cloud::NotifierHandle,
     recording_notifications: RecordingNotificationsHandle,
+    offline_resolver: OfflineResolverHandle,
 }
 
 impl CloudHandles {
@@ -52,6 +53,7 @@ impl CloudHandles {
         self.recording_stop.join().await;
         self.recording_cancel.join().await;
         self.recording_notifications.join().await;
+        self.offline_resolver.join().await;
     }
 }
 
@@ -139,6 +141,13 @@ pub(crate) fn spawn_cloud_coordinators(
         org_rx.clone(),
         shutdown_tx.subscribe(),
     );
+    let offline_resolver = spawn_offline_resolver(
+        state_store.clone(),
+        event_bus.clone(),
+        Arc::clone(&client),
+        org_rx.clone(),
+        shutdown_tx.subscribe(),
+    );
     let recording_cancel = spawn_recording_cancel_notifier(
         state_store,
         event_bus,
@@ -161,6 +170,7 @@ pub(crate) fn spawn_cloud_coordinators(
             recording_stop,
             recording_cancel,
             recording_notifications,
+            offline_resolver,
         },
         notifications_rx,
     )

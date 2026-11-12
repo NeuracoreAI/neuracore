@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::state::{DaemonEvent, EventBus, RecordingTimestamp, SqliteStateStore, StateStore};
 
+pub mod offline_resolver;
 pub mod progress;
 pub mod registration;
 pub mod status;

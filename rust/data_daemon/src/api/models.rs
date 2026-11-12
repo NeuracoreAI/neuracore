@@ -93,6 +93,24 @@ pub struct RecordingStartResponse {
     pub id: String,
 }
 
+/// Response for `POST /org/{org}/robots`, the robot upsert.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RobotRegistrationResponse {
+    /// The backend's robot id.
+    pub robot_id: String,
+    /// Whether the robot already has a URDF package.
+    pub has_urdf: bool,
+}
+
+/// The fields of a backend dataset the daemon needs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DatasetSummary {
+    /// The backend's dataset id.
+    pub id: String,
+    /// Whether the dataset is shared.
+    pub is_shared: bool,
+}
+
 /// Status value for the per-trace batch update API. Matches the wire enum
 /// `RecordingDataTraceStatus` in `neuracore_types`.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
