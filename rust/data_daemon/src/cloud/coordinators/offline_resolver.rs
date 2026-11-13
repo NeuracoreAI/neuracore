@@ -512,26 +512,17 @@ fn classify(error: &ApiClientError, shared_dataset: bool) -> Failure {
     }
 }
 
-/// What the user can do about a [`Failure::Blocked`] reason, for the log.
-fn blocked_message(detail: &str) -> &'static str {
-    match detail {
-        resolution_detail::ROBOT_ARCHIVED => {
-            "the robot is archived; unarchive it on the Archived Robots page of the \
-             Neuracore dashboard so its recordings can upload"
+/// Why recordings are blocked on `detail` and what the user can do, for the log.
+fn blocked_message(detail: &str) -> String {
+    match resolution_detail::explain(detail) {
+        Some(explanation) => {
+            let fix = explanation
+                .fix
+                .map(|fix| format!(" {fix}"))
+                .unwrap_or_default();
+            format!("recordings are waiting because {}.{fix}", explanation.cause)
         }
-        resolution_detail::NOT_IN_ORG => {
-            "the account is not in the current org; select another org with \
-             `neuracore select-org` so the recordings can upload"
-        }
-        resolution_detail::NAME_TAKEN => {
-            "a dataset of the other kind, shared or private, already has this name; \
-             rename or delete it on the Neuracore dashboard so the recordings can upload"
-        }
-        resolution_detail::CREDENTIALS => {
-            "the API key was rejected or is missing; run `neuracore login` so the \
-             recordings can upload"
-        }
-        _ => "recordings are waiting; retrying later",
+        None => format!("recordings are waiting ({detail}); retrying later"),
     }
 }
 

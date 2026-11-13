@@ -139,24 +139,9 @@ string_enum! {
 }
 
 /// Why a robot or dataset made offline is stuck `pending`, or why it
-/// `failed`, as stored in `local_robots.detail` and `local_datasets.detail`
-/// for the status the user sees.
-pub mod resolution_detail {
-    /// Pending: the robot is archived. Unarchiving it lets it register.
-    pub const ROBOT_ARCHIVED: &str = "robot_archived";
-    /// Pending: the user is not in the org. Selecting another org, or being
-    /// added to this one, lets it through.
-    pub const NOT_IN_ORG: &str = "not_in_org";
-    /// Pending: the backend rejected the API key. Logging in again fixes it.
-    pub const CREDENTIALS: &str = "credentials";
-    /// Pending: a dataset of the other kind (shared or private) has the
-    /// dataset's name. Renaming or deleting that one lets it through.
-    pub const NAME_TAKEN: &str = "name_taken";
-    /// Failed: the user may not create shared datasets.
-    pub const SHARED_NOT_ALLOWED: &str = "shared_not_allowed";
-    /// Failed: the backend rejected the request itself.
-    pub const REJECTED: &str = "rejected";
-}
+/// `failed`, as stored in `local_robots.detail` and `local_datasets.detail`.
+/// The codes are shared with the SDK, which shows them in the daemon's status.
+pub use data_daemon_shared::resolution_detail;
 
 string_enum! {
     /// Where a recording started offline is in getting the backend's ids for

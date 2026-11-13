@@ -398,6 +398,19 @@ pub mod service_name {
     /// the reply are a nonce plus a short version string.
     pub const VERSION_MAX_PAYLOAD_BYTES: usize = 1024;
 
+    /// Request-response service the SDK and `data-daemon status` use to ask
+    /// what the daemon is waiting on before recordings can upload.
+    ///
+    /// A service of its own rather than more of [`crate::VersionReply`]: the
+    /// version check has to decode replies from daemons of every version, and
+    /// it runs on every `start_recording`, while answering this one reads the
+    /// state store. See [`crate::StatusRequest`] / [`crate::StatusReply`].
+    pub const STATUS: &str = "neuracore/data_daemon/status";
+
+    /// Maximum size of a single status-service sample. The reply is a few
+    /// counts and at most a handful of short reason codes.
+    pub const STATUS_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
+
     /// Request-response service the SDK uses to read a source's *current*
     /// recording state.
     ///
@@ -922,6 +935,244 @@ pub struct VersionReply {
     pub version: String,
 }
 
+/// Why a robot or dataset made offline is stuck `pending`, or why a recording
+/// will never upload: the codes the daemon stores in `local_robots.detail` and
+/// `local_datasets.detail`, and the ones it reports in [`StatusReply`].
+pub mod resolution_detail {
+    /// Pending: the robot is archived. Unarchiving it lets it register.
+    pub const ROBOT_ARCHIVED: &str = "robot_archived";
+    /// Pending: the user is not in the org. Selecting another org, or being
+    /// added to this one, lets it through.
+    pub const NOT_IN_ORG: &str = "not_in_org";
+    /// Pending: the backend rejected the API key, or none is saved. Logging
+    /// in fixes it.
+    pub const CREDENTIALS: &str = "credentials";
+    /// Pending: a dataset of the other kind (shared or private) has the
+    /// dataset's name. Renaming or deleting that one lets it through.
+    pub const NAME_TAKEN: &str = "name_taken";
+    /// Failed: the user may not create shared datasets.
+    pub const SHARED_NOT_ALLOWED: &str = "shared_not_allowed";
+    /// Failed: the backend rejected the request itself.
+    pub const REJECTED: &str = "rejected";
+    /// Failed: part of the recording could not be saved or uploaded. Only
+    /// reported, never stored.
+    pub const UPLOAD_FAILED: &str = "upload_failed";
+    /// Failed: the server no longer holds the recording. Only reported, never
+    /// stored.
+    pub const NOT_ON_SERVER: &str = "not_on_server";
+
+    /// What a reason code means to the user.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Explanation {
+        /// Why the recordings are held back or failed, as a clause:
+        /// "the robot is archived".
+        pub cause: &'static str,
+        /// What the user can do about it, as a sentence, if anything.
+        pub fix: Option<&'static str>,
+    }
+
+    /// What `code` means to the user, or `None` for a code this build does
+    /// not know.
+    pub fn explain(code: &str) -> Option<Explanation> {
+        let (cause, fix) = match code {
+            ROBOT_ARCHIVED => (
+                "the robot is archived",
+                Some("Unarchive it on the Archived Robots page of the Neuracore dashboard."),
+            ),
+            NOT_IN_ORG => (
+                "the account is not in the selected organization",
+                Some("Select another with `neuracore select-org`."),
+            ),
+            CREDENTIALS => (
+                "the API key was rejected or is missing",
+                Some("Log in with `neuracore login`."),
+            ),
+            NAME_TAKEN => (
+                "a dataset of the other kind, shared or private, has the dataset's name",
+                Some("Rename or delete that dataset on the Neuracore dashboard."),
+            ),
+            SHARED_NOT_ALLOWED => ("the account may not create shared datasets", None),
+            REJECTED => ("the server rejected the robot or dataset", None),
+            UPLOAD_FAILED => ("part of the recording could not be saved or uploaded", None),
+            NOT_ON_SERVER => ("the server no longer holds the recording", None),
+            _ => return None,
+        };
+        Some(Explanation { cause, fix })
+    }
+}
+
+/// Request sent over [`service_name::STATUS`] asking what the daemon is
+/// waiting on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusRequest {
+    /// Caller-generated token echoed by the reply.
+    pub nonce: u64,
+}
+
+/// Reply to a [`StatusRequest`]: what stands between the recordings on this
+/// machine and the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusReply {
+    /// Echo of [`StatusRequest::nonce`].
+    pub nonce: u64,
+    /// Whether the daemon can reach the server.
+    pub connection: Connection,
+    /// Whether an API key is saved for the daemon to upload with.
+    pub api_key_saved: bool,
+    /// Whether an organization is selected to upload to.
+    pub org_selected: bool,
+    /// Recordings the server has not heard of yet that can still upload,
+    /// including the blocked ones.
+    pub waiting: RecordingCount,
+    /// Recordings the server has started whose data is still uploading.
+    pub uploading: RecordingCount,
+    /// Why waiting recordings are held back until the user fixes something,
+    /// by [`resolution_detail`] code.
+    pub blocked: Vec<ReasonCount>,
+    /// Why recordings will never upload, by [`resolution_detail`] code.
+    pub failed: Vec<ReasonCount>,
+}
+
+/// Whether the daemon can reach the server, as far as it knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Connection {
+    /// The daemon has just started and has not checked yet.
+    NotChecked,
+    /// The latest check reached the server.
+    Reachable,
+    /// The latest check did not reach the server.
+    Unreachable,
+    /// The daemon's profile is set to offline, so it does not try.
+    OfflineProfile,
+}
+
+impl Connection {
+    /// The name the SDK sees: `"not_checked"`, `"reachable"`,
+    /// `"unreachable"` or `"offline_profile"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotChecked => "not_checked",
+            Self::Reachable => "reachable",
+            Self::Unreachable => "unreachable",
+            Self::OfflineProfile => "offline_profile",
+        }
+    }
+}
+
+/// How many recordings are in one state, and how much of their data is left
+/// to upload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingCount {
+    /// Number of recordings.
+    pub recordings: u64,
+    /// Bytes of their data not uploaded yet.
+    pub bytes: u64,
+}
+
+/// How many recordings share one reason code, and the robot or dataset it
+/// is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasonCount {
+    /// The reason code.
+    pub reason: String,
+    /// Number of recordings with it.
+    pub recordings: u64,
+    /// The robot or dataset the reason is about, so the user knows which.
+    /// `None` for a reason about the account (a rejected key, not being in
+    /// the org) or one past [`MAX_NAMED_REASONS`].
+    pub subject: Option<Subject>,
+}
+
+/// A robot or dataset made offline, as the user named it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subject {
+    /// Whether it is a robot or a dataset.
+    pub kind: SubjectKind,
+    /// Its name, cut to at most [`MAX_SUBJECT_NAME_BYTES`].
+    pub name: String,
+}
+
+/// What a [`Subject`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubjectKind {
+    /// A robot.
+    Robot,
+    /// A dataset.
+    Dataset,
+}
+
+impl SubjectKind {
+    /// "robot" or "dataset", as stored and as shown.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubjectKind::Robot => "robot",
+            SubjectKind::Dataset => "dataset",
+        }
+    }
+
+    /// Parse [`Self::as_str`].
+    pub fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            "robot" => Some(SubjectKind::Robot),
+            "dataset" => Some(SubjectKind::Dataset),
+            _ => None,
+        }
+    }
+}
+
+/// How many reasons a [`StatusReply`] list names a robot or dataset for. The
+/// rest are merged, one per reason code, so the reply stays within
+/// [`service_name::STATUS_MAX_PAYLOAD_BYTES`].
+pub const MAX_NAMED_REASONS: usize = 10;
+
+/// How much of a robot or dataset name a [`StatusReply`] carries.
+pub const MAX_SUBJECT_NAME_BYTES: usize = 64;
+
+impl Subject {
+    /// A subject named `name`, cut on a character boundary to
+    /// [`MAX_SUBJECT_NAME_BYTES`].
+    pub fn new(kind: SubjectKind, name: &str) -> Self {
+        let mut end = name.len().min(MAX_SUBJECT_NAME_BYTES);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        Subject {
+            kind,
+            name: name[..end].to_string(),
+        }
+    }
+}
+
+/// Keep the first [`MAX_NAMED_REASONS`] named reasons of `reasons` and merge
+/// the rest into one unnamed entry per reason code, so a [`StatusReply`]
+/// fits its service. Order is kept.
+pub fn limit_reasons(reasons: Vec<ReasonCount>) -> Vec<ReasonCount> {
+    let mut named = 0;
+    let mut kept: Vec<ReasonCount> = Vec::new();
+    for reason in reasons {
+        if reason.subject.is_some() {
+            named += 1;
+            if named <= MAX_NAMED_REASONS {
+                kept.push(reason);
+                continue;
+            }
+        }
+        match kept
+            .iter_mut()
+            .find(|kept| kept.subject.is_none() && kept.reason == reason.reason)
+        {
+            Some(merged) => {
+                merged.recordings = merged.recordings.saturating_add(reason.recordings);
+            }
+            None => kept.push(ReasonCount {
+                subject: None,
+                ..reason
+            }),
+        }
+    }
+    kept
+}
+
 impl RecordingStateQuery {
     /// Encode as a postcard byte vector for a `recording_state` request sample.
     pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
@@ -994,6 +1245,194 @@ impl VersionReply {
     }
 }
 
+impl StatusRequest {
+    /// Encode as a postcard byte vector for a status-service request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a status-service request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl StatusReply {
+    /// Encode as a postcard byte vector for a status-service response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a status-service response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+
+    /// What the user needs to hear about, one sentence each: what they must
+    /// fix for recordings to upload, recordings that never will and when they
+    /// are deleted, and recordings held on this machine because the server
+    /// cannot be reached. Empty when nothing is wrong.
+    pub fn problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.api_key_saved {
+            problems.push(
+                "No API key is saved: log in with `neuracore login` so recordings can upload."
+                    .to_string(),
+            );
+        }
+        if !self.org_selected {
+            problems.push(
+                "No organization is selected: select one with `neuracore select-org` so \
+                 recordings can upload."
+                    .to_string(),
+            );
+        }
+        for blocked in &self.blocked {
+            problems.push(reason_sentence(blocked, "is waiting", "are waiting"));
+        }
+        if !self.blocked.is_empty() {
+            // Blocked recordings are kept until the problem is fixed, however
+            // long that takes; reset is the only way to give up on them.
+            problems.push(DISCARD_BLOCKED.to_string());
+        }
+        for failed in &self.failed {
+            problems.push(reason_sentence(
+                failed,
+                "will not upload",
+                "will not upload",
+            ));
+        }
+        let held = self
+            .waiting
+            .recordings
+            .saturating_add(self.uploading.recordings);
+        let until = match self.connection {
+            Connection::Unreachable => "until the Neuracore server can be reached.",
+            Connection::OfflineProfile => {
+                "because the daemon's profile is set to offline. Relaunch the daemon \
+                 without offline mode to upload them."
+            }
+            Connection::NotChecked | Connection::Reachable => "",
+        };
+        if held > 0 && !until.is_empty() {
+            let bytes = self.waiting.bytes.saturating_add(self.uploading.bytes);
+            problems.push(format!(
+                "{} ({}) {} kept on this machine {until}",
+                recordings(held),
+                format_bytes(bytes),
+                if held == 1 { "is" } else { "are" },
+            ));
+        }
+        problems
+    }
+
+    /// Everything `neuracore data-daemon status` shows: the connection, the
+    /// recordings still to upload, then the [`problems`](Self::problems).
+    pub fn summary(&self) -> Vec<String> {
+        let connection = match self.connection {
+            Connection::Reachable => "Neuracore server: reachable.",
+            Connection::Unreachable => "Neuracore server: not reachable.",
+            Connection::NotChecked => "Neuracore server: not checked yet.",
+            Connection::OfflineProfile => {
+                "Neuracore server: not contacted (the daemon's profile is set to offline)."
+            }
+        };
+        let mut summary = vec![
+            connection.to_string(),
+            format!(
+                "Waiting to start on the server: {} ({}).",
+                recordings(self.waiting.recordings),
+                format_bytes(self.waiting.bytes),
+            ),
+            format!(
+                "Uploading: {} ({} left).",
+                recordings(self.uploading.recordings),
+                format_bytes(self.uploading.bytes),
+            ),
+        ];
+        summary.extend(self.problems());
+        summary
+    }
+}
+
+/// Shown after the recordings waiting on a problem the user must fix, which
+/// are kept until it is fixed.
+const DISCARD_BLOCKED: &str = "Waiting recordings are kept until the problem is fixed. To \
+     discard them instead, run `neuracore data-daemon reset`: it deletes every recording on \
+     this machine that has not finished uploading, not only these.";
+
+/// "2 recordings are waiting because the robot is archived. Unarchive it ...".
+fn reason_sentence(reason: &ReasonCount, one: &str, many: &str) -> String {
+    let verb = if reason.recordings == 1 { one } else { many };
+    let count = recordings(reason.recordings);
+    let sentence = match resolution_detail::explain(&reason.reason) {
+        Some(explanation) => {
+            let fix = explanation
+                .fix
+                .map(|fix| format!(" {fix}"))
+                .unwrap_or_default();
+            let cause = match &reason.subject {
+                Some(subject) => named_cause(&reason.reason, subject)
+                    .unwrap_or_else(|| explanation.cause.to_string()),
+                None => explanation.cause.to_string(),
+            };
+            format!("{count} {verb} because {cause}.{fix}")
+        }
+        None => match &reason.subject {
+            Some(subject) => format!(
+                "{count} {verb} (reason: {}, {} \"{}\").",
+                reason.reason,
+                subject.kind.as_str(),
+                subject.name
+            ),
+            None => format!("{count} {verb} (reason: {}).", reason.reason),
+        },
+    };
+    sentence
+}
+
+/// [`resolution_detail::explain`]'s cause naming the robot or dataset, for
+/// the codes about one.
+fn named_cause(code: &str, subject: &Subject) -> Option<String> {
+    let Subject { kind, name } = subject;
+    let kind = kind.as_str();
+    Some(match code {
+        resolution_detail::ROBOT_ARCHIVED => format!("the robot \"{name}\" is archived"),
+        resolution_detail::NAME_TAKEN => {
+            format!("a dataset of the other kind, shared or private, has the name \"{name}\"")
+        }
+        resolution_detail::SHARED_NOT_ALLOWED => {
+            format!("the account may not create the shared dataset \"{name}\"")
+        }
+        resolution_detail::REJECTED => format!("the server rejected the {kind} \"{name}\""),
+        _ => return None,
+    })
+}
+
+/// "1 recording", "3 recordings".
+fn recordings(count: u64) -> String {
+    if count == 1 {
+        "1 recording".to_string()
+    } else {
+        format!("{count} recordings")
+    }
+}
+
+/// A byte count in decimal units: "512 B", "1.5 MB".
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1_000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1_000.0;
+    let mut unit = 0;
+    while value >= 1_000.0 && unit + 1 < UNITS.len() {
+        value /= 1_000.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,6 +1478,383 @@ mod tests {
         assert_eq!(
             VersionReply::decode(&reply.encode().unwrap()).unwrap(),
             reply
+        );
+    }
+
+    fn status_reply(blocked: Vec<ReasonCount>, failed: Vec<ReasonCount>) -> StatusReply {
+        StatusReply {
+            nonce: 7,
+            connection: Connection::Unreachable,
+            api_key_saved: true,
+            org_selected: false,
+            waiting: RecordingCount {
+                recordings: 3,
+                bytes: 4_096,
+            },
+            uploading: RecordingCount::default(),
+            blocked,
+            failed,
+        }
+    }
+
+    #[test]
+    fn status_request_and_reply_round_trip() {
+        let request = StatusRequest { nonce: 7 };
+        assert_eq!(
+            StatusRequest::decode(&request.encode().unwrap()).unwrap(),
+            request
+        );
+
+        let reply = status_reply(
+            vec![ReasonCount {
+                reason: "robot_archived".into(),
+                recordings: 2,
+                subject: Some(Subject::new(SubjectKind::Robot, "arm")),
+            }],
+            vec![ReasonCount {
+                reason: "shared_not_allowed".into(),
+                recordings: 1,
+                subject: None,
+            }],
+        );
+        assert_eq!(
+            StatusReply::decode(&reply.encode().unwrap()).unwrap(),
+            reply
+        );
+
+        let not_checked_yet = StatusReply {
+            connection: Connection::NotChecked,
+            ..reply
+        };
+        assert_eq!(
+            StatusReply::decode(&not_checked_yet.encode().unwrap()).unwrap(),
+            not_checked_yet
+        );
+    }
+
+    fn healthy() -> StatusReply {
+        StatusReply {
+            nonce: 1,
+            connection: Connection::Reachable,
+            api_key_saved: true,
+            org_selected: true,
+            waiting: RecordingCount::default(),
+            uploading: RecordingCount::default(),
+            blocked: Vec::new(),
+            failed: Vec::new(),
+        }
+    }
+
+    fn reason(reason: &str, recordings: u64) -> ReasonCount {
+        ReasonCount {
+            reason: reason.into(),
+            recordings,
+            subject: None,
+        }
+    }
+
+    fn about(reason: ReasonCount, kind: SubjectKind, name: &str) -> ReasonCount {
+        ReasonCount {
+            subject: Some(Subject::new(kind, name)),
+            ..reason
+        }
+    }
+
+    #[test]
+    fn nothing_to_report_when_recordings_are_uploading_normally() {
+        let reply = StatusReply {
+            waiting: RecordingCount {
+                recordings: 2,
+                bytes: 10,
+            },
+            uploading: RecordingCount {
+                recordings: 1,
+                bytes: 10,
+            },
+            ..healthy()
+        };
+
+        assert!(reply.problems().is_empty());
+    }
+
+    #[test]
+    fn problems_say_what_to_fix_for_each_reason() {
+        let reply = StatusReply {
+            api_key_saved: false,
+            org_selected: false,
+            blocked: vec![
+                reason(resolution_detail::ROBOT_ARCHIVED, 2),
+                reason(resolution_detail::CREDENTIALS, 1),
+            ],
+            failed: vec![reason(resolution_detail::SHARED_NOT_ALLOWED, 1)],
+            ..healthy()
+        };
+
+        assert_eq!(
+            reply.problems(),
+            vec![
+                "No API key is saved: log in with `neuracore login` so recordings can upload."
+                    .to_string(),
+                "No organization is selected: select one with `neuracore select-org` so \
+                 recordings can upload."
+                    .to_string(),
+                "2 recordings are waiting because the robot is archived. Unarchive it on the \
+                 Archived Robots page of the Neuracore dashboard."
+                    .to_string(),
+                "1 recording is waiting because the API key was rejected or is missing. Log in \
+                 with `neuracore login`."
+                    .to_string(),
+                "Waiting recordings are kept until the problem is fixed. To discard them \
+                 instead, run `neuracore data-daemon reset`: it deletes every recording on this \
+                 machine that has not finished uploading, not only these."
+                    .to_string(),
+                "1 recording will not upload because the account may not create shared datasets."
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn recordings_held_offline_are_reported_with_their_size() {
+        let reply = StatusReply {
+            connection: Connection::Unreachable,
+            waiting: RecordingCount {
+                recordings: 3,
+                bytes: 1_500_000,
+            },
+            uploading: RecordingCount {
+                recordings: 1,
+                bytes: 2_000_000_000,
+            },
+            ..healthy()
+        };
+
+        assert_eq!(
+            reply.problems(),
+            vec![
+                "4 recordings (2.0 GB) are kept on this machine until the Neuracore server can \
+                 be reached."
+                    .to_string()
+            ]
+        );
+        // Nothing to say before the daemon has checked, or with nothing held.
+        let not_checked = StatusReply {
+            connection: Connection::NotChecked,
+            ..reply.clone()
+        };
+        assert!(not_checked.problems().is_empty());
+        let nothing_held = StatusReply {
+            connection: Connection::Unreachable,
+            ..healthy()
+        };
+        assert!(nothing_held.problems().is_empty());
+    }
+
+    #[test]
+    fn recordings_held_by_an_offline_profile_say_how_to_upload_them() {
+        let reply = StatusReply {
+            connection: Connection::OfflineProfile,
+            waiting: RecordingCount {
+                recordings: 1,
+                bytes: 2_000,
+            },
+            ..healthy()
+        };
+
+        assert_eq!(
+            reply.problems(),
+            vec![
+                "1 recording (2.0 KB) is kept on this machine because the daemon's profile is \
+                 set to offline. Relaunch the daemon without offline mode to upload them."
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            reply.summary()[0],
+            "Neuracore server: not contacted (the daemon's profile is set to offline)."
+        );
+    }
+
+    #[test]
+    fn problems_name_the_robot_or_dataset() {
+        let reply = StatusReply {
+            blocked: vec![
+                about(
+                    reason(resolution_detail::ROBOT_ARCHIVED, 2),
+                    SubjectKind::Robot,
+                    "arm",
+                ),
+                about(
+                    reason(resolution_detail::NAME_TAKEN, 1),
+                    SubjectKind::Dataset,
+                    "warehouse",
+                ),
+            ],
+            failed: vec![about(
+                reason(resolution_detail::REJECTED, 1),
+                SubjectKind::Dataset,
+                "pick-test",
+            )],
+            ..healthy()
+        };
+
+        let problems = reply.problems();
+
+        assert_eq!(
+            problems[0],
+            "2 recordings are waiting because the robot \"arm\" is archived. Unarchive it on \
+             the Archived Robots page of the Neuracore dashboard."
+        );
+        assert_eq!(
+            problems[1],
+            "1 recording is waiting because a dataset of the other kind, shared or private, \
+             has the name \"warehouse\". Rename or delete that dataset on the Neuracore \
+             dashboard."
+        );
+        assert_eq!(
+            problems[3],
+            "1 recording will not upload because the server rejected the dataset \"pick-test\"."
+        );
+    }
+
+    #[test]
+    fn names_past_the_limit_are_merged_by_reason() {
+        let named = |name: &str| {
+            about(
+                reason(resolution_detail::REJECTED, 1),
+                SubjectKind::Robot,
+                name,
+            )
+        };
+        let reasons: Vec<ReasonCount> = (0..MAX_NAMED_REASONS + 3)
+            .map(|index| named(&format!("arm-{index}")))
+            .collect();
+
+        let limited = limit_reasons(reasons);
+
+        assert_eq!(limited.len(), MAX_NAMED_REASONS + 1);
+        assert!(limited[..MAX_NAMED_REASONS]
+            .iter()
+            .all(|reason| reason.subject.is_some()));
+        let merged = &limited[MAX_NAMED_REASONS];
+        assert_eq!(merged.subject, None);
+        assert_eq!(merged.recordings, 3);
+    }
+
+    #[test]
+    fn a_long_name_is_cut_on_a_character_boundary() {
+        let name = format!("{}\u{e9}", "a".repeat(MAX_SUBJECT_NAME_BYTES - 1));
+
+        let subject = Subject::new(SubjectKind::Robot, &name);
+
+        assert_eq!(subject.name, "a".repeat(MAX_SUBJECT_NAME_BYTES - 1));
+    }
+
+    #[test]
+    fn a_reason_this_build_does_not_know_is_shown_by_its_code() {
+        let reply = StatusReply {
+            blocked: vec![reason("something_new", 1)],
+            ..healthy()
+        };
+
+        assert_eq!(
+            reply.problems()[0],
+            "1 recording is waiting (reason: something_new)."
+        );
+    }
+
+    #[test]
+    fn every_reason_code_is_explained() {
+        for code in [
+            resolution_detail::ROBOT_ARCHIVED,
+            resolution_detail::NOT_IN_ORG,
+            resolution_detail::CREDENTIALS,
+            resolution_detail::NAME_TAKEN,
+            resolution_detail::SHARED_NOT_ALLOWED,
+            resolution_detail::REJECTED,
+            resolution_detail::UPLOAD_FAILED,
+            resolution_detail::NOT_ON_SERVER,
+        ] {
+            assert!(resolution_detail::explain(code).is_some(), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_summary_always_shows_the_connection_and_the_counts() {
+        let reply = StatusReply {
+            connection: Connection::NotChecked,
+            waiting: RecordingCount {
+                recordings: 1,
+                bytes: 512,
+            },
+            ..healthy()
+        };
+
+        assert_eq!(
+            reply.summary(),
+            vec![
+                "Neuracore server: not checked yet.".to_string(),
+                "Waiting to start on the server: 1 recording (512 B).".to_string(),
+                "Uploading: 0 recordings (0 B left).".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn bytes_are_shown_in_decimal_units() {
+        assert_eq!(format_bytes(999), "999 B");
+        assert_eq!(format_bytes(1_000), "1.0 KB");
+        assert_eq!(format_bytes(1_250_000), "1.2 MB");
+        assert_eq!(format_bytes(3_000_000_000_000), "3.0 TB");
+        assert_eq!(format_bytes(u64::MAX), "18446.7 PB");
+    }
+
+    #[test]
+    fn the_largest_status_reply_fits_in_one_sample() {
+        // Every reason code the daemon has, in both lists, with the largest
+        // counts.
+        // counts, and as many named ones as a reply keeps, with the longest
+        // names: `limit_reasons` merges any more.
+        let codes = [
+            resolution_detail::ROBOT_ARCHIVED,
+            resolution_detail::NOT_IN_ORG,
+            resolution_detail::CREDENTIALS,
+            resolution_detail::NAME_TAKEN,
+            resolution_detail::SHARED_NOT_ALLOWED,
+            resolution_detail::REJECTED,
+            resolution_detail::UPLOAD_FAILED,
+            resolution_detail::NOT_ON_SERVER,
+        ];
+        let reason = |code: &str, subject: Option<Subject>| ReasonCount {
+            reason: code.into(),
+            recordings: u64::MAX,
+            subject,
+        };
+        let longest = "\u{1F916}".repeat(MAX_SUBJECT_NAME_BYTES);
+        let reasons: Vec<ReasonCount> = (0..MAX_NAMED_REASONS * 2)
+            .map(|_| {
+                reason(
+                    resolution_detail::NAME_TAKEN,
+                    Some(Subject::new(SubjectKind::Dataset, &longest)),
+                )
+            })
+            .chain(codes.into_iter().map(|code| reason(code, None)))
+            .collect();
+        let reasons = limit_reasons(reasons);
+        let mut reply = status_reply(reasons.clone(), reasons);
+        reply.nonce = u64::MAX;
+        reply.waiting = RecordingCount {
+            recordings: u64::MAX,
+            bytes: u64::MAX,
+        };
+        reply.uploading = reply.waiting;
+
+        let encoded = reply.encode().unwrap();
+
+        assert!(
+            encoded.len() <= service_name::STATUS_MAX_PAYLOAD_BYTES,
+            "{} bytes",
+            encoded.len()
         );
     }
 
