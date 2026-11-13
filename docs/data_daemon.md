@@ -488,6 +488,18 @@ neuracore data-daemon launch --profile laptop --background
 neuracore data-daemon status
 ```
 
+The first line says whether the daemon is running. A running daemon then says whether it can reach the Neuracore server, how many recordings are waiting to upload, and anything you need to fix for them to upload:
+
+```text
+Daemon running (pid=4321).
+Neuracore server: not reachable.
+Waiting to start on the server: 3 recordings (1.2 GB).
+Uploading: 0 recordings (0 B left).
+1 recording is waiting because the robot "arm" is archived. Unarchive it on the Archived Robots page of the Neuracore dashboard.
+Waiting recordings are kept until the problem is fixed. To discard them instead, run `neuracore data-daemon reset`: it deletes every recording on this machine that has not finished uploading, not only these.
+3 recordings (1.2 GB) are kept on this machine until the Neuracore server can be reached.
+```
+
 ### `neuracore data-daemon stop`
 
 ```bash
@@ -546,7 +558,7 @@ nc.stop_recording()
 - Select a dataset by name: `nc.get_dataset(id=...)` needs the server. `nc.get_dataset(name)` gives a private dataset; use `nc.create_dataset(name, shared=True)` for a shared one.
 - `nc.stop_recording(wait=True)` stops the recording and raises straight away, as there is nothing to wait for until the server can be reached.
 - Every process recording one robot together must connect it the same way, all while offline or all while online. A process that connected while online uses the robot's cloud id and does not record into a recording started under its local id.
-- When the server refuses or blocks an upload (an archived robot, a rejected API key, no organization selected), the recordings wait on the machine and the reason is in the daemon log. They upload once it is fixed.
+- When the server refuses or blocks an upload (an archived robot, a rejected API key, no organization selected), the recordings wait on the machine and upload once it is fixed. The first `nc.connect_robot` or `nc.start_recording` in each process warns about anything that needs fixing, and about recordings still kept on the machine because the server cannot be reached; `neuracore data-daemon status` shows the same at any time.
 - If the connection drops while a recording's start is being sent, that recording uploads after the daemon next restarts.
 
 ### Multi node

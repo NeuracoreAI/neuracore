@@ -63,7 +63,8 @@ use pyo3::types::PyDict;
 
 use crate::publisher::{flush_published_data, now_ns, publish, publisher_tx, PublishMsg};
 use crate::query::{
-    daemon_version as daemon_version_impl, wait_until_ready as wait_until_ready_impl,
+    daemon_status as daemon_status_impl, daemon_version as daemon_version_impl,
+    wait_until_ready as wait_until_ready_impl,
 };
 use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 
@@ -713,6 +714,65 @@ fn daemon_version(py: Python<'_>, timeout_s: f64) -> PyResult<Option<String>> {
     py.detach(|| -> PyResult<Option<String>> { Ok(daemon_version_impl(timeout_s)?) })
 }
 
+/// Ask the running daemon what the recordings on this machine are waiting on.
+///
+/// Returns `None` when nothing answered within `timeout_s`. An answer is a dict
+/// with `"connection"` (`"not_checked"`, `"reachable"`, `"unreachable"` or
+/// `"offline_profile"`),
+/// `"api_key_saved"`, `"org_selected"`, `"waiting"` and `"uploading"` (each a
+/// dict of `"recordings"` and `"bytes"` left to upload), `"blocked"` and
+/// `"failed"` (lists of dicts of `"reason"`, `"recordings"` and `"subject"`: a
+/// dict of `"kind"` (`"robot"` or `"dataset"`) and `"name"` for the robot or
+/// dataset the reason is about, or `None`), and
+/// `"problems"`: what the user needs to hear about, one sentence each (see
+/// `StatusReply::problems`).
+#[pyfunction]
+#[pyo3(signature = (timeout_s))]
+fn daemon_status<'py>(py: Python<'py>, timeout_s: f64) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let Some(status) = py.detach(|| daemon_status_impl(timeout_s))? else {
+        return Ok(None);
+    };
+    let problems = status.problems();
+    let count = |count: data_daemon_shared::RecordingCount| -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        dict.set_item("recordings", count.recordings)?;
+        dict.set_item("bytes", count.bytes)?;
+        Ok(dict)
+    };
+    let reasons =
+        |reasons: Vec<data_daemon_shared::ReasonCount>| -> PyResult<Vec<Bound<'py, PyDict>>> {
+            reasons
+                .into_iter()
+                .map(|reason| {
+                    let dict = PyDict::new(py);
+                    dict.set_item("reason", reason.reason)?;
+                    dict.set_item("recordings", reason.recordings)?;
+                    let subject = match reason.subject {
+                        Some(subject) => {
+                            let named = PyDict::new(py);
+                            named.set_item("kind", subject.kind.as_str())?;
+                            named.set_item("name", subject.name)?;
+                            Some(named)
+                        }
+                        None => None,
+                    };
+                    dict.set_item("subject", subject)?;
+                    Ok(dict)
+                })
+                .collect()
+        };
+    let reply = PyDict::new(py);
+    reply.set_item("connection", status.connection.as_str())?;
+    reply.set_item("api_key_saved", status.api_key_saved)?;
+    reply.set_item("org_selected", status.org_selected)?;
+    reply.set_item("waiting", count(status.waiting)?)?;
+    reply.set_item("uploading", count(status.uploading)?)?;
+    reply.set_item("blocked", reasons(status.blocked)?)?;
+    reply.set_item("failed", reasons(status.failed)?)?;
+    reply.set_item("problems", problems)?;
+    Ok(Some(reply))
+}
+
 /// Ask the running daemon to reload its profile config immediately (see
 /// [`Envelope::RefreshConfig`]). Published on the caller thread's command port
 /// so it is strictly ordered ahead of a subsequent `start_recording` from the
@@ -744,6 +804,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(recording_epoch, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
+    module.add_function(wrap_pyfunction!(daemon_status, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
     module.add(
         "LoggingStalledError",

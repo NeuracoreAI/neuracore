@@ -8,12 +8,14 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
 
 import filelock
 
+from neuracore.core.utils.user_warnings import warn_user
 from neuracore.data_daemon.binary import (
     INSTALL_COMMAND_HINT,
     REBUILD_COMMAND_HINT,
@@ -47,7 +49,14 @@ STALE_EXTENSION_MESSAGE = (
 # well inside that; the wait mostly reaps the child promptly.
 STALE_DAEMON_STOP_WAIT_SECONDS = 10.0
 
+# How long the once-per-process status query waits for the daemon. The
+# summary is advice, so a busy daemon costs the caller this much at most.
+STATUS_QUERY_TIMEOUT_SECONDS = 1.0
+
 logger = logging.getLogger(__name__)
+
+_status_reported = False
+_status_reported_lock = threading.Lock()
 
 
 class DaemonLifecycleError(RuntimeError):
@@ -412,6 +421,34 @@ def launch_daemon_subprocess(
     return process
 
 
+def _report_daemon_status_once() -> None:
+    """Warn, once per process, about what keeps recordings from uploading.
+
+    Nothing is shown when nothing is wrong. The daemon words the problems
+    (``StatusReply::problems``), so the CLI's ``data-daemon status`` says the
+    same. A daemon that does not answer in time, and an extension built before
+    the status query, are passed over silently: the summary is advice, not a
+    check.
+    """
+    global _status_reported
+    with _status_reported_lock:
+        if _status_reported:
+            return
+        _status_reported = True
+    data_bridge = _import_data_bridge()
+    if data_bridge is None:
+        return
+    try:
+        status = data_bridge.daemon_status(STATUS_QUERY_TIMEOUT_SECONDS)
+    except (AttributeError, RuntimeError) as error:
+        logger.debug("Skipped the daemon status summary: %s", error)
+        return
+    problems = status.get("problems") if isinstance(status, dict) else None
+    if problems:
+        lines = "\n".join(f"- {problem}" for problem in problems)
+        warn_user(f"Neuracore data daemon:\n{lines}")
+
+
 def ensure_daemon_running(
     timeout_s: float = DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS,
     env_overrides: dict[str, str] | None = None,
@@ -434,7 +471,19 @@ def ensure_daemon_running(
     top, because the just-launched daemon is stopped and reaped before the
     raise. Only a version mismatch stops that daemon: a stale-extension error
     leaves it running, since the daemon itself may be the correct version.
+
+    The first call in a process then warns about anything that keeps
+    recordings from uploading (see :func:`_report_daemon_status_once`).
     """
+    pid = _ensure_daemon_running_locked(timeout_s, env_overrides)
+    _report_daemon_status_once()
+    return pid
+
+
+def _ensure_daemon_running_locked(
+    timeout_s: float, env_overrides: dict[str, str] | None
+) -> int:
+    """Adopt or launch the daemon under the PID file lock; see the caller."""
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
     pid_file_lock = str(pid_path) + ".lock"
