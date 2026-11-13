@@ -4,6 +4,7 @@
 //! connection, and the CRUD operations the per-trace actors and registration
 //! coordinator rely on.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -494,6 +495,17 @@ pub trait StateStore: Send + Sync {
         detail: Option<&str>,
         until: NaiveDateTime,
     ) -> Result<(), StateStoreError>;
+
+    /// Whether any instance of a robot connected offline is still `pending`.
+    async fn local_robot_has_pending_instances(
+        &self,
+        robot_id: &str,
+    ) -> Result<bool, StateStoreError>;
+
+    /// The local ids of robots connected offline that a recording still
+    /// waits to register: `pending`, and used by a `resolving` recording that
+    /// is not cancelled.
+    async fn local_robots_awaiting_registration(&self) -> Result<HashSet<String>, StateStoreError>;
 
     /// [`Self::resolve_local_robot`] for a dataset selected offline.
     async fn resolve_local_dataset(
@@ -2019,6 +2031,36 @@ impl StateStore for SqliteStateStore {
         Ok(())
     }
 
+    async fn local_robot_has_pending_instances(
+        &self,
+        robot_id: &str,
+    ) -> Result<bool, StateStoreError> {
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM local_robots WHERE robot_id = ?1 AND status = ?2)",
+        )
+        .bind(robot_id)
+        .bind(LocalIdStatus::Pending.as_str())
+        .fetch_one(&self.read_pool)
+        .await?;
+        Ok(pending)
+    }
+
+    async fn local_robots_awaiting_registration(&self) -> Result<HashSet<String>, StateStoreError> {
+        let robot_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT lr.robot_id FROM local_robots lr \
+              WHERE lr.status = ?1 \
+                AND EXISTS (SELECT 1 FROM recordings r \
+                             WHERE r.offline = ?2 AND r.cancelled_at IS NULL \
+                               AND r.robot_id = lr.robot_id \
+                               AND COALESCE(r.robot_instance, 0) = lr.instance)",
+        )
+        .bind(LocalIdStatus::Pending.as_str())
+        .bind(OfflineState::Resolving.as_str())
+        .fetch_all(&self.read_pool)
+        .await?;
+        Ok(robot_ids.into_iter().collect())
+    }
+
     async fn resolve_local_dataset(
         &self,
         dataset_id: &str,
@@ -2832,6 +2874,44 @@ mod tests {
         let datasets = store.local_datasets_to_resolve(now).await.unwrap();
         assert_eq!(datasets[0].status, LocalIdStatus::Pending);
         assert_eq!(datasets[0].detail, None);
+    }
+
+    #[tokio::test]
+    async fn robots_awaiting_registration_are_the_ones_a_live_recording_waits_on() {
+        let (store, _tempdir) = open_store().await;
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        offline_recording(&store, "local-robot-2", 0, "local-dataset-1").await;
+        let cancelled = offline_recording(&store, "local-robot-3", 0, "local-dataset-1").await;
+        store
+            .cancel_recording(cancelled, RecordingTimestamp::observed_at(5_000_000_000))
+            .await
+            .unwrap();
+        store
+            .resolve_local_robot("local-robot-2", 0, "cloud-robot-2")
+            .await
+            .unwrap();
+        // An online recording: its robot id is the backend's already.
+        store
+            .create_recording(NewRecording {
+                robot_id: Some("cloud-robot-4"),
+                dataset_id: Some("cloud-dataset-1"),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.local_robots_awaiting_registration().await.unwrap(),
+            HashSet::from(["local-robot-1".to_string()])
+        );
+        assert!(store
+            .local_robot_has_pending_instances("local-robot-1")
+            .await
+            .unwrap());
+        assert!(!store
+            .local_robot_has_pending_instances("local-robot-2")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

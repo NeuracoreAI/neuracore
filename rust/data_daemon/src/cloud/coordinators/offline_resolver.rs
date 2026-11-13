@@ -10,6 +10,11 @@
 //! `Dataset.create`. It works per robot and per dataset, so recordings that
 //! share one ask about it once.
 //!
+//! A robot connected offline is registered here and only here, so only when
+//! a recording made with it waits; its saved URDF package
+//! ([`offline_robots`](crate::cloud::offline_robots)) is uploaded before the
+//! robot counts as registered, as `connect_robot` uploads it online.
+//!
 //! A refusal that retrying cannot fix marks the robot or dataset `failed`.
 //! One the user can fix (an archived robot, not being in the org, a rejected
 //! API key, a dataset name taken) leaves it `pending` with the reason, so the
@@ -27,6 +32,7 @@
 //! while online. Settling needs no network, so a recording whose robot and
 //! dataset an earlier recording already resolved is ready at once.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +45,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::api::auth::AuthError;
 use crate::api::models::DatasetSummary;
 use crate::api::{ApiClient, ApiClientError};
+use crate::cloud::offline_robots::{self, SendError};
 use crate::cloud::OrgIdRx;
 use crate::intervals::{BLOCKED_ID_RETRY, PASSING_ID_RETRY};
 use crate::lifecycle::shutdown::ShutdownSignal;
@@ -67,6 +74,7 @@ pub fn spawn_offline_resolver(
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    offline_robots: PathBuf,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> OfflineResolverHandle {
     spawn_with_interval(
@@ -74,6 +82,7 @@ pub fn spawn_offline_resolver(
         bus,
         client,
         org_rx,
+        offline_robots,
         shutdown_rx,
         crate::intervals::OFFLINE_RESOLVE_SWEEP,
     )
@@ -84,6 +93,7 @@ fn spawn_with_interval(
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    offline_robots: PathBuf,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
     every: Duration,
 ) -> OfflineResolverHandle {
@@ -92,6 +102,7 @@ fn spawn_with_interval(
         client,
         bus: bus.clone(),
         org_rx,
+        offline_robots,
     };
     let mut subscriber = bus.subscribe();
     let join = tokio::spawn(async move {
@@ -133,6 +144,8 @@ struct Resolver {
     client: Arc<ApiClient>,
     bus: EventBus,
     org_rx: OrgIdRx,
+    /// Where robots connected offline save their packages (`.offline_robots`).
+    offline_robots: PathBuf,
 }
 
 impl Resolver {
@@ -165,44 +178,65 @@ impl Resolver {
         self.settle().await;
     }
 
-    /// Register one instance of a robot connected offline, with the upsert
-    /// `nc.connect_robot` makes online.
+    /// Register one instance of a robot connected offline as
+    /// `nc.connect_robot` does online: the robot upsert, then its saved
+    /// package if the backend needs it.
     async fn resolve_robot(&self, org_id: &str, robot: &LocalRobotRow) {
         let LocalRobotRow {
             robot_id,
             instance,
             name,
             shared,
+            overwrite_urdf,
             ..
         } = robot;
-        let error = match self
+        let robot_dir = self.offline_robots.join(robot_id);
+        let (error, step) = match self
             .client
             .robot_upsert(org_id, name, *instance, *shared)
             .await
         {
-            Ok(registered) => {
-                match self
-                    .store
-                    .resolve_local_robot(robot_id, *instance, &registered.robot_id)
-                    .await
-                {
-                    Ok(()) => tracing::info!(
-                        robot_id,
-                        instance,
-                        cloud_robot_id = registered.robot_id,
-                        "robot connected offline is registered"
-                    ),
-                    // The upsert is idempotent: the next pass gets the same id.
-                    Err(error) => {
-                        tracing::warn!(%error, robot_id, "failed to store the cloud robot id")
-                    }
+            // The package goes up before the robot counts as registered, so
+            // a recording never starts on the backend without its robot's
+            // description.
+            Ok(registered) => match offline_robots::send_package(
+                &self.client,
+                org_id,
+                &robot_dir,
+                &registered,
+                *shared,
+                *overwrite_urdf,
+            )
+            .await
+            {
+                Ok(sent) => {
+                    self.registered(robot, &registered.robot_id, sent).await;
+                    return;
                 }
-                return;
-            }
-            Err(error) => error,
+                Err(SendError::Upload(error)) => (error, "upload the robot's description"),
+                Err(SendError::Read(error)) => {
+                    tracing::warn!(
+                        %error,
+                        robot = name,
+                        "failed to read the robot's saved description; retrying later",
+                    );
+                    let until = retry_at(&Failure::Retry);
+                    if let Err(error) = self
+                        .store
+                        .hold_local_robot(robot_id, *instance, None, until)
+                        .await
+                    {
+                        tracing::warn!(%error, robot_id, "failed to hold the robot back");
+                    }
+                    return;
+                }
+            },
+            Err(error) => (error, "register the robot"),
         };
-        // The upsert has no 403 of its own for a shared robot: any 403 is the
-        // role or org check, which the user can fix.
+        // Neither call has a 403 of its own for a shared robot: any 403 is the
+        // role or org check, which the user can fix. The package upload never
+        // gets here refused: `send_package` drops a package the backend
+        // rejects.
         let failure = classify(&error, false);
         let stored = match failure {
             Failure::Refused(detail) => {
@@ -212,6 +246,7 @@ impl Resolver {
                     detail,
                     "backend refused to register the robot; its recordings will not upload",
                 );
+                offline_robots::discard(&robot_dir).await;
                 self.store.fail_local_robot(robot_id, detail).await
             }
             Failure::Blocked(detail) => {
@@ -221,7 +256,7 @@ impl Resolver {
                     .await
             }
             Failure::Retry => {
-                tracing::warn!(%error, robot = name, "failed to register the robot; retrying later");
+                tracing::warn!(%error, robot = name, "failed to {step}; retrying later");
                 self.store
                     .hold_local_robot(robot_id, *instance, None, retry_at(&failure))
                     .await
@@ -229,6 +264,42 @@ impl Resolver {
         };
         if let Err(error) = stored {
             tracing::warn!(%error, robot_id, "failed to record how registering the robot went");
+        }
+    }
+
+    /// Record that the backend registered a robot instance, and delete its
+    /// package once no other instance still waits to register with it.
+    async fn registered(
+        &self,
+        robot: &LocalRobotRow,
+        cloud_robot_id: &str,
+        sent: offline_robots::Sent,
+    ) {
+        let LocalRobotRow {
+            robot_id, instance, ..
+        } = robot;
+        if let Err(error) = self
+            .store
+            .resolve_local_robot(robot_id, *instance, cloud_robot_id)
+            .await
+        {
+            // The upsert is idempotent: the next pass gets the same id.
+            tracing::warn!(%error, robot_id, "failed to store the cloud robot id");
+            return;
+        }
+        tracing::info!(
+            robot_id,
+            instance,
+            cloud_robot_id,
+            "robot connected offline is registered"
+        );
+        match self.store.local_robot_has_pending_instances(robot_id).await {
+            // Another instance may need the package, if it was connected with
+            // `overwrite_urdf`; the startup sweep deletes it if none does.
+            Ok(true) | Err(_) => {}
+            Ok(false) => {
+                offline_robots::remove_package(&self.offline_robots.join(robot_id), sent).await
+            }
         }
     }
 
@@ -481,6 +552,7 @@ mod tests {
     struct Fixture {
         store: Arc<SqliteStateStore>,
         bus: EventBus,
+        offline_robots: PathBuf,
         _dir: TempDir,
     }
 
@@ -493,6 +565,7 @@ mod tests {
             Fixture {
                 store: Arc::new(store),
                 bus: EventBus::new(),
+                offline_robots: dir.path().join(".offline_robots"),
                 _dir: dir,
             }
         }
@@ -530,6 +603,7 @@ mod tests {
                 client: Arc::new(client(server)),
                 bus: self.bus.clone(),
                 org_rx: org_rx(Some("org-1")),
+                offline_robots: self.offline_robots.clone(),
             }
         }
 
@@ -962,6 +1036,7 @@ mod tests {
             fixture.bus.clone(),
             Arc::new(client(&server)),
             org_rx(Some("org-1")),
+            fixture.offline_robots.clone(),
             shutdown_tx.subscribe(),
             Duration::from_secs(3600),
         );
@@ -989,6 +1064,7 @@ mod tests {
             fixture.bus.clone(),
             Arc::new(client(&server)),
             org_rx(Some("org-1")),
+            fixture.offline_robots.clone(),
             shutdown_tx.subscribe(),
             Duration::from_secs(3600),
         );
@@ -1020,6 +1096,114 @@ mod tests {
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
+    }
+
+    impl Fixture {
+        /// Save `local-robot-1`'s package, as an offline `connect_robot`
+        /// does. Returns the robot's directory.
+        fn save_package(&self) -> PathBuf {
+            let dir = self.offline_robots.join("local-robot-1");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("package.zip"), b"zip bytes").unwrap();
+            dir
+        }
+    }
+
+    fn package_upload(status: u16) -> Mock {
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/cloud-robot-9/package"))
+            .respond_with(ResponseTemplate::new(status))
+    }
+
+    #[tokio::test]
+    async fn the_saved_package_is_uploaded_before_the_robot_counts_as_registered() {
+        let fixture = Fixture::new().await;
+        let index = fixture.recording(false).await;
+        let saved = fixture.save_package();
+        let server = MockServer::start().await;
+        robot_upsert(200).mount(&server).await;
+        package_upload(200).expect(1).mount(&server).await;
+        found_dataset().mount(&server).await;
+
+        fixture.resolver(&server).pass(true).await;
+
+        assert_eq!(fixture.offline(index).await, Some(OfflineState::Resolved));
+        assert!(!saved.exists(), "the sent package is deleted");
+    }
+
+    #[tokio::test]
+    async fn a_failed_package_upload_holds_the_robot() {
+        let fixture = Fixture::new().await;
+        let index = fixture.recording(false).await;
+        let saved = fixture.save_package();
+        let server = MockServer::start().await;
+        robot_upsert(200).mount(&server).await;
+        package_upload(503).mount(&server).await;
+        found_dataset().mount(&server).await;
+
+        fixture.resolver(&server).pass(true).await;
+
+        let robot = fixture.robot().await;
+        assert_eq!(robot.status, LocalIdStatus::Pending);
+        assert!(robot.next_attempt_at.is_some());
+        assert_eq!(fixture.offline(index).await, Some(OfflineState::Resolving));
+        assert!(saved.join("package.zip").exists());
+    }
+
+    #[tokio::test]
+    async fn the_package_stays_while_another_instance_waits() {
+        let fixture = Fixture::new().await;
+        let index = fixture.recording(false).await;
+        // Instance 8 waits too, but the backend is only asked about 7 now.
+        fixture
+            .store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(8),
+                dataset_id: Some("cloud-dataset-1"),
+                local_robot: Some(&LocalRobot {
+                    name: "arm".into(),
+                    shared: false,
+                    overwrite_urdf: false,
+                }),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        fixture
+            .store
+            .hold_local_robot(
+                "local-robot-1",
+                8,
+                None,
+                Utc::now().naive_utc() + chrono::Duration::minutes(5),
+            )
+            .await
+            .unwrap();
+        let saved = fixture.save_package();
+        let server = MockServer::start().await;
+        robot_upsert(200).mount(&server).await;
+        package_upload(200).mount(&server).await;
+        found_dataset().mount(&server).await;
+
+        fixture.resolver(&server).pass(true).await;
+
+        assert_eq!(fixture.offline(index).await, Some(OfflineState::Resolved));
+        assert!(saved.join("package.zip").exists());
+    }
+
+    #[tokio::test]
+    async fn a_refused_robot_discards_its_package() {
+        let fixture = Fixture::new().await;
+        fixture.recording(false).await;
+        let saved = fixture.save_package();
+        let server = MockServer::start().await;
+        robot_upsert(422).mount(&server).await;
+        found_dataset().mount(&server).await;
+
+        fixture.resolver(&server).pass(true).await;
+
+        assert!(!saved.exists());
     }
 
     #[test]

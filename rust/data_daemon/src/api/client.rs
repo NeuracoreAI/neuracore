@@ -471,6 +471,31 @@ impl ApiClient {
         serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)
     }
 
+    /// `PUT /org/{org}/robots/{robot}/package?is_shared=`: upload a robot's
+    /// URDF package, the zip `nc.connect_robot` builds.
+    pub async fn upload_robot_package(
+        &self,
+        org_id: &str,
+        robot_id: &str,
+        shared: bool,
+        package: &[u8],
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/robots/{robot_id}/package");
+        let _ = self
+            .send_with_retry(Method::PUT, &path, |builder| {
+                // A form is consumed by sending, so each attempt builds its own.
+                let part = reqwest::multipart::Part::bytes(package.to_vec())
+                    .file_name("robot_package.zip")
+                    .mime_str("application/zip")
+                    .expect("a valid MIME type");
+                builder
+                    .query(&[("is_shared", shared)])
+                    .multipart(reqwest::multipart::Form::new().part("robot_package", part))
+            })
+            .await?;
+        Ok(())
+    }
+
     /// `GET /org/{org}/datasets/search/by-name?name=`: the dataset of that
     /// name in the org, or `None` when there is none.
     pub async fn dataset_by_name(
@@ -704,7 +729,7 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::encoding::video_encoder::LossyVideoCodec;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::matchers::{body_json, body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn options(base_url: String) -> ApiClientOptions {
@@ -797,6 +822,49 @@ mod tests {
             .unwrap_err();
 
         assert!(error.is_forbidden());
+    }
+
+    #[tokio::test]
+    async fn upload_robot_package_sends_the_zip_as_robot_package() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/robot-9/package"))
+            .and(query_param("is_shared", "false"))
+            .and(body_string_contains("name=\"robot_package\""))
+            .and(body_string_contains("filename=\"robot_package.zip\""))
+            .and(body_string_contains("zip bytes"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .upload_robot_package("org-1", "robot-9", false, b"zip bytes")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_robot_package_resends_the_zip_on_a_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/robot-9/package"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/robot-9/package"))
+            .and(body_string_contains("zip bytes"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .upload_robot_package("org-1", "robot-9", false, b"zip bytes")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
