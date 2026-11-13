@@ -70,6 +70,8 @@ def pytorch_dummy_dataset() -> PytorchDummyDataset:
         "robot_1": {
             data_type: {} for data_type in CNNMLP.get_supported_output_data_types()
         }
+        # A robot logs exactly one done flag.
+        | {DataType.DONE: {0: "done"}}
     }
     return PytorchDummyDataset(
         num_samples=5,
@@ -88,6 +90,8 @@ def pytorch_dummy_dataset_no_proprio() -> PytorchDummyDataset:
         "robot_1": {
             data_type: {} for data_type in CNNMLP.get_supported_output_data_types()
         }
+        # A robot logs exactly one done flag.
+        | {DataType.DONE: {0: "done"}}
     }
     return PytorchDummyDataset(
         num_samples=5,
@@ -414,7 +418,7 @@ def test_done_head_forward_backward(
     with torch.no_grad():
         output = model(_inference_batch(batch))
     done_outputs = output[DataType.DONE]
-    assert len(done_outputs) == len(model.done_slot_dims)
+    assert len(done_outputs) == 1
     for done_output in done_outputs:
         assert isinstance(done_output, BatchedDoneData)
         assert done_output.done.shape == (BS, 1, 1)
