@@ -9,6 +9,7 @@ for the native side.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from importlib import import_module
 from types import ModuleType
 from typing import NamedTuple
@@ -118,6 +119,40 @@ class LoggingStalledError(RuntimeError):
     """The daemon is not draining its spool backlog fast enough to admit a frame."""
 
 
+@dataclass(frozen=True)
+class LocalRobot:
+    """A robot connected offline, as the daemon needs it to register the robot.
+
+    Attributes:
+        name: The robot name.
+        shared: Whether the robot is shared.
+        overwrite_urdf: Whether its saved URDF package replaces one the
+            server already has, as ``connect_robot``'s
+            ``overwrite_existing_urdf``.
+    """
+
+    name: str
+    shared: bool = False
+    overwrite_urdf: bool = False
+
+
+@dataclass(frozen=True)
+class LocalDataset:
+    """A dataset selected offline, as the daemon needs it to create the dataset.
+
+    Attributes:
+        name: The dataset name.
+        shared: Whether the dataset is shared.
+        description: Description, used if the dataset is created.
+        tags: Tags, used if the dataset is created.
+    """
+
+    name: str
+    shared: bool = False
+    description: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+
 def notify_daemon_config_changed() -> None:
     """Try ask a running daemon to reload its profile immediately."""
     try:
@@ -196,6 +231,56 @@ class RecordingContext:
             dataset_id,
             dataset_name,
             timestamp_us,
+        )
+
+    def start_local_recording(
+        self,
+        robot_id: str,
+        robot_instance: int,
+        dataset_id: str | None,
+        *,
+        timestamp_us: int,
+        local_robot: LocalRobot | None,
+        local_dataset: LocalDataset | None,
+    ) -> int:
+        """Announce a recording whose robot or dataset was made offline.
+
+        Like :meth:`start_recording`, and also hands the daemon what it needs
+        to find or create the robot and dataset once it can reach the server.
+
+        Args:
+            robot_id: Robot identifier used as the daemon source key; a local
+                id when ``local_robot`` is set.
+            robot_instance: Robot instance used as the daemon source key.
+            dataset_id: The dataset id; a local id when ``local_dataset`` is set.
+            timestamp_us: The recording's start in microseconds on the caller's
+                capture clock.
+            local_robot: The robot's details when ``robot_id`` is a local id.
+            local_dataset: The dataset's details when ``dataset_id`` is a local id.
+
+        Returns:
+            The start in microseconds the daemon stored, as
+            :meth:`start_recording` returns.
+        """
+        ensure_daemon_running()
+        self.bind_source(robot_id, robot_instance)
+
+        return _load_native().start_local_recording(
+            robot_id,
+            robot_instance,
+            dataset_id,
+            timestamp_us,
+            local_robot_name=local_robot.name if local_robot else None,
+            local_robot_shared=local_robot.shared if local_robot else False,
+            local_robot_overwrite_urdf=(
+                local_robot.overwrite_urdf if local_robot else False
+            ),
+            local_dataset_name=local_dataset.name if local_dataset else None,
+            local_dataset_shared=local_dataset.shared if local_dataset else False,
+            local_dataset_description=(
+                local_dataset.description if local_dataset else None
+            ),
+            local_dataset_tags=list(local_dataset.tags) if local_dataset else [],
         )
 
     def log_joints(

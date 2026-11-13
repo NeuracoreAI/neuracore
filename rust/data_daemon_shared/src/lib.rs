@@ -663,6 +663,54 @@ pub enum Envelope {
         /// [`Envelope::SourceFlushed`] reports under.
         producer_pid: u32,
     },
+    /// [`Envelope::StartRecording`] for a recording whose robot or dataset
+    /// was made offline and so has only a local id.
+    ///
+    /// Opens the window and inserts the row exactly as `StartRecording` does,
+    /// and also carries what the daemon needs to find or create the robot and
+    /// dataset on the backend once it can reach it. A separate variant rather
+    /// than new `StartRecording` fields because postcard does not tag fields:
+    /// appending a variant leaves every existing envelope's bytes unchanged.
+    StartLocalRecording {
+        /// The source's robot id: a local id when `local_robot` is set.
+        robot_id: String,
+        robot_instance: i64,
+        /// The dataset id: a local id when `local_dataset` is set.
+        dataset_id: Option<String>,
+        /// As [`Envelope::StartRecording`]'s `publish_timestamp_ns`.
+        publish_timestamp_ns: i64,
+        /// As [`Envelope::StartRecording`]'s `timestamp_us`.
+        timestamp_us: i64,
+        /// Set when `robot_id` is a local id.
+        local_robot: Option<LocalRobot>,
+        /// Set when `dataset_id` is a local id.
+        local_dataset: Option<LocalDataset>,
+    },
+}
+
+/// A robot connected offline, as the backend's robot upsert needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalRobot {
+    /// The robot name.
+    pub name: String,
+    /// Whether the robot is shared.
+    pub shared: bool,
+    /// Whether its saved URDF package replaces one the backend already has,
+    /// as `connect_robot`'s `overwrite_existing_urdf`.
+    pub overwrite_urdf: bool,
+}
+
+/// A dataset selected offline, as the backend's dataset create needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDataset {
+    /// The dataset name.
+    pub name: String,
+    /// Whether the dataset is shared.
+    pub shared: bool,
+    /// Description, used if the dataset is created.
+    pub description: Option<String>,
+    /// Tags, used if the dataset is created.
+    pub tags: Vec<String>,
 }
 
 /// Camera calibration logged with one video frame.
@@ -772,6 +820,7 @@ impl Envelope {
             Envelope::RefreshConfig {} => "refresh_config",
             Envelope::SourceFlushed { .. } => "source_flushed",
             Envelope::VideoProducerActive { .. } => "video_producer_active",
+            Envelope::StartLocalRecording { .. } => "start_local_recording",
         }
     }
 
@@ -1008,6 +1057,69 @@ mod tests {
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
         assert_eq!(original.kind(), "start_recording");
+    }
+
+    #[test]
+    fn start_recording_bytes_are_unchanged() {
+        // Captured before `StartLocalRecording` was added: a daemon from an
+        // earlier install must keep decoding every online start.
+        let original = Envelope::StartRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+            robot_name: Some("arm".into()),
+            dataset_id: Some("ds-1".into()),
+            dataset_name: Some("warehouse".into()),
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_us: 1_700_000_000_000_000,
+        };
+        assert_eq!(
+            original.encode().expect("encode"),
+            vec![
+                0, 7, 114, 111, 98, 111, 116, 45, 49, 6, 1, 3, 97, 114, 109, 1, 4, 100, 115, 45,
+                49, 1, 9, 119, 97, 114, 101, 104, 111, 117, 115, 101, 128, 128, 208, 226, 198, 191,
+                206, 151, 47, 128, 128, 242, 129, 131, 137, 133, 6,
+            ],
+        );
+    }
+
+    #[test]
+    fn start_local_recording_round_trips_through_postcard() {
+        let original = Envelope::StartLocalRecording {
+            robot_id: "local-robot-1".into(),
+            robot_instance: 2,
+            dataset_id: Some("local-dataset-1".into()),
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_us: 1_700_000_000_000_000,
+            local_robot: Some(LocalRobot {
+                name: "arm".into(),
+                shared: false,
+                overwrite_urdf: true,
+            }),
+            local_dataset: Some(LocalDataset {
+                name: "warehouse".into(),
+                shared: true,
+                description: Some("pick and place".into()),
+                tags: vec!["day-1".into(), "shelf-a".into()],
+            }),
+        };
+        let bytes = original.encode().expect("encode");
+        assert_eq!(Envelope::decode(&bytes).expect("decode"), original);
+        assert_eq!(original.kind(), "start_local_recording");
+    }
+
+    #[test]
+    fn start_local_recording_is_appended_after_every_existing_variant() {
+        // The first byte is the variant's index; `VideoProducerActive` is 8.
+        let original = Envelope::StartLocalRecording {
+            robot_id: "local-robot-1".into(),
+            robot_instance: 0,
+            dataset_id: None,
+            publish_timestamp_ns: 0,
+            timestamp_us: 0,
+            local_robot: None,
+            local_dataset: None,
+        };
+        assert_eq!(original.encode().expect("encode")[0], 9);
     }
 
     #[test]
