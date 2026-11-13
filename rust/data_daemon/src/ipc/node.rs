@@ -14,7 +14,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, HEALTH, HEALTH_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
     MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE,
-    RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
+    RECORDING_STATE_MAX_PAYLOAD_BYTES, STATUS, STATUS_MAX_PAYLOAD_BYTES, VERSION,
+    VERSION_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::server::Server;
@@ -106,6 +107,11 @@ pub struct IpcTransport {
     version_server: Server<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the version server.
     _version_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response server on `neuracore/data_daemon/status` that reports
+    /// what the recordings on this machine are waiting on.
+    status_server: Server<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the status server.
+    _status_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
 }
 
 impl IpcTransport {
@@ -135,6 +141,8 @@ impl IpcTransport {
             open_query_server(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
         let (version_service, version_server) =
             open_query_server(&node, VERSION, VERSION_MAX_PAYLOAD_BYTES)?;
+        let (status_service, status_server) =
+            open_query_server(&node, STATUS, STATUS_MAX_PAYLOAD_BYTES)?;
 
         Ok(IpcTransport {
             _node: node,
@@ -146,6 +154,8 @@ impl IpcTransport {
             _health_service: health_service,
             version_server,
             _version_service: version_service,
+            status_server,
+            _status_service: status_service,
         })
     }
 
@@ -167,6 +177,11 @@ impl IpcTransport {
     /// Borrow the `version` request-response server port.
     pub fn version_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
         &self.version_server
+    }
+
+    /// Borrow the `status` request-response server port.
+    pub fn status_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
+        &self.status_server
     }
 }
 
@@ -223,8 +238,8 @@ fn open_subscriber(
 }
 
 /// Convenience aliases for the `[u8]` request-response factory + server pair.
-type ByteSliceQueryFactory = QueryPortFactory<ipc::Service, [u8], (), [u8], ()>;
-type ByteSliceServer = Server<ipc::Service, [u8], (), [u8], ()>;
+pub(crate) type ByteSliceQueryFactory = QueryPortFactory<ipc::Service, [u8], (), [u8], ()>;
+pub(crate) type ByteSliceServer = Server<ipc::Service, [u8], (), [u8], ()>;
 
 /// Open or attach to the `[u8]` request-response `queries` service and build the
 /// daemon's single server on it.
@@ -232,7 +247,7 @@ type ByteSliceServer = Server<ipc::Service, [u8], (), [u8], ()>;
 /// The SDK opens client ports on the same service (one per OS thread, like the
 /// `commands` publisher), so the caps mirror the publisher topology. Requests
 /// and responses are both small postcard blobs ([`RECORDING_STATE_MAX_PAYLOAD_BYTES`]).
-fn open_query_server(
+pub(crate) fn open_query_server(
     node: &Node<ipc::Service>,
     name: &str,
     max_slice_len: usize,

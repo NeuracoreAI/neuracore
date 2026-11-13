@@ -400,6 +400,11 @@ fn run_daemon(
                 shutdown_tx.subscribe(),
             );
 
+            // Whether the daemon can reach the backend, for the status query:
+            // the connection monitor updates it after every probe.
+            let (reachable_tx, reachable) =
+                tokio::sync::watch::channel(data_daemon_shared::Connection::NotChecked);
+
             // Spawn the cloud-side coordinators *before* the dispatcher so
             // they have an active subscription to the event bus by the time
             // any `TraceWritten` / `RecordingStopped` fires. A late
@@ -411,6 +416,7 @@ fn run_daemon(
             // no new `TraceWritten` lands while the coordinators drain.
             let (cloud_handles, notifications_rx) = if config_for_runtime.offline.unwrap_or(false) {
                 tracing::info!("offline mode — skipping cloud coordinator spawn");
+                reachable_tx.send_replace(data_daemon_shared::Connection::OfflineProfile);
                 (None, None)
             } else {
                 match build_api_client(&api_url, &config_path) {
@@ -425,11 +431,13 @@ fn run_daemon(
                             org_id.clone(),
                             shutdown_tx.clone(),
                             config_rx.clone(),
+                            reachable_tx,
                         );
                         (Some(handles), Some(notifications_rx))
                     }
                     Err(error) => {
                         tracing::warn!(%error, "failed to build API client; cloud uploads disabled");
+                        reachable_tx.send_replace(data_daemon_shared::Connection::Unreachable);
                         (None, None)
                     }
                 }
@@ -507,6 +515,11 @@ fn run_daemon(
                 dispatcher_tx.clone(),
                 recording_state,
                 state_store.clone(),
+                listener::StatusSources {
+                    config_path: config_path.clone(),
+                    fallback_org_id: org_id.clone(),
+                    reachable,
+                },
                 shutdown_tx.subscribe(),
             )
             .await;

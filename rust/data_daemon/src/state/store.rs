@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{NaiveDateTime, Utc};
-use data_daemon_shared::{LocalDataset, LocalRobot, NANOSECONDS_PER_MICROSECOND};
+use data_daemon_shared::{
+    limit_reasons, resolution_detail, LocalDataset, LocalRobot, ReasonCount, RecordingCount,
+    Subject, SubjectKind, NANOSECONDS_PER_MICROSECOND,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
@@ -42,6 +45,22 @@ const READ_POOL_CONNECTIONS: u32 = 4;
 /// reconcile cadence this bounds a persistently-rejected completion to
 /// roughly ten minutes of retention, instead of pinning the disk forever.
 pub const MAX_COMPLETION_REPORT_ATTEMPTS: i64 = 20;
+
+/// SQL condition on `recordings r`: the recording can never upload. It was
+/// started offline and its robot or dataset was refused, the backend no
+/// longer holds it, or one of its traces failed to write, register or upload.
+/// None of these is ever undone. Callers add `r.cancelled_at IS NULL`: a
+/// cancelled recording fails its traces too, and the reaper removes it once
+/// the cancel is sent.
+/// `offline` is NULL for a recording started online, hence `IFNULL`: a NULL
+/// here would make the whole condition, and its negation, NULL.
+const NEVER_UPLOADS: &str = "(IFNULL(r.offline, '') = 'failed' \
+       OR r.backend_not_found_at IS NOT NULL \
+       OR EXISTS (SELECT 1 FROM traces t \
+                   WHERE t.recording_index = r.recording_index \
+                     AND (t.write_status = 'failed' \
+                          OR t.registration_status = 'failed' \
+                          OR t.upload_status = 'failed')))";
 
 /// Errors surfaced by [`StateStore`] operations.
 #[derive(Debug, Error)]
@@ -86,6 +105,26 @@ impl RecordingTimestamp {
             timestamp_us: None,
         }
     }
+}
+
+/// What the recordings on this machine are waiting on, for the status query.
+///
+/// Cancelled recordings, and ones the backend no longer has, are left out:
+/// they are on their way to being cleaned up, not to the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusCounts {
+    /// Recordings the server has not heard of yet that can still upload,
+    /// including the blocked ones.
+    pub waiting: RecordingCount,
+    /// Recordings the server has started whose data is still uploading.
+    pub uploading: RecordingCount,
+    /// Waiting recordings held back until the user fixes something, by
+    /// reason. A recording whose robot and dataset are both held back counts
+    /// once under each reason.
+    pub blocked: Vec<ReasonCount>,
+    /// Recordings that will never upload, by reason, with when all of them
+    /// are deleted by.
+    pub failed: Vec<ReasonCount>,
 }
 
 /// Parameters for inserting a new recording row.
@@ -190,6 +229,10 @@ pub trait StateStore: Send + Sync {
     /// Cancelled rows are included so the notifier can settle a cancel that
     /// happened before `/recording/start`, allowing the reaper to remove it.
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Count what the recordings on this machine are waiting on, for the
+    /// status query. Read-only.
+    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError>;
 
     /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state under
     /// an existing recording. Idempotent on `trace_id`.
@@ -452,8 +495,9 @@ pub trait StateStore: Send + Sync {
     /// row in a single transaction.
     ///
     /// Called by the recording reaper once a recording is fully settled (every
-    /// trace uploaded and the backend notified), after its on-disk artefacts
-    /// have been removed. Returns the number of trace rows deleted.
+    /// trace uploaded and the backend notified), or has been kept long enough
+    /// after it could never upload, after its on-disk artefacts have been
+    /// removed. Returns the number of trace rows deleted.
     async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError>;
 
     /// The robot instances connected offline that a recording still waits
@@ -1090,6 +1134,114 @@ impl StateStore for SqliteStateStore {
         .fetch_optional(&self.read_pool)
         .await?;
         Ok(recording_index)
+    }
+
+    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError> {
+        // Bytes left per recording: a trace's size is only final once it is
+        // written, so the bytes written so far stand in until then.
+        const BYTES_LEFT: &str = "SELECT recording_index, \
+                    SUM(MAX(MAX(total_bytes, bytes_written) - bytes_uploaded, 0)) AS bytes \
+               FROM traces \
+              WHERE upload_status <> 'uploaded' \
+              GROUP BY recording_index";
+        let can_upload = format!("r.cancelled_at IS NULL AND NOT {NEVER_UPLOADS}");
+
+        let waiting: (i64, i64) = sqlx::query_as(&format!(
+            "SELECT COUNT(*), COALESCE(SUM(unsent.bytes), 0) FROM recordings r \
+               LEFT JOIN ({BYTES_LEFT}) AS unsent USING (recording_index) \
+              WHERE r.recording_id IS NULL AND {can_upload}"
+        ))
+        .fetch_one(&self.read_pool)
+        .await?;
+        let uploading: (i64, i64) = sqlx::query_as(&format!(
+            "SELECT COUNT(*), COALESCE(SUM(unsent.bytes), 0) FROM recordings r \
+               JOIN ({BYTES_LEFT}) AS unsent USING (recording_index) \
+              WHERE r.recording_id IS NOT NULL AND {can_upload}"
+        ))
+        .fetch_one(&self.read_pool)
+        .await?;
+        // A recording started offline waits on the robot and dataset it used;
+        // one the backend keeps holding back records why. A reason about the
+        // account (?1, ?2) is the same for every robot and dataset, so it is
+        // not split by name.
+        let blocked: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
+            "SELECT reason, kind, name, COUNT(DISTINCT recording_index) FROM ( \
+                 SELECT r.recording_index, lr.detail AS reason, \
+                        CASE WHEN lr.detail IN (?1, ?2) THEN NULL ELSE 'robot' END AS kind, \
+                        CASE WHEN lr.detail IN (?1, ?2) THEN NULL ELSE lr.name END AS name \
+                   FROM recordings r \
+                   JOIN local_robots lr ON lr.robot_id = r.robot_id \
+                        AND lr.instance = COALESCE(r.robot_instance, 0) \
+                  WHERE r.offline = 'resolving' AND {can_upload} \
+                    AND lr.status = 'pending' AND lr.detail IS NOT NULL \
+                 UNION ALL \
+                 SELECT r.recording_index, ld.detail, \
+                        CASE WHEN ld.detail IN (?1, ?2) THEN NULL ELSE 'dataset' END, \
+                        CASE WHEN ld.detail IN (?1, ?2) THEN NULL ELSE ld.name END \
+                   FROM recordings r \
+                   JOIN local_datasets ld ON ld.dataset_id = r.dataset_id \
+                  WHERE r.offline = 'resolving' AND {can_upload} \
+                    AND ld.status = 'pending' AND ld.detail IS NOT NULL \
+             ) GROUP BY reason, kind, name ORDER BY reason, kind, name"
+        ))
+        .bind(resolution_detail::CREDENTIALS)
+        .bind(resolution_detail::NOT_IN_ORG)
+        .fetch_all(&self.read_pool)
+        .await?;
+        // One reason per recording, in the order the daemon finds them: its
+        // robot, its dataset, then the backend or the upload.
+        let failed: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
+            "SELECT reason, kind, name, COUNT(*) FROM ( \
+                 SELECT CASE \
+                          WHEN r.offline = 'failed' \
+                            THEN COALESCE(ro.failure, 'unknown') \
+                          WHEN r.backend_not_found_at IS NOT NULL THEN ?1 \
+                          ELSE ?2 \
+                        END AS reason, \
+                        CASE WHEN r.offline = 'failed' THEN ro.failure_kind END AS kind, \
+                        CASE WHEN r.offline = 'failed' THEN ro.failure_name END AS name \
+                   FROM recordings r \
+                   LEFT JOIN recording_offline ro USING (recording_index) \
+                  WHERE r.cancelled_at IS NULL AND {NEVER_UPLOADS} \
+             ) GROUP BY reason, kind, name ORDER BY reason, kind, name"
+        ))
+        .bind(resolution_detail::NOT_ON_SERVER)
+        .bind(resolution_detail::UPLOAD_FAILED)
+        .fetch_all(&self.read_pool)
+        .await?;
+
+        let count = |(recordings, bytes): (i64, i64)| RecordingCount {
+            recordings: u64::try_from(recordings).unwrap_or(0),
+            bytes: u64::try_from(bytes).unwrap_or(0),
+        };
+        let reason = |reason: String,
+                      kind: Option<String>,
+                      name: Option<String>,
+                      recordings: i64| ReasonCount {
+            reason,
+            recordings: u64::try_from(recordings).unwrap_or(0),
+            subject: kind
+                .as_deref()
+                .and_then(SubjectKind::parse)
+                .zip(name)
+                .map(|(kind, name)| Subject::new(kind, &name)),
+        };
+        Ok(StatusCounts {
+            waiting: count(waiting),
+            uploading: count(uploading),
+            blocked: limit_reasons(
+                blocked
+                    .into_iter()
+                    .map(|(code, kind, name, recordings)| reason(code, kind, name, recordings))
+                    .collect(),
+            ),
+            failed: limit_reasons(
+                failed
+                    .into_iter()
+                    .map(|(code, kind, name, recordings)| reason(code, kind, name, recordings))
+                    .collect(),
+            ),
+        })
     }
 
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
@@ -2648,6 +2800,240 @@ mod tests {
         let datasets = store.local_datasets_to_resolve(now).await.unwrap();
         assert_eq!(datasets.len(), 1);
         assert_eq!(datasets[0].dataset_id, "local-dataset-1");
+    }
+
+    /// Give `recording_index` one trace of `total` bytes, `uploaded` of them sent.
+    async fn trace_with_bytes(
+        store: &SqliteStateStore,
+        recording_index: i64,
+        trace_id: &str,
+        total: i64,
+        uploaded: i64,
+    ) {
+        store
+            .create_trace(recording_index, trace_id, None, None)
+            .await
+            .unwrap();
+        let upload_status = if uploaded == total {
+            TraceUploadStatus::Uploaded
+        } else {
+            TraceUploadStatus::Uploading
+        };
+        store
+            .update_trace(
+                trace_id,
+                TraceUpdate {
+                    total_bytes: Some(total),
+                    bytes_uploaded: Some(uploaded),
+                    upload_status: Some(upload_status),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_counts_what_each_recording_is_waiting_on() {
+        let (store, _tempdir) = open_store().await;
+        let later = Utc::now().naive_utc() + chrono::Duration::minutes(5);
+        // Started on the server, 600 of its 1000 bytes still to send.
+        let uploading = seed_recording(&store, 0).await;
+        store
+            .mark_recording_start_notified(uploading, "rec-uploading")
+            .await
+            .unwrap();
+        trace_with_bytes(&store, uploading, "t-uploading", 1_000, 400).await;
+        // A trace that failed to upload: the recording will never complete.
+        let upload_failed = seed_recording(&store, 4).await;
+        store
+            .mark_recording_start_notified(upload_failed, "rec-upload-failed")
+            .await
+            .unwrap();
+        trace_with_bytes(&store, upload_failed, "t-upload-ok", 1_000, 400).await;
+        trace_with_bytes(&store, upload_failed, "t-upload-failed", 900, 100).await;
+        store
+            .update_trace(
+                "t-upload-failed",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Failed),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Started, but its only trace failed to write: the same.
+        let write_failed = seed_recording(&store, 2).await;
+        store
+            .mark_recording_start_notified(write_failed, "rec-write-failed")
+            .await
+            .unwrap();
+        store
+            .create_trace(write_failed, "t-write-failed", None, None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-write-failed",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Failed),
+                    bytes_written: Some(50),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        // The backend no longer has it.
+        let not_found = seed_recording(&store, 3).await;
+        store
+            .mark_recording_start_notified(not_found, "rec-not-found")
+            .await
+            .unwrap();
+        trace_with_bytes(&store, not_found, "t-not-found", 800, 0).await;
+        store.mark_recording_not_found(not_found).await.unwrap();
+        // Started and fully sent: nothing left to wait on.
+        let sent = seed_recording(&store, 1).await;
+        store
+            .mark_recording_start_notified(sent, "rec-sent")
+            .await
+            .unwrap();
+        trace_with_bytes(&store, sent, "t-sent", 500, 500).await;
+        // Recorded offline, a trace still being written.
+        let waiting = offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        store
+            .create_trace(waiting, "t-writing", None, None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-writing",
+                TraceUpdate {
+                    bytes_written: Some(300),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Blocked on both its robot and its dataset.
+        let blocked = offline_recording(&store, "local-robot-2", 0, "local-dataset-2").await;
+        trace_with_bytes(&store, blocked, "t-blocked", 200, 0).await;
+        store
+            .hold_local_robot(
+                "local-robot-2",
+                0,
+                Some(resolution_detail::ROBOT_ARCHIVED),
+                later,
+            )
+            .await
+            .unwrap();
+        store
+            .hold_local_dataset(
+                "local-dataset-2",
+                Some(resolution_detail::NAME_TAKEN),
+                later,
+            )
+            .await
+            .unwrap();
+        // Held back for the same reason on its robot and its dataset: counted
+        // once under that reason.
+        offline_recording(&store, "local-robot-5", 0, "local-dataset-5").await;
+        store
+            .hold_local_robot(
+                "local-robot-5",
+                0,
+                Some(resolution_detail::CREDENTIALS),
+                later,
+            )
+            .await
+            .unwrap();
+        store
+            .hold_local_dataset(
+                "local-dataset-5",
+                Some(resolution_detail::CREDENTIALS),
+                later,
+            )
+            .await
+            .unwrap();
+        // Refused for good.
+        let failed = offline_recording(&store, "local-robot-3", 0, "local-dataset-3").await;
+        trace_with_bytes(&store, failed, "t-failed", 700, 0).await;
+        store
+            .fail_local_dataset("local-dataset-3", resolution_detail::SHARED_NOT_ALLOWED)
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+        // Cancelled: on its way to being cleaned up, not to the server.
+        let cancelled = offline_recording(&store, "local-robot-4", 0, "local-dataset-4").await;
+        store
+            .cancel_recording(cancelled, RecordingTimestamp::observed_at(1))
+            .await
+            .unwrap();
+
+        let counts = store.status_counts().await.unwrap();
+
+        assert_eq!(
+            counts,
+            StatusCounts {
+                waiting: RecordingCount {
+                    recordings: 3,
+                    bytes: 500,
+                },
+                uploading: RecordingCount {
+                    recordings: 1,
+                    bytes: 600,
+                },
+                blocked: vec![
+                    reason(resolution_detail::CREDENTIALS, 1),
+                    about(
+                        resolution_detail::NAME_TAKEN,
+                        1,
+                        SubjectKind::Dataset,
+                        "warehouse"
+                    ),
+                    about(
+                        resolution_detail::ROBOT_ARCHIVED,
+                        1,
+                        SubjectKind::Robot,
+                        "arm"
+                    ),
+                ],
+                failed: vec![
+                    reason(resolution_detail::NOT_ON_SERVER, 1),
+                    about(
+                        resolution_detail::SHARED_NOT_ALLOWED,
+                        1,
+                        SubjectKind::Dataset,
+                        "warehouse"
+                    ),
+                    reason(resolution_detail::UPLOAD_FAILED, 2),
+                ],
+            }
+        );
+    }
+
+    fn reason(code: &str, recordings: u64) -> ReasonCount {
+        ReasonCount {
+            reason: code.into(),
+            recordings,
+            subject: None,
+        }
+    }
+
+    fn about(code: &str, recordings: u64, kind: SubjectKind, name: &str) -> ReasonCount {
+        ReasonCount {
+            subject: Some(Subject::new(kind, name)),
+            ..reason(code, recordings)
+        }
+    }
+
+    #[tokio::test]
+    async fn status_counts_nothing_on_an_empty_store() {
+        let (store, _tempdir) = open_store().await;
+
+        assert_eq!(
+            store.status_counts().await.unwrap(),
+            StatusCounts::default()
+        );
     }
 
     #[tokio::test]
