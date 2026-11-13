@@ -586,7 +586,7 @@ class Groot(NeuracoreModel):
         and compute match the model without a done head.
 
         Raises:
-            ValueError: If DONE has no feature dimensions, or if
+            ValueError: If DONE does not contain exactly one flag, or if
                 ``done_use_proprio`` is set without joint or gripper inputs.
         """
         self.done_token_score: nn.Linear | None = None
