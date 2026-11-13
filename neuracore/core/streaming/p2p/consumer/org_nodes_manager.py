@@ -12,8 +12,8 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import Any, TypeAlias
 
+from aiohttp import ClientSession, ClientTimeout
 from neuracore_types import (
-    AvailableRobot,
     AvailableRobotCapacityInit,
     AvailableRobotCapacityUpdate,
     AvailableRobotInstance,
@@ -27,12 +27,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import STREAM_API_URL
 from neuracore.core.exceptions import AuthenticationError
-from neuracore.core.streaming.base_sse_consumer import (
-    BaseSSEConsumer,
-    EventSourceConfig,
-)
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.consumer.client_consumer_stream_manager import (
     ClientConsumerStreamManager,
@@ -41,7 +36,6 @@ from neuracore.core.streaming.p2p.consumer.region_availability_consumer import (
     RegionAvailabilityConsumer,
 )
 from neuracore.core.streaming.p2p.consumer.regional_availability import (
-    LEGACY_SOURCE,
     RegionalAvailability,
     RobotInstanceUnavailableError,
     connect_to_listed_region,
@@ -54,6 +48,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
+from neuracore.core.utils.http_session import retry_connection_failures
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +67,7 @@ InstanceConnectionMap: TypeAlias = dict[
 ]
 
 
-class OrgNodesManager(BaseSSEConsumer):
+class OrgNodesManager:
     """Manages the connections to other nodes in an organization.
 
     Listens to updates in the available nodes to connect to and informs robot
@@ -105,10 +100,16 @@ class OrgNodesManager(BaseSSEConsumer):
             stream_manager_orchestrator: the factory used to create stream managers
 
         """
-        super().__init__(
-            loop=loop,
-            enabled_manager=enabled_manager,
-            background_coroutine_tracker=background_coroutine_tracker,
+        self.loop = loop or get_running_loop()
+        self.enabled_manager = enabled_manager or EnabledManager(True, loop=self.loop)
+        self.enabled_manager.add_listener(EnabledManager.DISABLED, self._on_close)
+        self.client_session = ClientSession(
+            timeout=ClientTimeout(sock_read=None, total=None),
+            loop=self.loop,
+            middlewares=(retry_connection_failures,),
+        )
+        self.background_tracker = (
+            background_coroutine_tracker or BackgroundCoroutineTracker(loop=self.loop)
         )
         self.stream_manager_orchestrator = (
             stream_manager_orchestrator or StreamManagerOrchestrator()
@@ -123,8 +124,7 @@ class OrgNodesManager(BaseSSEConsumer):
 
         self.last_nodes: InstanceStreamMap = defaultdict(dict)
 
-        self.last_update: AvailableRobotCapacityInit | None = None
-        # The legacy list merged with every region's.
+        # The robot lists of every region, merged.
         self.availability = RegionalAvailability(keep_seconds=DROPPED_REGION_KEEP_S)
         self.merged_update: AvailableRobotCapacityInit | None = None
         self.region_consumers: list[RegionAvailabilityConsumer] = []
@@ -151,46 +151,6 @@ class OrgNodesManager(BaseSSEConsumer):
         if cached_manager is self:
             _org_node_managers.pop(self.org_id, None)
 
-    async def get_sse_client_config(self) -> EventSourceConfig:
-        """Used to configure the event client to consume events from the server.
-
-        Returns:
-            the configuration to be used to connect to the client
-        """
-        return EventSourceConfig(
-            url=f"{STREAM_API_URL}/org/{self.org_id}/signalling/available_robots",
-            request_options={
-                "headers": self.auth.get_headers(),
-            },
-        )
-
-    async def on_message(self, message_data: str) -> None:
-        """The main handler for when the stream receives a message.
-
-        Args:
-            message_data: The raw string data of the message
-
-        """
-        availability_data = json.loads(message_data)
-        event_type = RobotAvailabilityEventType(availability_data["type"])
-        if event_type == RobotAvailabilityEventType.INIT:
-            # An init starts a new snapshot, including after an SSE reconnect. Never
-            # merge it with state retained from the previous connection.
-            self.last_update = AvailableRobotCapacityInit.model_validate(
-                availability_data
-            )
-        else:
-            self._apply_availability_update(
-                AvailableRobotCapacityUpdate.model_validate(availability_data)
-            )
-
-        if self.last_update is None:
-            logger.warning("Ignoring robot availability update received before init")
-            return
-
-        self.availability.apply_init(LEGACY_SOURCE, self.last_update)
-        self._publish()
-
     async def _listen_to_regions(self) -> None:
         """Stream every region's robot list, if the organization has regions."""
         delay = REGIONS_RETRY_MIN_S
@@ -199,6 +159,7 @@ class OrgNodesManager(BaseSSEConsumer):
                 regions = await self.stream_manager_orchestrator.region_endpoints()
                 break
             except AuthenticationError:
+                self.close()
                 return
             except Exception:
                 logger.warning("Could not list the signalling regions", exc_info=True)
@@ -208,6 +169,8 @@ class OrgNodesManager(BaseSSEConsumer):
                 return
         if self.enabled_manager.is_disabled():
             return
+        if not regions:
+            logger.warning("The organization has no signalling regions")
         for region in regions:
             self.region_consumers.append(
                 RegionAvailabilityConsumer(
@@ -258,92 +221,6 @@ class OrgNodesManager(BaseSSEConsumer):
                 robot_instance=consumer.robot_instance,
             )
             self.consumers[consumer].current_track_information = track_info
-
-    def _apply_availability_update(self, update: AvailableRobotCapacityUpdate) -> None:
-        """Apply a robot availability delta to the current snapshot."""
-        if self.last_update is None:
-            return
-
-        for track in update.tracks_added:
-            robot = self._get_or_create_robot(track.robot_id)
-            instance = robot.instances.get(track.robot_instance)
-            if instance is None:
-                instance = AvailableRobotInstance(
-                    robot_instance=track.robot_instance,
-                    tracks={},
-                    connections=0,
-                )
-                robot.instances[track.robot_instance] = instance
-
-            tracks = instance.tracks.setdefault(track.stream_id, [])
-            for index, existing_track in enumerate(tracks):
-                if existing_track.id == track.id:
-                    tracks[index] = track
-                    break
-            else:
-                tracks.append(track)
-
-        for removed_track in update.tracks_removed:
-            robot = self._get_robot(removed_track.robot_id)
-            if robot is None:
-                continue
-            instance = robot.instances.get(removed_track.robot_instance)
-            if instance is None:
-                continue
-            tracks = instance.tracks.get(removed_track.stream_id)
-            if tracks is None:
-                continue
-            instance.tracks[removed_track.stream_id] = [
-                track for track in tracks if track.id != removed_track.track_id
-            ]
-
-        for connection_update in update.connection_updates:
-            robot = self._get_robot(connection_update.robot_id)
-            if robot is None:
-                continue
-            instance = robot.instances.get(connection_update.robot_instance)
-            if instance is not None:
-                instance.connections = connection_update.connections
-
-        self._remove_empty_availability_containers()
-
-    def _get_robot(self, robot_id: str) -> AvailableRobot | None:
-        """Return a robot from the current availability snapshot."""
-        if self.last_update is None:
-            return None
-        return next(
-            (robot for robot in self.last_update.robots if robot.robot_id == robot_id),
-            None,
-        )
-
-    def _get_or_create_robot(self, robot_id: str) -> AvailableRobot:
-        """Return a robot from the current snapshot, creating it if needed."""
-        robot = self._get_robot(robot_id)
-        if robot is not None:
-            return robot
-        assert self.last_update is not None
-        robot = AvailableRobot(robot_id=robot_id, instances={})
-        self.last_update.robots.append(robot)
-        return robot
-
-    def _remove_empty_availability_containers(self) -> None:
-        """Prune empty stream, instance, and robot containers from the snapshot."""
-        assert self.last_update is not None
-        for robot in self.last_update.robots:
-            for instance in robot.instances.values():
-                instance.tracks = {
-                    stream_id: tracks
-                    for stream_id, tracks in instance.tracks.items()
-                    if tracks
-                }
-            robot.instances = {
-                instance_id: instance
-                for instance_id, instance in robot.instances.items()
-                if instance.tracks
-            }
-        self.last_update.robots = [
-            robot for robot in self.last_update.robots if robot.instances
-        ]
 
     def _get_last_robot_tracks(
         self, robot_id: str, robot_instance: int
@@ -474,15 +351,12 @@ class OrgNodesManager(BaseSSEConsumer):
         used: list[SignallingEventsConsumer] = []
 
         async def open_connection(owner: str) -> tuple[int, dict[str, Any]]:
-            signalling_consumer = (
-                orchestrator.signalling_consumer
-                if owner == LEGACY_SOURCE
-                else orchestrator.viewer_consumer(owner, connection_request.robot_id)
+            signalling_consumer = orchestrator.viewer_consumer(
+                owner, connection_request.robot_id
             )
             used[:] = [signalling_consumer]
-            if owner != LEGACY_SOURCE:
-                # The robot's first offer would be lost on a stream not open yet.
-                await signalling_consumer.wait_open()
+            # The robot's first offer would be lost on a stream not open yet.
+            await signalling_consumer.wait_open()
             base_url, headers = await signalling_consumer.endpoint()
             request = connection_request.model_copy(
                 update={"from_id": signalling_consumer.local_stream_id}
@@ -633,6 +507,10 @@ class OrgNodesManager(BaseSSEConsumer):
         if not any(other.robot_id == robot_id for other in self.consumers):
             self.stream_manager_orchestrator.close_viewer_consumers(robot_id)
 
+    def close(self) -> None:
+        """Disable the manager, which closes its streams and connections."""
+        self.enabled_manager.disable()
+
     async def close_robot_consumers(self) -> None:
         """Close all active peer-to-peer connections for this org."""
         pass
@@ -643,7 +521,7 @@ class OrgNodesManager(BaseSSEConsumer):
         Disables streaming, closes all P2P connections, stops video tracks,
         and cleans up resources.
         """
-        super()._on_close()
+        self.background_tracker.stop_background_coroutines()
         for region_consumer in self.region_consumers:
             region_consumer.close()
         self.region_consumers.clear()
@@ -653,7 +531,6 @@ class OrgNodesManager(BaseSSEConsumer):
         self.consumers.clear()
         self.connections.clear()
         self.last_nodes.clear()
-        self.last_update = None
         self.merged_update = None
         self._remove_logout_listener()
         if not self.loop.is_closed():

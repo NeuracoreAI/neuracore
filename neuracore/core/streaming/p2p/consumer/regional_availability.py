@@ -4,7 +4,7 @@ Each region lists only the robots registered with it. The client streams the
 list of every region and merges them per stream: a robot instance is the union
 of its streams in every region. When two sources list one stream, the entry
 with the higher stream epoch wins. Equal epochs go to the region whose URL
-sorts first. A regional entry wins over a legacy one, which has no epoch.
+sorts first.
 """
 
 import asyncio
@@ -21,7 +21,6 @@ from neuracore_types import (
     RobotStreamTrack,
 )
 
-LEGACY_SOURCE = "legacy"
 NOT_PRESENT = "not_present"
 CONNECT_TRIES = 3
 CONNECT_WAIT_SECONDS = 5.0
@@ -68,7 +67,7 @@ class RegionalAvailability:
     """Merged robot list of all sources.
 
     A source is a region endpoint (the base URL that ``connect_to_listed_region``
-    connects to), or ``LEGACY_SOURCE``.
+    connects to).
     """
 
     def __init__(
@@ -215,9 +214,7 @@ class RegionalAvailability:
             for key, tracks in own.tracks.items():
                 epoch = own.epochs.get(key[2])
                 current = winners.get(key)
-                if current is None or _rank(source, epoch) > _rank(
-                    current.source, current.epoch
-                ):
+                if current is None or _rank(epoch) > _rank(current.epoch):
                     winners[key] = _Winner(source, tracks, epoch)
         return winners
 
@@ -228,13 +225,13 @@ class RegionalAvailability:
                 event.set()
 
 
-def _rank(source: str, epoch: int | None) -> tuple[bool, int]:
-    """Order entries: regional over legacy, then the higher epoch.
+def _rank(epoch: int | None) -> int:
+    """Order entries by epoch.
 
     Sources are visited in URL order and only a higher rank replaces the
     winner, so equal ranks go to the source that sorts first.
     """
-    return (source != LEGACY_SOURCE, epoch or 0)
+    return epoch or 0
 
 
 async def connect_to_listed_region(
@@ -257,7 +254,7 @@ async def connect_to_listed_region(
         robot_instance: Robot instance to connect to.
         stream_id: Robot stream to connect to.
         open_connection: Opens the connection at a source (a region's base
-            URL, or ``LEGACY_SOURCE``) and returns the status and JSON body.
+            URL) and returns the status and JSON body.
         tries: Most connection attempts.
         wait_seconds: Longest wait for a list update between attempts.
 

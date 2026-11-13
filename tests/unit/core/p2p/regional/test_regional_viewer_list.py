@@ -1,4 +1,4 @@
-"""A Python viewer lists robots from the legacy service and every region."""
+"""A Python viewer lists robots from every region."""
 
 import json
 from collections import defaultdict
@@ -17,7 +17,6 @@ from neuracore.core.streaming.p2p.consumer.region_availability_consumer import (
     RegionAvailabilityConsumer,
 )
 from neuracore.core.streaming.p2p.consumer.regional_availability import (
-    LEGACY_SOURCE,
     RegionalAvailability,
 )
 
@@ -62,7 +61,6 @@ def _init(stream_id: str, epoch: int | None = None) -> str:
 
 def _manager(clock: Clock) -> OrgNodesManager:
     manager = OrgNodesManager.__new__(OrgNodesManager)
-    manager.last_update = None
     manager.last_nodes = defaultdict(dict)
     manager.consumers = {}
     manager.stream_manager_orchestrator = MagicMock(
@@ -85,22 +83,9 @@ def _listed(manager: OrgNodesManager) -> list[str]:
     return list(nodes[(ROBOT_ID, 0)])
 
 
-@pytest.mark.asyncio
-async def test_a_regional_stream_is_listed_over_its_legacy_entry() -> None:
-    manager = _manager(Clock())
-
-    await manager.on_message(_init("robot-stream"))
-    manager._on_region_event(REGION, _init("robot-stream", epoch=5))
-
-    assert _listed(manager) == ["robot-stream"]
-    assert manager.availability.owner_of(ROBOT_ID, 0, "robot-stream") == REGION
-
-
-@pytest.mark.asyncio
-async def test_a_dropped_region_falls_back_to_legacy_after_the_keep_time() -> None:
+def test_a_dropped_region_is_unlisted_after_the_keep_time() -> None:
     clock = Clock()
     manager = _manager(clock)
-    await manager.on_message(_init("robot-stream"))
     manager._on_region_event(REGION, _init("robot-stream", epoch=5))
 
     def owner() -> str | None:
@@ -115,8 +100,8 @@ async def test_a_dropped_region_falls_back_to_legacy_after_the_keep_time() -> No
     republish()
 
     assert delay > DROPPED_REGION_KEEP_S
-    assert _listed(manager) == ["robot-stream"]
-    assert owner() == LEGACY_SOURCE
+    assert _listed(manager) == []
+    assert owner() is None
 
 
 @pytest.mark.asyncio
@@ -141,6 +126,20 @@ async def test_each_region_gets_a_list_stream() -> None:
     assert consumer_class.call_args.kwargs["session"] is (
         manager.stream_manager_orchestrator.org_session
     )
+
+
+@pytest.mark.asyncio
+async def test_an_organization_without_regions_logs_a_warning(caplog: Any) -> None:
+    manager = _manager(Clock())
+
+    async def regions() -> list[str]:
+        return []
+
+    manager.stream_manager_orchestrator.region_endpoints = regions
+    await manager._listen_to_regions()
+
+    assert "The organization has no signalling regions" in caplog.text
+    assert manager.region_consumers == []
 
 
 @pytest.mark.asyncio
@@ -180,10 +179,9 @@ async def test_no_region_streams_when_the_api_key_is_refused() -> None:
     consumer_class.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_a_closed_manager_publishes_nothing() -> None:
+def test_a_closed_manager_publishes_nothing() -> None:
     manager = _manager(Clock())
-    await manager.on_message(_init("legacy-stream"))
+    manager._on_region_event(REGION, _init("first-stream", epoch=5))
     manager._apply_stream_changes.reset_mock()
     manager.enabled_manager.is_disabled.return_value = True
 
@@ -198,7 +196,6 @@ def test_closing_closes_the_region_streams() -> None:
     manager.region_consumers = [region_consumer]
     manager.connections = defaultdict(dict)
     manager.background_tracker = MagicMock()
-    manager.signalling_stream_future = MagicMock()
     manager.auth = MagicMock(listeners=MagicMock(return_value=[]))
     manager._logout_listener = MagicMock()
     manager.loop = MagicMock(is_closed=MagicMock(return_value=True))

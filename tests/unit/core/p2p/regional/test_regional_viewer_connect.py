@@ -29,7 +29,6 @@ from neuracore.core.streaming.p2p.consumer.consumer_connection import (
 )
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import OrgNodesManager
 from neuracore.core.streaming.p2p.consumer.regional_availability import (
-    LEGACY_SOURCE,
     RegionalAvailability,
 )
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
@@ -131,7 +130,6 @@ def _manager(session: Answers, owners: list[Any]) -> tuple[OrgNodesManager, Any]
 
     manager.availability.wait_for_update = wait_for_update
     orchestrator = MagicMock()
-    orchestrator.signalling_consumer = FakeStream("legacy")
     viewers: dict[str, FakeStream] = {}
     orchestrator.viewer_consumer = lambda region, robot_id: viewers.setdefault(
         region, FakeStream(region.split("//")[1].split(".")[0])
@@ -148,21 +146,6 @@ def _request() -> OpenConnectionRequest:
         robot_instance=0,
         video_format=VideoFormat.NEURACORE_CUSTOM,
     )
-
-
-@pytest.mark.asyncio
-async def test_a_legacy_robot_is_connected_through_legacy() -> None:
-    session = Answers((200, _open_message("legacy-stream")))
-    manager, _ = _manager(session, [LEGACY_SOURCE])
-
-    await manager._create_new_connection(1, MagicMock(), _request())
-
-    legacy = manager.stream_manager_orchestrator.signalling_consumer
-    ((url, body, headers),) = session.posts
-    assert url == f"{legacy.base_url}/connection?signature=temp"
-    assert body["from_id"] == legacy.local_stream_id
-    assert headers == {"Authorization": legacy.local_stream_id}
-    assert len(legacy.created) == 1
 
 
 @pytest.mark.asyncio
