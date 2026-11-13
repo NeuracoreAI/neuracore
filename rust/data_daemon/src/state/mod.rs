@@ -13,9 +13,9 @@ pub mod trace_event_database_writer;
 pub use events::{ConnectionState, DaemonEvent, EventBus};
 #[allow(unused_imports)]
 pub use schema::{
-    LocalDatasetRow, LocalIdStatus, LocalRobotRow, OfflineState, ProgressReportStatus,
-    RecordingOfflineRow, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
-    TraceUploadStatus, TraceWriteStatus,
+    resolution_detail, LocalDatasetRow, LocalIdStatus, LocalRobotRow, OfflineState,
+    ProgressReportStatus, RecordingOfflineRow, RecordingRow, TraceErrorCode, TraceRecord,
+    TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
 };
 #[allow(unused_imports)]
 pub use store::{

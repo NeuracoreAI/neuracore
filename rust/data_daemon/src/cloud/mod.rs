@@ -26,6 +26,7 @@ pub mod watchers;
 
 #[allow(unused_imports)]
 pub use cloud_files::{cloud_file_list, content_type_for_filename};
+pub use coordinators::offline_resolver::{spawn_offline_resolver, OfflineResolverHandle};
 pub use coordinators::progress::{spawn_progress_reporter, ProgressReporterHandle};
 pub use coordinators::registration::{spawn_registration, RegistrationHandle};
 pub use coordinators::status::{spawn_status_updater, StatusUpdate, StatusUpdaterHandle};

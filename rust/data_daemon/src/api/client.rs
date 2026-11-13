@@ -19,8 +19,8 @@ use tokio::time::sleep;
 
 use crate::api::auth::{AuthError, AuthProvider};
 use crate::api::models::{
-    BatchRegisterResponse, RecordingStartResponse, RegisterTraceRequest,
-    ResumableUploadUrlResponse, TraceStatusUpdate,
+    BatchRegisterResponse, DatasetSummary, RecordingStartResponse, RegisterTraceRequest,
+    ResumableUploadUrlResponse, RobotRegistrationResponse, TraceStatusUpdate,
 };
 
 /// Retry policy constants — match `const.py::BACKEND_API_*`.
@@ -104,6 +104,12 @@ impl ApiClientError {
     /// recording from a saved or reaped one, or from an unrelated 404.
     pub fn is_recording_cancelled(&self) -> bool {
         self.error_type(StatusCode::GONE).as_deref() == Some("RECORDING_CANCELLED")
+    }
+
+    /// True when the robot upsert was refused because the robot is archived
+    /// (409 `ROBOT_ARCHIVED`). Unarchiving it on the dashboard lifts this.
+    pub fn is_robot_archived(&self) -> bool {
+        self.error_type(StatusCode::CONFLICT).as_deref() == Some("ROBOT_ARCHIVED")
     }
 
     /// True when a cancel lost the race with upload completion (409
@@ -437,6 +443,98 @@ impl ApiClient {
         Ok(parsed.id)
     }
 
+    /// `POST /org/{org}/robots?is_shared=`: register a robot instance.
+    ///
+    /// An upsert by name: it returns the robot of that name, creating it if
+    /// there is none, and registers `instance` on it. The same call
+    /// `nc.connect_robot` makes online.
+    pub async fn robot_upsert(
+        &self,
+        org_id: &str,
+        name: &str,
+        instance: i64,
+        shared: bool,
+    ) -> Result<RobotRegistrationResponse, ApiClientError> {
+        let path = format!("/org/{org_id}/robots");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            name: &'a str,
+            instance: i64,
+        }
+        let body = Body { name, instance };
+        let response = self
+            .send_with_retry(Method::POST, &path, |builder| {
+                builder.query(&[("is_shared", shared)]).json(&body)
+            })
+            .await?;
+        let bytes = response.bytes().await?;
+        serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)
+    }
+
+    /// `GET /org/{org}/datasets/search/by-name?name=`: the dataset of that
+    /// name in the org, or `None` when there is none.
+    pub async fn dataset_by_name(
+        &self,
+        org_id: &str,
+        name: &str,
+    ) -> Result<Option<DatasetSummary>, ApiClientError> {
+        let path = format!("/org/{org_id}/datasets/search/by-name");
+        let response = match self
+            .send_with_retry(Method::GET, &path, |builder| {
+                builder.query(&[("name", name)])
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let bytes = response.bytes().await?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(ApiClientError::Decode)
+    }
+
+    /// `POST /org/{org}/datasets`: create a dataset, or `None` when one of
+    /// that name already exists (409).
+    pub async fn dataset_create(
+        &self,
+        org_id: &str,
+        name: &str,
+        description: Option<&str>,
+        tags: &[String],
+        shared: bool,
+    ) -> Result<Option<DatasetSummary>, ApiClientError> {
+        let path = format!("/org/{org_id}/datasets");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            name: &'a str,
+            description: Option<&'a str>,
+            tags: &'a [String],
+            is_shared: bool,
+        }
+        let body = Body {
+            name,
+            description,
+            tags,
+            is_shared: shared,
+        };
+        let response = match self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await
+        {
+            Ok(response) => response,
+            Err(ApiClientError::Status { status, .. }) if status == StatusCode::CONFLICT => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        let bytes = response.bytes().await?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(ApiClientError::Decode)
+    }
+
     /// `PUT /org/{org}/recording/{rec}/expected-trace-count`.
     ///
     /// Tells the backend how many traces to expect for this recording so it
@@ -606,7 +704,7 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::encoding::video_encoder::LossyVideoCodec;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn options(base_url: String) -> ApiClientOptions {
@@ -651,6 +749,175 @@ mod tests {
 
         let client = client(&server);
         assert!(!client.health_check().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn robot_upsert_sends_the_name_instance_and_namespace() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/robots"))
+            .and(query_param("is_shared", "true"))
+            .and(body_json(serde_json::json!({"name": "arm", "instance": 2})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "robot_id": "robot-9",
+                "has_urdf": false,
+                "archived": null,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let registered = client(&server)
+            .robot_upsert("org-1", "arm", 2, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            registered,
+            RobotRegistrationResponse {
+                robot_id: "robot-9".into(),
+                has_urdf: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_upsert_surfaces_a_403() {
+        // The role or org check: the user is not allowed to connect robots here.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/robots"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .robot_upsert("org-1", "arm", 0, false)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_forbidden());
+    }
+
+    #[tokio::test]
+    async fn dataset_by_name_returns_the_dataset() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/org-1/datasets/search/by-name"))
+            .and(query_param("name", "pick & place"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "dataset-3",
+                "name": "pick & place",
+                "is_shared": false,
+                "size_bytes": 0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dataset = client(&server)
+            .dataset_by_name("org-1", "pick & place")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dataset,
+            Some(DatasetSummary {
+                id: "dataset-3".into(),
+                is_shared: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dataset_by_name_is_none_when_there_is_no_such_dataset() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/org-1/datasets/search/by-name"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let dataset = client(&server)
+            .dataset_by_name("org-1", "warehouse")
+            .await
+            .unwrap();
+
+        assert_eq!(dataset, None);
+    }
+
+    #[tokio::test]
+    async fn dataset_create_sends_the_details() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/datasets"))
+            .and(body_json(serde_json::json!({
+                "name": "warehouse",
+                "description": "pick and place",
+                "tags": ["day-1", "shelf-a"],
+                "is_shared": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "dataset-4",
+                "name": "warehouse",
+                "is_shared": false,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dataset = client(&server)
+            .dataset_create(
+                "org-1",
+                "warehouse",
+                Some("pick and place"),
+                &["day-1".to_string(), "shelf-a".to_string()],
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dataset,
+            Some(DatasetSummary {
+                id: "dataset-4".into(),
+                is_shared: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dataset_create_is_none_when_the_dataset_already_exists() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/datasets"))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(&server)
+            .await;
+
+        let dataset = client(&server)
+            .dataset_create("org-1", "warehouse", None, &[], false)
+            .await
+            .unwrap();
+
+        assert_eq!(dataset, None);
+    }
+
+    #[tokio::test]
+    async fn dataset_create_surfaces_a_forbidden_shared_dataset() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/datasets"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .dataset_create("org-1", "warehouse", None, &[], true)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_forbidden());
     }
 
     #[tokio::test]

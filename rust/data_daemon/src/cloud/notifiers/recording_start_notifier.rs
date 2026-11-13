@@ -24,6 +24,11 @@
 //! pending one for the source — so recordings that follow each other with no
 //! gap stay separate no matter what order their stop and start notifications
 //! land in.
+//!
+//! A recording started offline holds local robot or dataset ids. It is not
+//! started here until the offline resolver has the backend's ids for it
+//! ([`DaemonEvent::RecordingOfflineResolved`]); the start then carries those
+//! ids.
 
 use std::sync::Arc;
 
@@ -35,7 +40,8 @@ use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::{
-    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
+    DaemonEvent, EventBus, OfflineState, RecordingRow, SqliteStateStore, StateStore,
+    StateStoreError,
 };
 
 /// Notifier that POSTs `/recording/start` and persists the cloud `recording_id`
@@ -52,7 +58,8 @@ impl RecordingNotifier for StartNotifier {
 
     fn triggered_by(&self, event: &DaemonEvent) -> Option<i64> {
         match event {
-            DaemonEvent::RecordingStarted { recording_index } => Some(*recording_index),
+            DaemonEvent::RecordingStarted { recording_index }
+            | DaemonEvent::RecordingOfflineResolved { recording_index } => Some(*recording_index),
             _ => None,
         }
     }
@@ -166,6 +173,13 @@ async fn notify_backend(
         );
         return;
     };
+    match row.offline {
+        None | Some(OfflineState::Resolved) => {}
+        // The resolver wakes this notifier once it has the backend's ids.
+        Some(OfflineState::Resolving) => return,
+        // A robot or dataset was refused: the recording never starts.
+        Some(OfflineState::Failed) => return,
+    }
     let Some(robot_id) = row.robot_id else {
         tracing::warn!(
             recording_index,
@@ -187,6 +201,22 @@ async fn notify_backend(
             "recording has no start_timestamp_us at start time; skipping backend notify",
         );
         return;
+    };
+    // A recording started offline keeps its local ids; the backend's are
+    // kept beside them.
+    let (robot_id, dataset_id) = match row.offline {
+        Some(OfflineState::Resolved) => match store.get_recording_offline(recording_index).await {
+            Ok(Some(offline)) => (
+                offline.cloud_robot_id.unwrap_or(robot_id),
+                offline.cloud_dataset_id.unwrap_or(dataset_id),
+            ),
+            Ok(None) => (robot_id, dataset_id),
+            Err(error) => {
+                tracing::warn!(%error, recording_index, "failed to read the backend ids");
+                return;
+            }
+        },
+        _ => (robot_id, dataset_id),
     };
     // The producer captured this as the recording window's real lower bound;
     // the backend derives the reported duration from it, so a late notify
@@ -250,7 +280,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::api::auth::StaticAuthProvider;
@@ -312,6 +342,179 @@ mod tests {
 
     /// A recording cancelled before its start POST goes out is settled without
     /// a POST, so the reaper can reclaim it.
+    /// A recording started offline with local robot `local-robot-1`
+    /// (instance 7) and local dataset `local-dataset-1`.
+    async fn seed_offline_recording(store: &SqliteStateStore) -> i64 {
+        store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(7),
+                dataset_id: Some("local-dataset-1"),
+                start: RecordingTimestamp {
+                    publish_timestamp_ns: 1_700_000_000_000_000_000,
+                    timestamp_us: Some(1_600_000_000_123_457),
+                },
+                local_robot: Some(&data_daemon_shared::LocalRobot {
+                    name: "arm".into(),
+                    shared: false,
+                    overwrite_urdf: false,
+                }),
+                local_dataset: Some(&data_daemon_shared::LocalDataset {
+                    name: "warehouse".into(),
+                    shared: false,
+                    description: None,
+                    tags: Vec::new(),
+                }),
+            })
+            .await
+            .expect("create recording")
+            .recording_index
+    }
+
+    /// Run the start notify for one recording against `server`.
+    async fn notify_once(server: &MockServer, store: &SqliteStateStore, recording_index: i64) {
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        notify_backend(
+            &Arc::new(store.clone()),
+            &client,
+            &EventBus::new(),
+            &org_rx(Some("org-1")),
+            recording_index,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_recording_still_resolving_is_not_started() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-rec-1").expect(0).mount(&server).await;
+        let (store, _dir) = open_store().await;
+        let index = seed_offline_recording(&store).await;
+
+        notify_once(&server, &store, index).await;
+
+        let row = store.get_recording(index).await.unwrap().unwrap();
+        assert_eq!(row.recording_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_resolved_recording_starts_with_the_backend_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/start"))
+            .and(body_json(serde_json::json!({
+                "robot_id": "cloud-robot-9",
+                "instance": 7,
+                "dataset_id": "cloud-dataset-4",
+                "start_time": 1_600_000_000.123_457,
+                "start_timestamp_us": 1_600_000_000_123_457_i64,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "cloud-rec-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (store, _dir) = open_store().await;
+        let index = seed_offline_recording(&store).await;
+        store
+            .resolve_local_robot("local-robot-1", 7, "cloud-robot-9")
+            .await
+            .unwrap();
+        store
+            .resolve_local_dataset("local-dataset-1", "cloud-dataset-4")
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+
+        notify_once(&server, &store, index).await;
+
+        let row = store.get_recording(index).await.unwrap().unwrap();
+        assert_eq!(row.recording_id.as_deref(), Some("cloud-rec-1"));
+        assert_eq!(row.robot_id.as_deref(), Some("local-robot-1"));
+    }
+
+    #[tokio::test]
+    async fn a_recording_whose_robot_was_refused_is_never_started() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-rec-1").expect(0).mount(&server).await;
+        let (store, _dir) = open_store().await;
+        let index = seed_offline_recording(&store).await;
+        store
+            .fail_local_robot("local-robot-1", "rejected")
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+
+        notify_once(&server, &store, index).await;
+
+        let row = store.get_recording(index).await.unwrap().unwrap();
+        assert_eq!(row.offline, Some(OfflineState::Failed));
+        assert_eq!(row.recording_id, None);
+    }
+
+    #[tokio::test]
+    async fn the_resolver_wakes_the_notifier() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-rec-1").expect(1).mount(&server).await;
+        let (store, _dir) = open_store().await;
+        let index = seed_offline_recording(&store).await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+        // The startup sweep leaves it alone while it resolves.
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            store
+                .get_recording(index)
+                .await
+                .unwrap()
+                .unwrap()
+                .recording_id,
+            None
+        );
+
+        store
+            .resolve_local_robot("local-robot-1", 7, "cloud-robot-9")
+            .await
+            .unwrap();
+        store
+            .resolve_local_dataset("local-dataset-1", "cloud-dataset-4")
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+        bus.publish(DaemonEvent::RecordingOfflineResolved {
+            recording_index: index,
+        });
+
+        timeout(Duration::from_secs(3), async {
+            while store
+                .get_recording(index)
+                .await
+                .unwrap()
+                .unwrap()
+                .recording_id
+                .is_none()
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the start is posted once resolved");
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
     #[tokio::test]
     async fn settles_a_recording_cancelled_before_its_start_was_posted() {
         let server = MockServer::start().await;

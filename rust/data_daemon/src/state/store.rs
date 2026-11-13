@@ -8,17 +8,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use data_daemon_shared::{LocalDataset, LocalRobot, NANOSECONDS_PER_MICROSECOND};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
 
-#[cfg(test)]
-use crate::state::schema::{LocalDatasetRow, LocalRobotRow};
 use crate::state::schema::{
-    LocalIdStatus, OfflineState, ProgressReportStatus, RecordingOfflineRow, RecordingRow,
-    TraceErrorCode, TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
+    LocalDatasetRow, LocalIdStatus, LocalRobotRow, OfflineState, ProgressReportStatus,
+    RecordingOfflineRow, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
+    TraceUploadStatus, TraceWriteStatus,
 };
 
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
@@ -110,6 +109,15 @@ pub struct NewRecording<'a> {
     pub local_dataset: Option<&'a LocalDataset>,
 }
 
+/// The recordings [`StateStore::settle_offline_recordings`] moved on.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SettledRecordings {
+    /// Now `resolved`: they may start on the backend.
+    pub resolved: Vec<i64>,
+    /// Now `failed`: a robot or dataset they used was refused.
+    pub failed: Vec<i64>,
+}
+
 /// Persistence interface for daemon state.
 ///
 /// Covers the operations the dispatcher, per-trace actors, and cloud
@@ -162,7 +170,9 @@ pub trait StateStore: Send + Sync {
     /// Look up a recording that has `recording_id` as its cloud id, or that
     /// has no cloud id yet and started within `tolerance_us` of
     /// `start_timestamp_us` for this source. A stopped or cancelled recording
-    /// counts: its start POST can still be in flight.
+    /// counts: its start POST can still be in flight. `robot_id` may be the
+    /// backend's id for a robot connected offline: the backend's echo of that
+    /// start names it, while the recording keeps the local one.
     async fn recording_index_for_known_recording(
         &self,
         recording_id: &str,
@@ -445,9 +455,79 @@ pub trait StateStore: Send + Sync {
     /// have been removed. Returns the number of trace rows deleted.
     async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError>;
 
+    /// The robot instances connected offline that a recording still waits
+    /// on and that may be asked about at `now`: `pending`, with no wait
+    /// running, and used by a `resolving` recording that is not cancelled.
+    async fn local_robots_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<LocalRobotRow>, StateStoreError>;
+
+    /// The datasets selected offline that a recording still waits on and that
+    /// may be asked about at `now`, as [`Self::local_robots_to_resolve`].
+    async fn local_datasets_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<LocalDatasetRow>, StateStoreError>;
+
+    /// Record the backend's id for a robot instance connected offline: it is
+    /// `done`, and its reason and wait are cleared.
+    async fn resolve_local_robot(
+        &self,
+        robot_id: &str,
+        instance: i64,
+        cloud_robot_id: &str,
+    ) -> Result<(), StateStoreError>;
+
+    /// Mark every `pending` instance of a robot connected offline `failed`:
+    /// the backend refused to register it. `detail` says why (see
+    /// `resolution_detail`).
+    async fn fail_local_robot(&self, robot_id: &str, detail: &str) -> Result<(), StateStoreError>;
+
+    /// Keep a robot instance `pending` until `until`. `detail`, when given,
+    /// records why it is stuck; `None` keeps any reason recorded earlier, as
+    /// an outage does not show the user fixed it.
+    async fn hold_local_robot(
+        &self,
+        robot_id: &str,
+        instance: i64,
+        detail: Option<&str>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError>;
+
+    /// [`Self::resolve_local_robot`] for a dataset selected offline.
+    async fn resolve_local_dataset(
+        &self,
+        dataset_id: &str,
+        cloud_dataset_id: &str,
+    ) -> Result<(), StateStoreError>;
+
+    /// [`Self::fail_local_robot`] for a dataset selected offline.
+    async fn fail_local_dataset(
+        &self,
+        dataset_id: &str,
+        detail: &str,
+    ) -> Result<(), StateStoreError>;
+
+    /// [`Self::hold_local_robot`] for a dataset selected offline.
+    async fn hold_local_dataset(
+        &self,
+        dataset_id: &str,
+        detail: Option<&str>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError>;
+
+    /// Move every `resolving` recording on whose robots and datasets the
+    /// backend has answered for good: to `failed`, with the refused one's
+    /// detail, kind and name on its `recording_offline` row, when one was
+    /// refused; or to
+    /// `resolved` with the backend's ids copied onto that row when all are
+    /// `done`. Then forget the robots and datasets no `resolving` recording
+    /// that is not cancelled uses any more. One transaction.
+    async fn settle_offline_recordings(&self) -> Result<SettledRecordings, StateStoreError>;
+
     /// What a recording started offline needs before it can start on the
     /// backend, or `None` for a recording started online.
-    #[allow(dead_code)] // Read by the offline resolver.
     async fn get_recording_offline(
         &self,
         recording_index: i64,
@@ -982,7 +1062,11 @@ impl StateStore for SqliteStateStore {
             "SELECT recording_index FROM recordings \
               WHERE recording_id = ?1 \
                  OR (recording_id IS NULL \
-                     AND robot_id = ?2 AND robot_instance = ?3 \
+                     AND (robot_id = ?2 \
+                          OR recording_index IN (SELECT recording_index \
+                                                   FROM recording_offline \
+                                                  WHERE cloud_robot_id = ?2)) \
+                     AND robot_instance = ?3 \
                      AND ABS(start_timestamp_us - ?4) <= ?5) \
               LIMIT 1",
         )
@@ -1831,6 +1915,270 @@ impl StateStore for SqliteStateStore {
         Ok(traces_deleted)
     }
 
+    async fn local_robots_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<LocalRobotRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT lr.* FROM local_robots lr \
+              WHERE lr.status = ?1 \
+                AND (lr.next_attempt_at IS NULL OR lr.next_attempt_at <= ?2) \
+                AND EXISTS (SELECT 1 FROM recordings r \
+                             WHERE r.offline = ?3 AND r.cancelled_at IS NULL \
+                               AND r.robot_id = lr.robot_id \
+                               AND COALESCE(r.robot_instance, 0) = lr.instance) \
+           ORDER BY lr.robot_id, lr.instance",
+        )
+        .bind(LocalIdStatus::Pending.as_str())
+        .bind(now)
+        .bind(OfflineState::Resolving.as_str())
+        .fetch_all(&self.read_pool)
+        .await?;
+        rows.iter()
+            .map(LocalRobotRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn local_datasets_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<LocalDatasetRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT ld.* FROM local_datasets ld \
+              WHERE ld.status = ?1 \
+                AND (ld.next_attempt_at IS NULL OR ld.next_attempt_at <= ?2) \
+                AND EXISTS (SELECT 1 FROM recordings r \
+                             WHERE r.offline = ?3 AND r.cancelled_at IS NULL \
+                               AND r.dataset_id = ld.dataset_id) \
+           ORDER BY ld.dataset_id",
+        )
+        .bind(LocalIdStatus::Pending.as_str())
+        .bind(now)
+        .bind(OfflineState::Resolving.as_str())
+        .fetch_all(&self.read_pool)
+        .await?;
+        rows.iter()
+            .map(LocalDatasetRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn resolve_local_robot(
+        &self,
+        robot_id: &str,
+        instance: i64,
+        cloud_robot_id: &str,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE local_robots \
+                SET cloud_robot_id = ?3, status = ?4, detail = NULL, next_attempt_at = NULL \
+              WHERE robot_id = ?1 AND instance = ?2",
+        )
+        .bind(robot_id)
+        .bind(instance)
+        .bind(cloud_robot_id)
+        .bind(LocalIdStatus::Done.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn fail_local_robot(&self, robot_id: &str, detail: &str) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE local_robots SET status = ?2, detail = ?3, next_attempt_at = NULL \
+              WHERE robot_id = ?1 AND status = ?4",
+        )
+        .bind(robot_id)
+        .bind(LocalIdStatus::Failed.as_str())
+        .bind(detail)
+        .bind(LocalIdStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn hold_local_robot(
+        &self,
+        robot_id: &str,
+        instance: i64,
+        detail: Option<&str>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE local_robots SET next_attempt_at = ?3, detail = COALESCE(?4, detail) \
+              WHERE robot_id = ?1 AND instance = ?2 AND status = ?5",
+        )
+        .bind(robot_id)
+        .bind(instance)
+        .bind(until)
+        .bind(detail)
+        .bind(LocalIdStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn resolve_local_dataset(
+        &self,
+        dataset_id: &str,
+        cloud_dataset_id: &str,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE local_datasets \
+                SET cloud_dataset_id = ?2, status = ?3, detail = NULL, next_attempt_at = NULL \
+              WHERE dataset_id = ?1",
+        )
+        .bind(dataset_id)
+        .bind(cloud_dataset_id)
+        .bind(LocalIdStatus::Done.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn fail_local_dataset(
+        &self,
+        dataset_id: &str,
+        detail: &str,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE local_datasets SET status = ?2, detail = ?3, next_attempt_at = NULL \
+              WHERE dataset_id = ?1 AND status = ?4",
+        )
+        .bind(dataset_id)
+        .bind(LocalIdStatus::Failed.as_str())
+        .bind(detail)
+        .bind(LocalIdStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn hold_local_dataset(
+        &self,
+        dataset_id: &str,
+        detail: Option<&str>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE local_datasets SET next_attempt_at = ?2, detail = COALESCE(?3, detail) \
+              WHERE dataset_id = ?1 AND status = ?4",
+        )
+        .bind(dataset_id)
+        .bind(until)
+        .bind(detail)
+        .bind(LocalIdStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn settle_offline_recordings(&self) -> Result<SettledRecordings, StateStoreError> {
+        // Each resolving recording beside the robot and dataset rows it uses.
+        // An id that was already the backend's has none: a recording keeps
+        // the rows of its local ids for as long as it is resolving.
+        const PIECES: &str = "FROM recordings r \
+              LEFT JOIN local_robots lr ON lr.robot_id = r.robot_id \
+                   AND lr.instance = COALESCE(r.robot_instance, 0) \
+              LEFT JOIN local_datasets ld ON ld.dataset_id = r.dataset_id \
+             WHERE r.offline = ?1";
+        let mut tx = self.write_pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        // What was refused, and why: the robot first, as it is resolved first.
+        let failed: Vec<(i64, Option<String>, String, Option<String>)> = sqlx::query_as(&format!(
+            "SELECT r.recording_index, \
+                    CASE WHEN lr.status = ?2 THEN lr.detail ELSE ld.detail END, \
+                    CASE WHEN lr.status = ?2 THEN 'robot' ELSE 'dataset' END, \
+                    CASE WHEN lr.status = ?2 THEN lr.name ELSE ld.name END \
+               {PIECES} \
+               AND (lr.status = ?2 OR ld.status = ?2) \
+             ORDER BY r.recording_index"
+        ))
+        .bind(OfflineState::Resolving.as_str())
+        .bind(LocalIdStatus::Failed.as_str())
+        .fetch_all(&mut *tx)
+        .await?;
+        for (recording_index, failure, kind, name) in &failed {
+            sqlx::query(
+                "UPDATE recording_offline \
+                    SET failure = ?2, failure_kind = ?3, failure_name = ?4 \
+                  WHERE recording_index = ?1",
+            )
+            .bind(recording_index)
+            .bind(failure)
+            .bind(kind)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE recordings SET offline = ?2, last_updated = ?3 WHERE recording_index = ?1",
+            )
+            .bind(recording_index)
+            .bind(OfflineState::Failed.as_str())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let resolved: Vec<(i64, Option<String>, Option<String>)> = sqlx::query_as(&format!(
+            "SELECT r.recording_index, lr.cloud_robot_id, ld.cloud_dataset_id {PIECES} \
+               AND (lr.robot_id IS NULL OR lr.status = ?2) \
+               AND (ld.dataset_id IS NULL OR ld.status = ?2) \
+             ORDER BY r.recording_index"
+        ))
+        .bind(OfflineState::Resolving.as_str())
+        .bind(LocalIdStatus::Done.as_str())
+        .fetch_all(&mut *tx)
+        .await?;
+        for (recording_index, cloud_robot_id, cloud_dataset_id) in &resolved {
+            sqlx::query(
+                "UPDATE recording_offline SET cloud_robot_id = ?2, cloud_dataset_id = ?3 \
+                  WHERE recording_index = ?1",
+            )
+            .bind(recording_index)
+            .bind(cloud_robot_id)
+            .bind(cloud_dataset_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE recordings SET offline = ?2, last_updated = ?3 WHERE recording_index = ?1",
+            )
+            .bind(recording_index)
+            .bind(OfflineState::Resolved.as_str())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Forget the robots and datasets no recording waits on any more. The
+        // next recording that uses one asks the backend afresh, so one
+        // deleted or archived on the server since, or a refusal fixed since,
+        // is not held against it; settled recordings keep what they got.
+        sqlx::query(
+            "DELETE FROM local_robots WHERE NOT EXISTS ( \
+                 SELECT 1 FROM recordings r \
+                  WHERE r.offline = ?1 AND r.cancelled_at IS NULL \
+                    AND r.robot_id = local_robots.robot_id \
+                    AND COALESCE(r.robot_instance, 0) = local_robots.instance)",
+        )
+        .bind(OfflineState::Resolving.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM local_datasets WHERE NOT EXISTS ( \
+                 SELECT 1 FROM recordings r \
+                  WHERE r.offline = ?1 AND r.cancelled_at IS NULL \
+                    AND r.dataset_id = local_datasets.dataset_id)",
+        )
+        .bind(OfflineState::Resolving.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(SettledRecordings {
+            resolved: resolved.into_iter().map(|(index, _, _)| index).collect(),
+            failed: failed.into_iter().map(|(index, ..)| index).collect(),
+        })
+    }
+
     async fn get_recording_offline(
         &self,
         recording_index: i64,
@@ -1878,6 +2226,7 @@ impl SqliteStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::schema::resolution_detail;
     use tempfile::TempDir;
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -2208,6 +2557,322 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    /// A recording started offline with instance `instance` of local robot
+    /// `robot_id` and local dataset `dataset_id`.
+    async fn offline_recording(
+        store: &SqliteStateStore,
+        robot_id: &str,
+        instance: i64,
+        dataset_id: &str,
+    ) -> i64 {
+        store
+            .create_recording(NewRecording {
+                robot_id: Some(robot_id),
+                robot_instance: Some(instance),
+                dataset_id: Some(dataset_id),
+                local_robot: Some(&arm(false)),
+                local_dataset: Some(&warehouse()),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index
+    }
+
+    fn robot_ids(robots: &[LocalRobotRow]) -> Vec<(&str, i64)> {
+        robots
+            .iter()
+            .map(|robot| (robot.robot_id.as_str(), robot.instance))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_robots_and_datasets_a_live_recording_waits_on_are_resolved() {
+        let (store, _tempdir) = open_store().await;
+        let now = Utc::now().naive_utc();
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        let cancelled = offline_recording(&store, "local-robot-2", 0, "local-dataset-2").await;
+        store
+            .cancel_recording(cancelled, RecordingTimestamp::observed_at(5_000_000_000))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            robot_ids(&store.local_robots_to_resolve(now).await.unwrap()),
+            vec![("local-robot-1", 0)]
+        );
+        let datasets = store.local_datasets_to_resolve(now).await.unwrap();
+        assert_eq!(datasets.len(), 1);
+        assert_eq!(datasets[0].dataset_id, "local-dataset-1");
+    }
+
+    #[tokio::test]
+    async fn a_held_robot_waits_and_keeps_its_reason_through_an_outage() {
+        let (store, _tempdir) = open_store().await;
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        let now = Utc::now().naive_utc();
+        let later = now + chrono::Duration::minutes(5);
+
+        store
+            .hold_local_robot(
+                "local-robot-1",
+                0,
+                Some(resolution_detail::ROBOT_ARCHIVED),
+                later,
+            )
+            .await
+            .unwrap();
+        assert!(store.local_robots_to_resolve(now).await.unwrap().is_empty());
+        assert_eq!(store.local_robots_to_resolve(later).await.unwrap().len(), 1);
+
+        // An outage after it does not show the user unarchived it.
+        store
+            .hold_local_robot("local-robot-1", 0, None, later)
+            .await
+            .unwrap();
+        let robot = store
+            .get_local_robot("local-robot-1", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            robot.detail.as_deref(),
+            Some(resolution_detail::ROBOT_ARCHIVED)
+        );
+        assert_eq!(robot.status, LocalIdStatus::Pending);
+
+        store
+            .resolve_local_robot("local-robot-1", 0, "cloud-robot-1")
+            .await
+            .unwrap();
+        let robot = store
+            .get_local_robot("local-robot-1", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(robot.status, LocalIdStatus::Done);
+        assert_eq!(robot.cloud_robot_id.as_deref(), Some("cloud-robot-1"));
+        assert_eq!((robot.detail, robot.next_attempt_at), (None, None));
+    }
+
+    #[tokio::test]
+    async fn a_refused_robot_fails_every_pending_instance() {
+        let (store, _tempdir) = open_store().await;
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        offline_recording(&store, "local-robot-1", 1, "local-dataset-1").await;
+
+        store
+            .fail_local_robot("local-robot-1", resolution_detail::REJECTED)
+            .await
+            .unwrap();
+
+        for instance in [0, 1] {
+            let robot = store
+                .get_local_robot("local-robot-1", instance)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(robot.status, LocalIdStatus::Failed);
+            assert_eq!(robot.detail.as_deref(), Some(resolution_detail::REJECTED));
+        }
+    }
+
+    #[tokio::test]
+    async fn settling_resolves_a_recording_once_its_robot_and_dataset_are_done() {
+        let (store, _tempdir) = open_store().await;
+        let index = offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        store
+            .resolve_local_robot("local-robot-1", 0, "cloud-robot-1")
+            .await
+            .unwrap();
+
+        // The dataset is still pending.
+        assert_eq!(
+            store.settle_offline_recordings().await.unwrap(),
+            SettledRecordings::default()
+        );
+
+        store
+            .resolve_local_dataset("local-dataset-1", "cloud-dataset-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.settle_offline_recordings().await.unwrap(),
+            SettledRecordings {
+                resolved: vec![index],
+                failed: Vec::new(),
+            }
+        );
+        let row = store.get_recording(index).await.unwrap().unwrap();
+        assert_eq!(row.offline, Some(OfflineState::Resolved));
+        let offline = store.get_recording_offline(index).await.unwrap().unwrap();
+        assert_eq!(offline.cloud_robot_id.as_deref(), Some("cloud-robot-1"));
+        assert_eq!(offline.cloud_dataset_id.as_deref(), Some("cloud-dataset-1"));
+        // Nothing is settled twice.
+        assert_eq!(
+            store.settle_offline_recordings().await.unwrap(),
+            SettledRecordings::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn settling_a_recording_with_only_a_local_robot_needs_only_the_robot() {
+        let (store, _tempdir) = open_store().await;
+        let index = store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(0),
+                dataset_id: Some("cloud-dataset-1"),
+                local_robot: Some(&arm(false)),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+        store
+            .resolve_local_robot("local-robot-1", 0, "cloud-robot-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.settle_offline_recordings().await.unwrap().resolved,
+            vec![index]
+        );
+        let offline = store.get_recording_offline(index).await.unwrap().unwrap();
+        assert_eq!(offline.cloud_robot_id.as_deref(), Some("cloud-robot-1"));
+        assert_eq!(offline.cloud_dataset_id, None);
+    }
+
+    #[tokio::test]
+    async fn settling_fails_a_recording_whose_dataset_was_refused() {
+        let (store, _tempdir) = open_store().await;
+        let index = offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        store
+            .fail_local_dataset("local-dataset-1", resolution_detail::SHARED_NOT_ALLOWED)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.settle_offline_recordings().await.unwrap(),
+            SettledRecordings {
+                resolved: Vec::new(),
+                failed: vec![index],
+            }
+        );
+        let row = store.get_recording(index).await.unwrap().unwrap();
+        assert_eq!(row.offline, Some(OfflineState::Failed));
+        let offline = store.get_recording_offline(index).await.unwrap().unwrap();
+        assert_eq!(
+            offline.failure.as_deref(),
+            Some(resolution_detail::SHARED_NOT_ALLOWED)
+        );
+        assert_eq!(offline.failure_kind.as_deref(), Some("dataset"));
+        assert_eq!(offline.failure_name.as_deref(), Some("warehouse"));
+        // Nothing waits on the robot or the dataset any more.
+        assert_eq!(
+            store.get_local_robot("local-robot-1", 0).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get_local_dataset("local-dataset-1").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_robot_a_waiting_recording_uses_is_kept() {
+        let (store, _tempdir) = open_store().await;
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        store
+            .resolve_local_robot("local-robot-1", 0, "cloud-robot-1")
+            .await
+            .unwrap();
+
+        // The dataset is still pending, so the recording still waits.
+        store.settle_offline_recordings().await.unwrap();
+
+        let robot = store
+            .get_local_robot("local-robot-1", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(robot.status, LocalIdStatus::Done);
+        assert!(store
+            .get_local_dataset("local-dataset-1")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_later_recording_asks_the_backend_afresh() {
+        // What the backend said about a robot or dataset is not kept once no
+        // recording waits on it: it may have been deleted, archived or let
+        // through since.
+        let (store, _tempdir) = open_store().await;
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+        store
+            .resolve_local_robot("local-robot-1", 0, "cloud-robot-1")
+            .await
+            .unwrap();
+        store
+            .fail_local_dataset("local-dataset-1", resolution_detail::REJECTED)
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+
+        offline_recording(&store, "local-robot-1", 0, "local-dataset-1").await;
+
+        let now = Utc::now().naive_utc();
+        let robot = store.local_robots_to_resolve(now).await.unwrap();
+        assert_eq!(robot_ids(&robot), vec![("local-robot-1", 0)]);
+        assert_eq!(robot[0].cloud_robot_id, None);
+        let datasets = store.local_datasets_to_resolve(now).await.unwrap();
+        assert_eq!(datasets[0].status, LocalIdStatus::Pending);
+        assert_eq!(datasets[0].detail, None);
+    }
+
+    #[tokio::test]
+    async fn the_backend_echo_of_an_offline_start_finds_its_recording() {
+        let (store, _tempdir) = open_store().await;
+        let index = store
+            .create_recording(NewRecording {
+                robot_id: Some("local-robot-1"),
+                robot_instance: Some(0),
+                dataset_id: Some("local-dataset-1"),
+                start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
+                local_robot: Some(&arm(false)),
+                local_dataset: Some(&warehouse()),
+            })
+            .await
+            .unwrap()
+            .recording_index;
+        store
+            .resolve_local_robot("local-robot-1", 0, "cloud-robot-1")
+            .await
+            .unwrap();
+        store
+            .resolve_local_dataset("local-dataset-1", "cloud-dataset-1")
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+        let start_us = store
+            .get_recording(index)
+            .await
+            .unwrap()
+            .unwrap()
+            .start_timestamp_us
+            .unwrap();
+
+        // The backend names the robot by its cloud id.
+        let found = store
+            .recording_index_for_known_recording("cloud-rec-1", "cloud-robot-1", 0, start_us, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(found, Some(index));
     }
 
     #[tokio::test]

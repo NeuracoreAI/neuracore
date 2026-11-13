@@ -138,6 +138,26 @@ string_enum! {
     }
 }
 
+/// Why a robot or dataset made offline is stuck `pending`, or why it
+/// `failed`, as stored in `local_robots.detail` and `local_datasets.detail`
+/// for the status the user sees.
+pub mod resolution_detail {
+    /// Pending: the robot is archived. Unarchiving it lets it register.
+    pub const ROBOT_ARCHIVED: &str = "robot_archived";
+    /// Pending: the user is not in the org. Selecting another org, or being
+    /// added to this one, lets it through.
+    pub const NOT_IN_ORG: &str = "not_in_org";
+    /// Pending: the backend rejected the API key. Logging in again fixes it.
+    pub const CREDENTIALS: &str = "credentials";
+    /// Pending: a dataset of the other kind (shared or private) has the
+    /// dataset's name. Renaming or deleting that one lets it through.
+    pub const NAME_TAKEN: &str = "name_taken";
+    /// Failed: the user may not create shared datasets.
+    pub const SHARED_NOT_ALLOWED: &str = "shared_not_allowed";
+    /// Failed: the backend rejected the request itself.
+    pub const REJECTED: &str = "rejected";
+}
+
 string_enum! {
     /// Where a recording started offline is in getting the backend's ids for
     /// its robot and dataset (`recordings.offline`). A recording started
@@ -271,7 +291,6 @@ impl RecordingRow {
 /// A row from the `local_robots` table: one instance of a robot connected
 /// offline that a recording has used.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Read by the offline resolver.
 pub struct LocalRobotRow {
     /// The local robot id, which recordings hold as their `robot_id`.
     pub robot_id: String,
@@ -293,7 +312,6 @@ pub struct LocalRobotRow {
     pub next_attempt_at: Option<NaiveDateTime>,
 }
 
-#[allow(dead_code)] // Read by the offline resolver.
 impl LocalRobotRow {
     /// Decode a SQLite row into a [`LocalRobotRow`].
     pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
@@ -314,7 +332,6 @@ impl LocalRobotRow {
 /// A row from the `local_datasets` table: a dataset selected offline that a
 /// recording has used.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Read by the offline resolver.
 pub struct LocalDatasetRow {
     /// The local dataset id, which recordings hold as their `dataset_id`.
     pub dataset_id: String,
@@ -336,7 +353,6 @@ pub struct LocalDatasetRow {
     pub next_attempt_at: Option<NaiveDateTime>,
 }
 
-#[allow(dead_code)] // Read by the offline resolver.
 impl LocalDatasetRow {
     /// Decode a SQLite row into a [`LocalDatasetRow`].
     pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
@@ -362,7 +378,6 @@ impl LocalDatasetRow {
 /// A row from the `recording_offline` table: the backend's ids for a
 /// recording started offline once it has them, or why it failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Read by the offline resolver.
 pub struct RecordingOfflineRow {
     /// The recording's local index.
     pub recording_index: i64,
@@ -379,7 +394,6 @@ pub struct RecordingOfflineRow {
     pub failure_name: Option<String>,
 }
 
-#[allow(dead_code)] // Read by the offline resolver.
 impl RecordingOfflineRow {
     /// Decode a SQLite row into a [`RecordingOfflineRow`].
     pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {

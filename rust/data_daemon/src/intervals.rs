@@ -60,5 +60,21 @@ pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 /// re-sent on this timer, since they are not idempotent.
 pub const NOTIFY_RESWEEP: Duration = Duration::from_secs(30);
 
+/// How often, while online, the offline resolver looks for robots and
+/// datasets made offline that recordings still wait on
+/// (`cloud::coordinators::offline_resolver`). It also runs at startup, on
+/// reconnect and when a recording starts.
+pub const OFFLINE_RESOLVE_SWEEP: Duration = Duration::from_secs(30);
+
+/// How long a robot or dataset made offline that is blocked on something the
+/// user must fix (an archived robot, a rejected API key) waits before the
+/// backend is asked about it again.
+pub const BLOCKED_ID_RETRY: Duration = Duration::from_secs(5 * 60);
+
+/// How long a robot or dataset made offline waits after an outage or a 5xx
+/// before the backend is asked about it again. Shorter than
+/// [`OFFLINE_RESOLVE_SWEEP`], so each sweep makes one attempt.
+pub const PASSING_ID_RETRY: Duration = Duration::from_secs(20);
+
 /// Connection health probe cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);
