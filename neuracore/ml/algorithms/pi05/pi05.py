@@ -343,8 +343,6 @@ class Pi05(NeuracoreModel):
         self.action_dim = self.max_output_size
 
         # Setup DONE flag dims (classification head, not denoised)
-        self.done_slot_dims: list[int] = []
-        self.done_dim = 0
         self.done_head: nn.Sequential | None = None
         self.done_token_score: nn.Linear | None = None
         self.done_proprio_to_logits: nn.Linear | None = None
@@ -358,24 +356,18 @@ class Pi05(NeuracoreModel):
                 list[DoneDataStats],
                 self.output_dataset_statistics[DataType.DONE],
             )
-            done_means: list[float] = []
-            for done_stat in done_stats:
-                slot_dim = len(done_stat.done.mean)
-                self.done_slot_dims.append(slot_dim)
-                self.done_dim += slot_dim
-                done_means.extend(done_stat.done.mean.tolist())
-            if self.done_dim == 0:
+            if len(done_stats) != 1 or len(done_stats[0].done.mean) != 1:
                 raise ValueError(
-                    "DONE is configured as an output but has zero feature "
-                    "dimensions in the dataset statistics."
+                    "DONE is configured as an output but the dataset statistics "
+                    "do not hold exactly one done flag."
                 )
             # Done labels are 0/1 and rare, so the mean is the positive rate and
             # pos_weight = (1 - p) / p rebalances BCE toward the positive class.
             # Cap it at done_max_pos_weight so a very small p cannot make one
             # missed frame dominate the batch.
-            pos_rate = torch.tensor(done_means, dtype=torch.float32).clamp(
-                1e-4, 1.0 - 1e-4
-            )
+            pos_rate = torch.as_tensor(
+                done_stats[0].done.mean, dtype=torch.float32
+            ).clamp(1e-4, 1.0 - 1e-4)
             pos_weight = ((1.0 - pos_rate) / pos_rate).clamp(
                 max=self.done_max_pos_weight
             )
@@ -437,7 +429,7 @@ class Pi05(NeuracoreModel):
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        if self.done_dim > 0:
+        if DataType.DONE in self.output_data_types:
             self._build_done_head()
 
         self._setup_optimizer_param_groups()
@@ -461,7 +453,7 @@ class Pi05(NeuracoreModel):
             nn.Linear(token_dim * num_cameras, self.done_head_dim),
             nn.ReLU(),
             nn.Dropout(self.done_head_dropout),
-            nn.Linear(self.done_head_dim, self.done_dim),
+            nn.Linear(self.done_head_dim, 1),
         )
         if self.done_use_proprio:
             self.done_proprio_slices = [
@@ -483,7 +475,7 @@ class Pi05(NeuracoreModel):
             # Zero weights keep the first step identical to the vision head.
             # Joint and gripper values are added onto the logits, not mixed
             # inside the vision MLP.
-            self.done_proprio_to_logits = nn.Linear(done_proprio_dim, self.done_dim)
+            self.done_proprio_to_logits = nn.Linear(done_proprio_dim, 1)
             nn.init.zeros_(self.done_proprio_to_logits.weight)
             nn.init.zeros_(self.done_proprio_to_logits.bias)
         for module in self._done_modules():
@@ -824,7 +816,7 @@ class Pi05(NeuracoreModel):
 
         Returns:
             Predicted action tensor [B, chunk_size, action_dim], and done logits
-            [B, 1, done_dim] or None without a done head.
+            [B, 1, 1] or None without a done head.
         """
         images, image_masks, lang_tokens, lang_masks, proprio = (
             self._build_inputs_from_batch(batch)
@@ -882,7 +874,7 @@ class Pi05(NeuracoreModel):
                 the model has no proprioception.
 
         Returns:
-            torch.Tensor: Done logits with shape (B, 1, done_dim).
+            torch.Tensor: Done logits with shape (B, 1, 1).
         """
         assert self.done_head is not None
         pooled = []
@@ -911,43 +903,11 @@ class Pi05(NeuracoreModel):
             logits = logits + self.done_proprio_to_logits(done_proprio)
         return logits.unsqueeze(1)
 
-    def _split_done_outputs(self, done_probs: torch.Tensor) -> list[BatchedDoneData]:
-        """Split a concatenated done probability tensor into per-slot outputs.
-
-        Args:
-            done_probs: Probabilities with shape (B, T, done_dim).
-
-        Returns:
-            list[BatchedDoneData]: One entry per DONE embodiment slot.
-        """
-        batched_outputs: list[BatchedDoneData] = []
-        start = 0
-        for slot_dim in self.done_slot_dims:
-            end = start + slot_dim
-            batched_outputs.append(BatchedDoneData(done=done_probs[:, :, start:end]))
-            start = end
-        return batched_outputs
-
     def _build_done_mask(self, batch: BatchedTrainingSamples) -> torch.Tensor:
-        """Build a per-feature mask for DONE targets.
-
-        Expands the per-slot mask ``(B, num_slots)`` across each slot's feature
-        width so it aligns with concatenated done targets ``(B, done_dim)``.
-
-        Args:
-            batch: Training batch.
-
-        Returns:
-            torch.Tensor: Mask with shape (B, done_dim).
-        """
+        """Build the mask for the single done target."""
         if DataType.DONE not in batch.outputs_mask:
-            return torch.zeros(batch.batch_size, self.done_dim, device=self.device)
-
-        slot_mask = batch.outputs_mask[DataType.DONE]  # (B, num_slots)
-        expanded: list[torch.Tensor] = []
-        for slot_idx, slot_dim in enumerate(self.done_slot_dims):
-            expanded.append(slot_mask[:, slot_idx : slot_idx + 1].expand(-1, slot_dim))
-        return torch.cat(expanded, dim=-1)
+            return torch.zeros(batch.batch_size, 1, device=self.device)
+        return batch.outputs_mask[DataType.DONE][:, :1]
 
     @staticmethod
     def _done_classification_metrics(
@@ -963,9 +923,9 @@ class Pi05(NeuracoreModel):
         positives gives recall 0.
 
         Args:
-            done_logits: Logits with shape (B, 1, D).
-            done_targets: Targets with shape (B, 1, D), in ``[0, 1]``.
-            done_mask: Feature mask with shape (B, D).
+            done_logits: Logits with shape (B, 1, 1).
+            done_targets: Targets with shape (B, 1, 1), in ``[0, 1]``.
+            done_mask: Feature mask with shape (B, 1).
 
         Returns:
             dict[str, torch.Tensor]: ``done_accuracy``, ``done_precision``,
@@ -1067,9 +1027,9 @@ class Pi05(NeuracoreModel):
                 raise ValueError(f"Unsupported output data type: {data_type}")
 
         if done_logits is not None:
-            output_tensors[DataType.DONE] = self._split_done_outputs(
-                torch.sigmoid(done_logits)
-            )
+            output_tensors[DataType.DONE] = [
+                BatchedDoneData(done=torch.sigmoid(done_logits))
+            ]
 
         return output_tensors
 
@@ -1184,19 +1144,16 @@ class Pi05(NeuracoreModel):
             assert image_embs is not None
             done_logits = self._predict_done_logits(
                 image_embs, image_masks, proprio
-            )  # (B, 1, D)
+            )  # (B, 1, 1)
 
             if DataType.DONE in batch.outputs:
                 done_outputs = cast(list[BatchedDoneData], batch.outputs[DataType.DONE])
-                done_targets = torch.cat(
-                    [item.done for item in done_outputs], dim=-1
-                )  # (B, T, D)
                 # The first step of the chunk is the current action step.
-                current_targets = done_targets[:, :1].to(dtype=done_logits.dtype)
+                current_targets = done_outputs[0].done[:, :1].to(done_logits.dtype)
             else:
                 current_targets = torch.zeros_like(done_logits)
 
-            done_mask = self._build_done_mask(batch)  # (B, D)
+            done_mask = self._build_done_mask(batch)  # (B, 1)
             bce = F.binary_cross_entropy_with_logits(
                 done_logits,
                 current_targets.clamp(0.0, 1.0),
