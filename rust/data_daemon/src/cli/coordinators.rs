@@ -78,6 +78,7 @@ pub(crate) fn spawn_cloud_coordinators(
     fallback_org_id: Option<String>,
     shutdown_tx: crate::lifecycle::shutdown::ShutdownBroadcaster,
     config_rx: ConfigRx,
+    reachable: tokio::sync::watch::Sender<data_daemon_shared::Connection>,
 ) -> (CloudHandles, tokio::sync::mpsc::Receiver<RecordingCommand>) {
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusUpdate>();
     // Watch the SDK config for the current org; every coordinator reads the
@@ -88,6 +89,7 @@ pub(crate) fn spawn_cloud_coordinators(
     let connection = spawn_connection_monitor(
         Arc::clone(&client),
         event_bus.clone(),
+        reachable,
         shutdown_tx.subscribe(),
     );
     let registration = spawn_registration(

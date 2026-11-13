@@ -13,7 +13,7 @@
 //! Tests rely on a custom provider via [`AuthProvider`] (the trait) so we can
 //! inject a fixed token without touching the user's home directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -88,6 +88,16 @@ struct AuthConfig {
     api_key: Option<String>,
     #[serde(default)]
     access_token: Option<String>,
+}
+
+/// Whether the config at `path` holds an API key, or a token, for the daemon
+/// to upload with. A missing or unreadable file holds neither.
+pub async fn api_key_saved(path: &Path) -> bool {
+    match fs::read(path).await {
+        Ok(bytes) => serde_json::from_slice::<AuthConfig>(&bytes)
+            .is_ok_and(|config| config.api_key.is_some() || config.access_token.is_some()),
+        Err(_) => false,
+    }
 }
 
 /// Response body for `POST /auth/verify-api-key`. Matches the
@@ -285,6 +295,24 @@ mod tests {
     use tempfile::TempDir;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn api_key_saved_reads_the_config() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.json");
+
+        assert!(!api_key_saved(&config).await, "no file");
+        tokio::fs::write(&config, r#"{"current_org_id":"org-1"}"#)
+            .await
+            .unwrap();
+        assert!(!api_key_saved(&config).await, "no key in it");
+        tokio::fs::write(&config, "not json").await.unwrap();
+        assert!(!api_key_saved(&config).await, "unreadable");
+        tokio::fs::write(&config, r#"{"api_key":"nrc_abc"}"#)
+            .await
+            .unwrap();
+        assert!(api_key_saved(&config).await);
+    }
 
     #[tokio::test]
     async fn file_provider_exchanges_api_key_for_jwt() {

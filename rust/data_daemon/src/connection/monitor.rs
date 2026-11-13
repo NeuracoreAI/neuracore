@@ -4,12 +4,15 @@
 //! runtime as a single supervised task. Each transition is broadcast to the
 //! daemon event bus as [`DaemonEvent::ConnectionStateChanged`]; subscribers
 //! (currently the upload coordinator) pause when the connection drops and
-//! resume on recovery.
+//! resume on recovery. The result of every probe is also kept on a watch
+//! channel for the status query, which must tell "not checked yet" from
+//! "checked and down".
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::broadcast;
+use data_daemon_shared::Connection;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -37,10 +40,13 @@ impl MonitorHandle {
 /// The spawned task publishes `ConnectionState::Down` as its first action so
 /// subscribers (currently the upload coordinator) see a definite initial state
 /// regardless of subscription ordering — the first successful probe then
-/// flips them to `Up`.
+/// flips them to `Up`. `reachable` stays [`Connection::NotChecked`] until the
+/// first probe has answered, then says whether the latest one reached the
+/// backend.
 pub fn spawn_connection_monitor(
     client: Arc<ApiClient>,
     bus: EventBus,
+    reachable: watch::Sender<Connection>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> MonitorHandle {
     let join = tokio::spawn(async move {
@@ -66,6 +72,11 @@ pub fn spawn_connection_monitor(
                     let started = Instant::now();
                     let probe = client.health_check().await;
                     let elapsed_ms = started.elapsed().as_millis() as u64;
+                    reachable.send_replace(if matches!(probe, Ok(true)) {
+                        Connection::Reachable
+                    } else {
+                        Connection::Unreachable
+                    });
                     match probe {
                         Ok(true) => {
                             if state != ConnectionState::Up {
@@ -120,7 +131,9 @@ mod tests {
         let mut subscriber = bus.subscribe();
         let (tx, rx) = broadcast::channel::<ShutdownSignal>(1);
 
-        let handle = spawn_connection_monitor(client, bus, rx);
+        let (reachable_tx, reachable) = watch::channel(Connection::NotChecked);
+
+        let handle = spawn_connection_monitor(client, bus, reachable_tx, rx);
         // The very first event after subscription is the explicit Down
         // publish from `spawn_connection_monitor`.
         let event = subscriber.recv().await.unwrap();
@@ -128,6 +141,17 @@ mod tests {
             event,
             DaemonEvent::ConnectionStateChanged(ConnectionState::Down)
         ));
+        // That Down is a seed, not a probe result: once the failed probe has
+        // answered, the watch says so.
+        let mut reachable = reachable;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reachable.wait_for(|connection| *connection != Connection::NotChecked),
+        )
+        .await
+        .expect("probe result")
+        .unwrap();
+        assert_eq!(*reachable.borrow(), Connection::Unreachable);
 
         // Tear the monitor down so the test exits.
         let _ = tx.send(ShutdownSignal::Sigterm);
@@ -150,7 +174,9 @@ mod tests {
         let mut subscriber = bus.subscribe();
         let (tx, rx) = broadcast::channel::<ShutdownSignal>(1);
 
-        let handle = spawn_connection_monitor(client, bus, rx);
+        let (reachable_tx, reachable) = watch::channel(Connection::NotChecked);
+
+        let handle = spawn_connection_monitor(client, bus, reachable_tx, rx);
 
         // Initial Down, then Up once the probe succeeds.
         let first = tokio::time::timeout(Duration::from_secs(2), subscriber.recv())
@@ -169,6 +195,7 @@ mod tests {
             second,
             DaemonEvent::ConnectionStateChanged(ConnectionState::Up)
         ));
+        assert_eq!(*reachable.borrow(), Connection::Reachable);
 
         let _ = tx.send(ShutdownSignal::Sigterm);
         handle.join.abort();

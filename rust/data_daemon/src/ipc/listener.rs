@@ -16,23 +16,26 @@
 //! the later `serve_recording_state_queries` borrow is itself held across an
 //! await.)
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use data_daemon_shared::{
-    Envelope, HealthReply, HealthRequest, RecordingStateQuery, RecordingStateReply, VersionReply,
-    VersionRequest,
+    Connection, Envelope, HealthReply, HealthRequest, RecordingStateQuery, RecordingStateReply,
+    StatusReply, StatusRequest, VersionReply, VersionRequest,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::ipc;
 use tokio::select;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::sleep;
 
+use crate::api::auth::api_key_saved;
+use crate::cloud::read_org_id_from_config_async;
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingState;
-use crate::state::SqliteStateStore;
+use crate::state::{SqliteStateStore, StateStore, StateStoreError};
 
 /// Poll cadence while envelopes are actively flowing.
 ///
@@ -57,6 +60,17 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// cost and avoids relaxing during a brief lull mid-recording.
 const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 
+/// What the status query reads besides the state store.
+pub struct StatusSources {
+    /// The SDK config holding the API key and the current org.
+    pub config_path: PathBuf,
+    /// The org the daemon uploads to when the config names none, as the org
+    /// watcher has it.
+    pub fallback_org_id: Option<String>,
+    /// Whether the daemon can reach the backend, from its latest probe.
+    pub reachable: watch::Receiver<Connection>,
+}
+
 /// Drain the iceoryx2 subscriber until a shutdown signal arrives.
 ///
 /// Each successfully decoded envelope is forwarded to the dispatcher's
@@ -72,6 +86,7 @@ pub async fn run(
     dispatcher_tx: mpsc::Sender<Envelope>,
     recording_state: RecordingState,
     store: SqliteStateStore,
+    status: StatusSources,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
@@ -79,6 +94,7 @@ pub async fn run(
         recording_state = data_daemon_shared::service_name::RECORDING_STATE,
         health = data_daemon_shared::service_name::HEALTH,
         version = data_daemon_shared::service_name::VERSION,
+        status = data_daemon_shared::service_name::STATUS,
         "ipc listener started"
     );
 
@@ -131,6 +147,11 @@ pub async fn run(
         // carries the cloud id too, so this is the only state service.
         serve_recording_state_queries(transport.recording_state_server(), &recording_state, &store)
             .await;
+
+        // -- Answer status queries -----------------------------------------------
+        // What the recordings on this machine are waiting on, for the SDK's
+        // one-off summary and `data-daemon status`.
+        serve_status(transport.status_server(), &store, &status).await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -299,6 +320,84 @@ async fn serve_recording_state_queries(
     }
 }
 
+/// Drain every pending status query, answering each from the state store,
+/// the SDK config and the latest backend probe.
+///
+/// A query is rare (once per SDK process, and `data-daemon status`), so the
+/// store and config are read per query rather than cached. A query the store
+/// cannot answer gets no reply: the caller times out and shows no status,
+/// which is better than one showing wrong counts.
+async fn serve_status(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    store: &SqliteStateStore,
+    sources: &StatusSources,
+) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "status server receive failed");
+                return;
+            }
+        };
+
+        let request = match StatusRequest::decode(active.payload()) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed status query");
+                continue;
+            }
+        };
+
+        let reply = match status_reply(request, store, sources).await {
+            Ok(reply) => reply,
+            Err(error) => {
+                tracing::warn!(%error, "failed to count recordings for a status query");
+                continue;
+            }
+        };
+
+        let bytes = match reply.encode() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "failed to encode status reply");
+                continue;
+            }
+        };
+        let response = match active.loan_slice_uninit(bytes.len()) {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "failed to loan status reply sample");
+                continue;
+            }
+        };
+        if let Err(error) = response.write_from_slice(&bytes).send() {
+            tracing::warn!(%error, "failed to send status reply");
+        }
+    }
+}
+
+/// The answer to `request`.
+async fn status_reply(
+    request: StatusRequest,
+    store: &SqliteStateStore,
+    sources: &StatusSources,
+) -> Result<StatusReply, StateStoreError> {
+    let counts = store.status_counts().await?;
+    let org_id = read_org_id_from_config_async(&sources.config_path).await;
+    Ok(StatusReply {
+        nonce: request.nonce,
+        connection: *sources.reachable.borrow(),
+        api_key_saved: api_key_saved(&sources.config_path).await,
+        org_selected: org_id.is_some() || sources.fallback_org_id.is_some(),
+        waiting: counts.waiting,
+        uploading: counts.uploading,
+        blocked: counts.blocked,
+        failed: counts.failed,
+    })
+}
+
 /// Counters reported in the slow-path warning logs.
 #[derive(Default)]
 struct LoopCounters {
@@ -347,5 +446,137 @@ fn drain_subscriber(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{NewRecording, RecordingTimestamp};
+    use tempfile::TempDir;
+
+    async fn status_with(
+        config: Option<&str>,
+        fallback_org_id: Option<&str>,
+        reachable: Connection,
+    ) -> StatusReply {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(0),
+                dataset_id: Some("ds-1"),
+                start: RecordingTimestamp::observed_at(1),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        let config_path = dir.path().join("config.json");
+        if let Some(config) = config {
+            tokio::fs::write(&config_path, config).await.unwrap();
+        }
+        let (_reachable_tx, reachable) = watch::channel(reachable);
+        let sources = StatusSources {
+            config_path,
+            fallback_org_id: fallback_org_id.map(str::to_string),
+            reachable,
+        };
+
+        status_reply(StatusRequest { nonce: 9 }, &store, &sources)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn status_reply_reports_the_config_the_probe_and_the_recordings() {
+        let reply = status_with(
+            Some(r#"{"api_key":"nrc_abc","current_org_id":"org-1"}"#),
+            None,
+            Connection::Reachable,
+        )
+        .await;
+
+        assert_eq!(reply.nonce, 9);
+        assert_eq!(reply.connection, Connection::Reachable);
+        assert!(reply.api_key_saved);
+        assert!(reply.org_selected);
+        assert_eq!(reply.waiting.recordings, 1);
+    }
+
+    #[tokio::test]
+    async fn status_reply_before_login_and_before_the_first_probe() {
+        let reply = status_with(None, None, Connection::NotChecked).await;
+
+        assert_eq!(reply.connection, Connection::NotChecked);
+        assert!(!reply.api_key_saved);
+        assert!(!reply.org_selected);
+    }
+
+    #[tokio::test]
+    async fn the_status_command_gets_its_answer_over_ipc() {
+        // The client `data-daemon status` uses must open the service exactly
+        // as the daemon's server does. A service name of the test's own keeps
+        // it clear of a daemon running on the same machine.
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        let (_reachable_tx, reachable) = watch::channel(Connection::Reachable);
+        let sources = StatusSources {
+            config_path: dir.path().join("config.json"),
+            fallback_org_id: Some("org-1".into()),
+            reachable,
+        };
+        let service = format!(
+            "neuracore/data_daemon/test/status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let node = iceoryx2::node::NodeBuilder::new()
+            .create::<ipc::Service>()
+            .expect("iceoryx2 node");
+        let (_factory, server) = crate::ipc::node::open_query_server(
+            &node,
+            &service,
+            data_daemon_shared::service_name::STATUS_MAX_PAYLOAD_BYTES,
+        )
+        .expect("status server");
+
+        let asking = std::thread::spawn(move || {
+            crate::ipc::status_query::query_status_on(&service, Duration::from_secs(5))
+        });
+        while !asking.is_finished() {
+            serve_status(&server, &store, &sources).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let reply = asking
+            .join()
+            .unwrap()
+            .expect("status service reachable")
+            .expect("an answer in time");
+
+        assert_eq!(reply.connection, Connection::Reachable);
+        assert!(reply.org_selected);
+        assert!(!reply.api_key_saved);
+    }
+
+    #[tokio::test]
+    async fn status_reply_counts_the_fallback_org() {
+        // As the org watcher does: NEURACORE_ORG_ID or the profile's org
+        // stands in when the config names none.
+        let reply = status_with(
+            Some(r#"{"api_key":"nrc_abc"}"#),
+            Some("org-1"),
+            Connection::NotChecked,
+        )
+        .await;
+
+        assert!(reply.org_selected);
     }
 }
