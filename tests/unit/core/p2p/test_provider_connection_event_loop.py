@@ -24,6 +24,10 @@ def _make_connection_details() -> OpenConnectionDetails:
     )
 
 
+async def _signalling_endpoint() -> tuple[str, dict[str, str]]:
+    return "https://signalling.example.com/org/test-org/signalling", {}
+
+
 @pytest.fixture
 def nc_loop():
     """Event loop that simulates the neuracore async loop (runs in background)."""
@@ -70,6 +74,7 @@ def provider_connection(nc_loop):
             org_id="test-org",
             loop=nc_loop,
             enabled_manager=EnabledManager(True, loop=nc_loop),
+            signalling=_signalling_endpoint,
         )
         yield conn
 
@@ -262,5 +267,6 @@ async def test_connection_uses_provided_loop(nc_loop):
             connection_details=_make_connection_details(),
             client_session=None,
             loop=nc_loop,
+            signalling=_signalling_endpoint,
         )
     assert conn.loop is nc_loop

@@ -29,7 +29,6 @@ from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.streaming.p2p.signalling_endpoint import (
     SignallingEndpoint,
     SignallingTarget,
-    legacy_endpoint,
 )
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
@@ -59,7 +58,8 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         loop: asyncio.AbstractEventLoop,
         org_id: str | None = None,
         auth: Auth | None = None,
-        signalling: SignallingEndpoint | None = None,
+        *,
+        signalling: SignallingEndpoint,
     ):
         """Initialize the client streaming manager.
 
@@ -72,7 +72,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             org_id: The unique identifier for the organization. If not provided,
                 defaults to the current org.
             auth: Authentication object. If not provided, uses default auth
-            signalling: Where the robot's calls go. Defaults to the legacy service.
+            signalling: Where the robot's calls go.
         """
         self.robot_id = robot_id
         self.robot_instance = robot_instance
@@ -81,7 +81,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         self.client_session = client_session
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
-        self.signalling = signalling or legacy_endpoint(self.org_id, self.auth)
+        self.signalling = signalling
         self.background_tracker = BackgroundCoroutineTracker(loop=self.loop)
 
         self.streaming = EnabledManager.derived_manger(
