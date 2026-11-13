@@ -11,3 +11,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 
 <!-- Append your summary here -->
 `nc.login()` no longer fails when the Neuracore server cannot be reached: it warns and continues offline, using the saved API key without checking it, and saves the given key only when none is saved. Calls that need the server then raise `ServerUnreachableError`, a subclass of `AuthenticationError`. `nc.stop_recording(wait=True)` while offline stops the recording and raises `ServerUnreachableError` straight away instead of waiting.
+
+After an offline login, `nc.create_dataset` and `nc.get_dataset` by name return a dataset kept on this machine under a local id that every process works out from the name. The data daemon finds or creates it on the server, by name and with its description and tags, before uploading recordings made into it. `nc.get_dataset(id=...)` raises `ServerUnreachableError` while offline.

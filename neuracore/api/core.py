@@ -18,6 +18,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils import backend_utils
+from neuracore.data_daemon.bridge import LocalDataset
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 from ..core.auth import get_auth
@@ -301,7 +302,17 @@ def start_recording(
                 "shared robot, ensure connect_robot(shared=True) succeeded. "
                 f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
             )
-    robot.start_recording(active_dataset_id, timestamp=timestamp)
+    local_dataset = None
+    if active_dataset is not None and active_dataset.is_local:
+        local_dataset = LocalDataset(
+            name=active_dataset.name,
+            shared=active_dataset.is_shared,
+            description=active_dataset.description,
+            tags=list(active_dataset.tags),
+        )
+    robot.start_recording(
+        active_dataset_id, timestamp=timestamp, local_dataset=local_dataset
+    )
 
 
 def stop_recording(

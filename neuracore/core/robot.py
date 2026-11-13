@@ -274,7 +274,13 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(self, dataset_id: str, timestamp: float | None = None) -> None:
+    def start_recording(
+        self,
+        dataset_id: str,
+        timestamp: float | None = None,
+        *,
+        local_dataset: recording_context.LocalDataset | None = None,
+    ) -> None:
         """Start recording data from all active streams to a dataset.
 
         Asks the daemon to open a recording window; it owns recording identity
@@ -285,6 +291,8 @@ class Robot:
             dataset_id: Unique identifier of the dataset to record into.
             timestamp: Optional capture time (Unix seconds) for the recording's
                 start, matching the ``log_*`` methods.
+            local_dataset: The dataset's details when ``dataset_id`` is a local
+                id, so the data daemon can create the dataset later.
 
         Raises:
             RobotError: If the robot is not initialized or if
@@ -296,7 +304,18 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        self._get_daemon_recording_context().start_recording(
+        context = self._get_daemon_recording_context()
+        if local_dataset is not None:
+            context.start_local_recording(
+                self.id,
+                self.instance,
+                dataset_id,
+                timestamp_us=timestamp_us,
+                local_robot=None,
+                local_dataset=local_dataset,
+            )
+            return
+        context.start_recording(
             robot_id=self.id,
             robot_instance=self.instance,
             robot_name=self.name,
