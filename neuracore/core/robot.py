@@ -10,22 +10,25 @@ import io
 import logging
 import os
 import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import requests
 from neuracore_types import DataType, RobotInstanceIdentifier
 
-from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.config.get_current_org import get_current_org, get_saved_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.utils.http_errors import extract_error_detail, extract_error_type
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.timestamp_utils import resolve_timestamp_us
+from neuracore.core.utils.user_warnings import warn_user
 from neuracore.data_daemon import bridge as recording_context
+from neuracore.data_daemon.offline_robots import save_offline_robot
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -48,6 +51,25 @@ _ROBOT_ARCHIVED_MESSAGE = (
     "Robot '{robot_name}' is archived. Unarchive it on the Archived Robots "
     "page of the Neuracore dashboard, then connect again."
 )
+LOCAL_ROBOT_ID_PREFIX: Final = "local-robot-"
+
+
+def local_robot_id(name: str, shared: bool) -> str:
+    """Return the id a robot has on this machine before the server is reached.
+
+    Every process works out the same id from the same name and namespace, so
+    processes recording offline agree on the robot without talking to each
+    other. Like a cloud robot id, it covers every instance of the robot.
+
+    Args:
+        name: The robot name.
+        shared: Whether the robot is shared.
+
+    Returns:
+        A stable id that starts with ``LOCAL_ROBOT_ID_PREFIX``.
+    """
+    key = f"neuracore:robot:{shared}:{name}"
+    return f"{LOCAL_ROBOT_ID_PREFIX}{uuid.uuid5(uuid.NAMESPACE_URL, key)}"
 
 
 @dataclass
@@ -119,6 +141,7 @@ class Robot:
         self.overwrite = overwrite
         self.shared = shared
         self.id: str | None = None
+        self.is_local = False
         self.archived: bool | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
@@ -130,7 +153,9 @@ class Robot:
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
 
-        self.org_id = org_id or get_current_org()
+        self.org_id: str | None = org_id or (
+            get_saved_org() if self._auth.is_offline else get_current_org()
+        )
 
         if urdf_path and mjcf_path:
             raise ValidationError(
@@ -180,11 +205,17 @@ class Robot:
         if provided. This must be called before using the robot for data streaming
         or recording.
 
+        If the last login could not reach the server, the robot is set up on
+        this machine only instead (see :meth:`_init_offline`).
+
         Raises:
             RobotError: If not authenticated, if the robot is archived or if
                 server communication fails.
             ConfigError: If there is an error trying to get the current org
         """
+        if self._auth.is_offline:
+            self._init_offline()
+            return
         if not self._auth.is_authenticated:
             raise RobotError("Not authenticated. Please call nc.login() first.")
 
@@ -235,6 +266,42 @@ class Robot:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
+
+    def _init_offline(self) -> None:
+        """Set the robot up on this machine without reaching the server.
+
+        The robot gets a local id. The URDF package is built now, so a broken
+        description fails here as it does online, and saved for the data
+        daemon (see :mod:`neuracore.data_daemon.offline_robots`). The robot's
+        details travel with each recording started with it. Once the server
+        can be reached the daemon uploads those recordings, registering the
+        robot and uploading the package before the first one. A robot never
+        recorded with is not registered.
+
+        Raises:
+            ValidationError: If the URDF file is not found.
+            RobotError: If the URDF package cannot be built, or the robot
+                cannot be saved.
+        """
+        self.id = local_robot_id(self.name, self.shared)
+        self.is_local = True
+        package = None
+        if self.urdf_path:
+            package = self._package_urdf()["robot_package"][1]
+            if self._temp_dir:
+                self._temp_dir.cleanup()
+        if package is not None:
+            try:
+                save_offline_robot(self.id, package)
+            except OSError as e:
+                raise RobotError(
+                    f"Failed to save robot '{self.name}' offline: {e}"
+                ) from e
+        description = " and its description uploaded" if package else ""
+        warn_user(
+            f"Robot '{self.name}' will be registered{description} once a "
+            "recording made with it reaches the Neuracore server."
+        )
 
     def add_data_stream(self, stream_id: str, stream: DataStream) -> None:
         """Add a data stream to the robot for sensor data collection.
@@ -305,13 +372,21 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         context = self._get_daemon_recording_context()
-        if local_dataset is not None:
+        if self.is_local or local_dataset is not None:
             context.start_local_recording(
                 self.id,
                 self.instance,
                 dataset_id,
                 timestamp_us=timestamp_us,
-                local_robot=None,
+                local_robot=(
+                    recording_context.LocalRobot(
+                        name=self.name,
+                        shared=self.shared,
+                        overwrite_urdf=self.overwrite,
+                    )
+                    if self.is_local
+                    else None
+                ),
                 local_dataset=local_dataset,
             )
             return
@@ -876,8 +951,14 @@ class Robot:
         """Find the ID of the archived robot with this robot's name.
 
         Raises:
-            RobotError: If no archived robot has this name.
+            RobotError: If no organization is selected, or no archived robot
+                has this name.
         """
+        if not self.org_id:
+            raise RobotError(
+                "Unauthorised: no organisation selected. "
+                "Run `nc-select-org` and try again."
+            )
         archived_robots = list_organization_robots(
             self.org_id, is_shared=self.shared, mode="archived"
         )

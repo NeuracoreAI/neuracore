@@ -49,7 +49,7 @@ def _maybe_add_existing_data(
 def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     """Check if the specified number of remote nodes are connected for a robot.
 
-    Always false if live data is disabled.
+    Always false if live data is disabled or the robot was connected offline.
 
     Args:
         robot: The robot instance.
@@ -66,6 +66,9 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
 
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
+    if robot.is_local or robot.org_id is None:
+        # Remote nodes reach a robot through the server.
+        return False
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
 
@@ -122,6 +125,9 @@ def get_latest_sync_point(
 
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
+    if robot.is_local or robot.org_id is None:
+        # Remote nodes reach a robot through the server.
+        return sync_point
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
 

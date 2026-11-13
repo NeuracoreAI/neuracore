@@ -29,6 +29,15 @@ COLUMN_NUM_UPLOAD_ATTEMPTS = "num_upload_attempts"
 COLUMN_ERROR_CODE = "error_code"
 COLUMN_ERROR_MESSAGE = "error_message"
 COLUMN_LAST_UPDATED = "last_updated"
+COLUMN_DATASET_ID = "dataset_id"
+COLUMN_OFFLINE = "offline"
+
+OFFLINE_RECORDINGS_TABLE = "recording_offline"
+LOCAL_ROBOTS_TABLE = "local_robots"
+LOCAL_DATASETS_TABLE = "local_datasets"
+
+OFFLINE_RESOLVING = "resolving"
+LOCAL_ID_PENDING = "pending"
 
 STAT_EXPECTED_TRACE_COUNT = "expected_trace_count"
 STAT_EXPECTED_TRACE_COUNT_REPORTED = "expected_trace_count_reported"

@@ -82,8 +82,9 @@ def login(api_key: str | None = None) -> None:
     variable, or previously saved configuration. The authentication state is
     maintained for subsequent API calls.
 
-    If the server cannot be reached, logs in offline with a warning instead,
-    and calls that need the server raise ``ServerUnreachableError``.
+    If the server cannot be reached, logs in offline with a warning instead:
+    robots and datasets are then set up on this machine, and recordings are
+    kept here until the data daemon can upload them.
 
     Args:
         api_key: API key for authentication. If not provided, will look for
@@ -156,6 +157,10 @@ def connect_robot(
     Upload of a robot description file (URDF or MJCF) is not required,
     but it is recommended for better visualization within Neuracore.
 
+    After an offline login the robot is set up on this machine with a local
+    id, and the data daemon registers it, and uploads its description, once
+    the server can be reached.
+
     Args:
         robot_name: Unique identifier for the robot.
         instance: Instance number of the robot for multi-instance deployments.
@@ -180,7 +185,9 @@ def connect_robot(
     # Initialize push update managers
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
+    if not robot.is_local:
+        # Live data goes through the server, which a local robot cannot reach.
+        StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     # Only the daemon hears a recording started from the web.
     ensure_daemon_running()
     return robot
