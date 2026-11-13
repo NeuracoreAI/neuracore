@@ -228,11 +228,15 @@ pub struct RecordingRow {
     /// was never cancelled, or cancellation has not yet been notified.
     pub backend_cancel_notified_at: Option<NaiveDateTime>,
     /// Set when the backend answered 404 for the recording's uploads or
-    /// progress. Its remaining uploads are failed and its files kept.
+    /// progress. Its remaining uploads are failed and its files kept until
+    /// the reaper deletes recordings that can never upload.
     pub backend_not_found_at: Option<NaiveDateTime>,
     /// Where a recording started offline is in getting its backend ids;
     /// `None` for a recording started online.
     pub offline: Option<OfflineState>,
+    /// When the reaper first saw that the recording can never upload. It
+    /// deletes the recording a fixed time later.
+    pub failed_at: Option<NaiveDateTime>,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -267,6 +271,7 @@ impl RecordingRow {
             backend_cancel_notified_at: row.try_get("backend_cancel_notified_at")?,
             backend_not_found_at: row.try_get("backend_not_found_at")?,
             offline,
+            failed_at: row.try_get("failed_at")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })

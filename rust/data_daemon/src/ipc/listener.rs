@@ -69,6 +69,9 @@ pub struct StatusSources {
     pub fallback_org_id: Option<String>,
     /// Whether the daemon can reach the backend, from its latest probe.
     pub reachable: watch::Receiver<Connection>,
+    /// How long the reaper keeps a recording that can never upload, or
+    /// `None` when the reaper is off.
+    pub failed_retention: Option<Duration>,
 }
 
 /// Drain the iceoryx2 subscriber until a shutdown signal arrives.
@@ -384,7 +387,7 @@ async fn status_reply(
     store: &SqliteStateStore,
     sources: &StatusSources,
 ) -> Result<StatusReply, StateStoreError> {
-    let counts = store.status_counts().await?;
+    let counts = store.status_counts(sources.failed_retention).await?;
     let org_id = read_org_id_from_config_async(&sources.config_path).await;
     Ok(StatusReply {
         nonce: request.nonce,
@@ -483,6 +486,7 @@ mod tests {
             config_path,
             fallback_org_id: fallback_org_id.map(str::to_string),
             reachable,
+            failed_retention: None,
         };
 
         status_reply(StatusRequest { nonce: 9 }, &store, &sources)
@@ -529,6 +533,7 @@ mod tests {
             config_path: dir.path().join("config.json"),
             fallback_org_id: Some("org-1".into()),
             reachable,
+            failed_retention: None,
         };
         let service = format!(
             "neuracore/data_daemon/test/status-{}-{}",

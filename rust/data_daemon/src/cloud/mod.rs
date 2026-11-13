@@ -41,7 +41,7 @@ pub use watchers::org_watcher::{spawn_org_watcher, OrgIdRx, OrgWatcherHandle};
 pub use watchers::recording_notifications::{
     spawn_recording_notifications, RecordingNotificationsHandle,
 };
-pub use watchers::recording_reaper::spawn_recording_reaper;
+pub use watchers::recording_reaper::{spawn_recording_reaper, FAILED_RECORDING_RETENTION};
 
 use std::path::Path;
 
