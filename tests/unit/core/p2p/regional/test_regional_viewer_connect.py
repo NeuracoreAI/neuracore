@@ -12,7 +12,6 @@ from neuracore_types import (
     AvailableRobotCapacityInit,
     AvailableRobotInstance,
     MessageType,
-    OpenConnectionRequest,
     RobotInstanceIdentifier,
     VideoFormat,
 )
@@ -138,22 +137,12 @@ def _manager(session: Answers, owners: list[Any]) -> tuple[OrgNodesManager, Any]
     return manager, viewers
 
 
-def _request() -> OpenConnectionRequest:
-    return OpenConnectionRequest(
-        from_id="placeholder",
-        to_id="robot-stream",
-        robot_id=ROBOT_ID,
-        robot_instance=0,
-        video_format=VideoFormat.NEURACORE_CUSTOM,
-    )
-
-
 @pytest.mark.asyncio
 async def test_a_regional_robot_is_connected_through_its_open_region_stream() -> None:
     session = Answers((200, _open_message("region-a-stream")))
     manager, viewers = _manager(session, [REGION_A])
 
-    await manager._create_new_connection(1, MagicMock(), _request())
+    await manager._create_new_connection(1, MagicMock(), ROBOT_ID, 0, "robot-stream")
 
     viewer = viewers[REGION_A]
     ((url, body, headers),) = session.posts
@@ -173,7 +162,7 @@ async def test_a_robot_that_moved_is_connected_where_the_list_shows_it() -> None
     )
     manager, viewers = _manager(session, [REGION_A, REGION_A, REGION_B])
 
-    await manager._create_new_connection(1, MagicMock(), _request())
+    await manager._create_new_connection(1, MagicMock(), ROBOT_ID, 0, "robot-stream")
 
     assert [url.split("/org")[0] for url, _, _ in session.posts] == [
         "https://region-a.example.com",
@@ -189,7 +178,7 @@ async def test_a_robot_never_present_is_not_connected() -> None:
     session = Answers(not_present, not_present, not_present)
     manager, viewers = _manager(session, [REGION_A])
 
-    await manager._create_new_connection(1, MagicMock(), _request())
+    await manager._create_new_connection(1, MagicMock(), ROBOT_ID, 0, "robot-stream")
 
     assert len(session.posts) == 3
     assert viewers[REGION_A].created == []
@@ -200,7 +189,7 @@ async def test_an_unlisted_robot_is_not_connected() -> None:
     session = Answers()
     manager, _ = _manager(session, [None])
 
-    await manager._create_new_connection(1, MagicMock(), _request())
+    await manager._create_new_connection(1, MagicMock(), ROBOT_ID, 0, "robot-stream")
 
     assert session.posts == []
 
@@ -211,7 +200,9 @@ async def test_a_refused_connection_raises() -> None:
     manager, _ = _manager(session, [REGION_A])
 
     with pytest.raises(RuntimeError):
-        await manager._create_new_connection(1, MagicMock(), _request())
+        await manager._create_new_connection(
+            1, MagicMock(), ROBOT_ID, 0, "robot-stream"
+        )
 
 
 @pytest.fixture
@@ -325,14 +316,10 @@ class TurnServers:
 
 def _consumer_manager(session: Any) -> ClientConsumerStreamManager:
     manager = ClientConsumerStreamManager.__new__(ClientConsumerStreamManager)
-    manager.local_stream_id = "legacy-stream"
-    manager.signalling = FakeStream("legacy").endpoint
     manager.ice_configs = {}
     manager._current_track_information = None
     manager.client_session = session
-    manager.org_id = ORG_ID
     manager.loop = asyncio.get_running_loop()
-    manager.auth = MagicMock()
     manager.connections = {}
     return manager
 
@@ -346,13 +333,14 @@ async def test_turn_servers_are_asked_once_per_signalling_stream() -> None:
 
     await manager._get_ice_config(target)
     await manager._get_ice_config(target)
+    other = FakeStream("region-b")
     await manager._get_ice_config(
-        SignallingTarget(manager.local_stream_id, manager.signalling)
+        SignallingTarget(other.local_stream_id, other.endpoint)
     )
 
     assert session.gets == [
         f"{viewer.base_url}/turn_servers/{viewer.local_stream_id}",
-        f"https://legacy.example.com/org/{ORG_ID}/signalling/turn_servers/legacy-stream",
+        f"{other.base_url}/turn_servers/{other.local_stream_id}",
     ]
 
 

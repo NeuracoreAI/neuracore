@@ -95,16 +95,6 @@ class StreamManagerOrchestrator(
             client_session=self.client_session,
         )
         self._region_endpoints: list[str] | None = None
-        self.signalling_consumer = SignallingEventsConsumer(
-            manager_factory=self,
-            org_id=self.org_id,
-            loop=self.loop,
-            auth=self.auth,
-            client_session=self.client_session,
-            enabled_manager=EnabledManager.any_enabled(
-                get_consume_live_data_enabled_manager(),
-            ),
-        )
         self._closed = False
         self._logout_listener = self._on_logout
         self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
@@ -129,7 +119,6 @@ class StreamManagerOrchestrator(
     def own_stream_ids(self) -> set[str]:
         """Return the stream IDs of this process, which its viewers skip."""
         consumers = [
-            self.signalling_consumer,
             *self.provider_consumers.values(),
             *self.viewer_consumers.values(),
         ]
@@ -157,7 +146,6 @@ class StreamManagerOrchestrator(
                 manager_factory=self,
                 org_id=self.org_id,
                 loop=self.loop,
-                auth=self.auth,
                 client_session=self.client_session,
                 enabled_manager=EnabledManager.derived_manger(
                     get_consume_live_data_enabled_manager(), loop=self.loop
@@ -180,7 +168,6 @@ class StreamManagerOrchestrator(
         self._closed = True
         self._remove_logout_listener()
 
-        self.signalling_consumer.close()
         consumers = [*self.provider_consumers.values(), *self.viewer_consumers.values()]
         self.provider_consumers.clear()
         self.viewer_consumers.clear()
@@ -269,13 +256,10 @@ class StreamManagerOrchestrator(
         key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=robot_instance)
         if key not in self.consumer_managers:
             self.consumer_managers[key] = ClientConsumerStreamManager(
-                local_stream_id=self.signalling_consumer.local_stream_id,
                 robot_id=robot_id,
                 robot_instance=robot_instance,
-                org_id=self.org_id,
                 client_session=self.client_session,
                 loop=self.loop,
-                auth=self.auth,
             )
             self.consumer_managers[key].enabled_manager.add_listener(
                 EnabledManager.DISABLED,
@@ -306,7 +290,6 @@ class StreamManagerOrchestrator(
                 manager_factory=self,
                 org_id=self.org_id,
                 loop=self.loop,
-                auth=self.auth,
                 client_session=self.client_session,
                 enabled_manager=EnabledManager.derived_manger(
                     get_provide_live_data_enabled_manager(), loop=self.loop

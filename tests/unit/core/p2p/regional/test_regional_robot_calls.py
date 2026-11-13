@@ -10,7 +10,6 @@ import pytest_asyncio
 from aiohttp import ClientResponseError, ClientSession
 from neuracore_types import DataType, MessageType, RobotStreamTrack
 
-from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p import signalling_events_consumer
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.client_provider_stream_manager import (
@@ -19,7 +18,6 @@ from neuracore.core.streaming.p2p.provider.client_provider_stream_manager import
 from neuracore.core.streaming.p2p.provider.provider_connection import (
     PeerToPeerProviderConnection,
 )
-from neuracore.core.streaming.p2p.signalling_endpoint import legacy_endpoint
 from neuracore.core.streaming.p2p.signalling_events_consumer import (
     SignallingEventsConsumer,
 )
@@ -44,7 +42,6 @@ def _consumer(
     consumer.org_id = ORG_ID
     consumer.local_stream_id = STREAM_ID
     consumer.signalling_session = session
-    consumer.auth = auth
     consumer.enabled_manager = EnabledManager(True, loop=asyncio.get_running_loop())
     consumer._decided = asyncio.Event()
     consumer.enabled_manager.add_listener(
@@ -119,7 +116,7 @@ async def test_endpoint_fails_once_the_stream_closed_undecided(
             org_id=ORG_ID,
             loop=asyncio.get_running_loop(),
             client_session=client_session,
-            auth=auth,
+            signalling_session=MagicMock(),
         )
     consumer.close()
 
@@ -221,7 +218,9 @@ async def test_new_connections_use_the_robots_endpoint() -> None:
     module = "neuracore.core.streaming.p2p.provider.client_provider_stream_manager"
 
     with patch(f"{module}.PeerToPeerProviderConnection") as connection_class:
-        await manager.create_new_connection("viewer-1", "connection-1", MagicMock())
+        await manager.create_new_connection(
+            "viewer-1", "connection-1", MagicMock(), target=MagicMock()
+        )
 
     assert connection_class.call_args.kwargs["signalling"] is _region_endpoint
 
@@ -245,14 +244,6 @@ async def test_a_refused_track_batch_raises() -> None:
 
     with pytest.raises(ClientResponseError):
         await manager._post_track_batch([_track()])
-
-
-@pytest.mark.asyncio
-async def test_the_default_endpoint_is_legacy(auth: Any) -> None:
-    assert await legacy_endpoint(ORG_ID, auth)() == (
-        f"{STREAM_API_URL}/org/{ORG_ID}/signalling",
-        auth.get_headers(),
-    )
 
 
 @pytest.mark.asyncio

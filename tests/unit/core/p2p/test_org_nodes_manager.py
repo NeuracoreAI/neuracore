@@ -38,7 +38,6 @@ def _manager() -> OrgNodesManager:
     manager.last_nodes = defaultdict(dict)
     manager.consumers = {}
     manager.stream_manager_orchestrator = SimpleNamespace(
-        signalling_consumer=SimpleNamespace(local_stream_id="local-stream"),
         own_stream_ids=lambda: {"local-stream", "own-robot-stream"},
     )
     manager._apply_stream_changes = MagicMock()
