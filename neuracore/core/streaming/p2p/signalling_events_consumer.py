@@ -82,7 +82,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             signalling_session: In regional mode, the session whose region and
                 token the stream and heartbeats use. None: the legacy service.
             regions: The organization's signalling regions. A robot session
-                with none uses the legacy service.
+                with none stops signalling.
         """
         super().__init__(
             loop=loop,
@@ -126,7 +126,6 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             and session.base_url is None
         ):
             await self._register_first(session)
-            session = self.signalling_session
             registered = True
         self._decided.set()
         if registered and self._failed_over:
@@ -203,11 +202,12 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         return f"{session.base_url}/org/{self.org_id}/signalling"
 
     async def _register_first(self, session: SignallingSession) -> None:
-        """Register through the shared endpoint, or use legacy without regions."""
+        """Register through the shared endpoint; stop without regions."""
         regions = await self.regions() if self.regions is not None else []
         if not regions:
-            self.signalling_session = None
-            return
+            logger.error("The organization has no signalling regions; signalling stops")
+            self.close()
+            raise RuntimeError("The organization has no signalling regions")
         try:
             await session.register(SIGNALLING_URL or regions[0], self.local_stream_id)
         except LowerEpochError:
