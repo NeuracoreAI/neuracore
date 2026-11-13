@@ -27,10 +27,7 @@ from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.streaming.p2p.provider.video_source import VideoSource, VideoTrack
-from neuracore.core.streaming.p2p.signalling_endpoint import (
-    SignallingEndpoint,
-    legacy_endpoint,
-)
+from neuracore.core.streaming.p2p.signalling_endpoint import SignallingEndpoint
 
 ICE_SERVERS = [
     RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -58,7 +55,8 @@ class PeerToPeerProviderConnection:
         enabled_manager: EnabledManager | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         auth: Auth | None = None,
-        signalling: SignallingEndpoint | None = None,
+        *,
+        signalling: SignallingEndpoint,
     ) -> None:
         """Initialize the connection.
 
@@ -76,7 +74,7 @@ class PeerToPeerProviderConnection:
                 provided.
             enabled_manager: The enabled manager for whether this should be
                 consuming. Defaults to a new enabled manger if not provided.
-            signalling: Where the messages go. Defaults to the legacy service.
+            signalling: Where the messages go.
 
         """
         self.id = connection_id
@@ -97,7 +95,7 @@ class PeerToPeerProviderConnection:
 
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
-        self.signalling = signalling or legacy_endpoint(self.org_id, self.auth)
+        self.signalling = signalling
         self.loop = loop or get_running_loop()
         self.enabled_manager = enabled_manager or EnabledManager(True, loop=self.loop)
         self.enabled_manager.add_listener(EnabledManager.DISABLED, self._on_close)

@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 from aiohttp import ClientResponseError, ClientSession
 
-from neuracore.core.const import STREAM_API_URL, shared_signalling_url
+from neuracore.core.const import shared_signalling_url
 from neuracore.core.streaming.p2p import signalling_events_consumer
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.signalling_events_consumer import (
@@ -132,22 +132,21 @@ async def test_first_region_is_used_without_a_shared_endpoint(
 
 
 @pytest.mark.asyncio
-async def test_organization_without_regions_streams_from_legacy(
+async def test_organization_without_regions_stops_signalling(
     backend: Any, region: Any, auth: Any, client_session: ClientSession
 ) -> None:
     _, api_url = backend
     fake_region, region_url = region
     consumer = _consumer(_session(api_url, auth, client_session, 0), [], client_session)
-    consumer.auth = auth
 
-    with patch.object(signalling_events_consumer, "SIGNALLING_URL", region_url):
-        config = await consumer.get_sse_client_config()
+    with (
+        patch.object(signalling_events_consumer, "SIGNALLING_URL", region_url),
+        pytest.raises(RuntimeError),
+    ):
+        await consumer.get_sse_client_config()
 
     assert fake_region.registrations == []
-    assert consumer.signalling_session is None
-    assert config.url == (
-        f"{STREAM_API_URL}/org/{ORG_ID}/signalling/notifications/{STREAM_ID}"
-    )
+    assert consumer.enabled_manager.is_disabled()
 
 
 @pytest.mark.asyncio

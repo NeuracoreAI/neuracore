@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 from neuracore_types import DataType, RobotStreamTrack
 
-from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider import client_provider_stream_manager
 from neuracore.core.streaming.p2p.provider.client_provider_stream_manager import (
@@ -21,7 +20,13 @@ from neuracore.core.streaming.p2p.provider.client_provider_stream_manager import
 ORG_ID = "org-1"
 ROBOT_ID = "robot-1"
 STREAM_ID = "stream-1"
-BATCH_URL = f"{STREAM_API_URL}/org/{ORG_ID}/signalling/track/batch"
+SIGNALLING_BASE_URL = f"https://signalling.example.com/org/{ORG_ID}/signalling"
+BATCH_URL = f"{SIGNALLING_BASE_URL}/track/batch"
+
+
+async def signalling_endpoint() -> tuple[str, dict[str, str]]:
+    """Return the endpoint the manager sends its robot calls to."""
+    return SIGNALLING_BASE_URL, {}
 
 
 class RecordingClientSession:
@@ -100,6 +105,7 @@ def manager(
         loop=nc_loop,
         org_id=ORG_ID,
         auth=MagicMock(get_headers=lambda: {}),
+        signalling=signalling_endpoint,
     )
 
 

@@ -47,6 +47,9 @@ def _consumer(
     consumer.auth = auth
     consumer.enabled_manager = EnabledManager(True, loop=asyncio.get_running_loop())
     consumer._decided = asyncio.Event()
+    consumer.enabled_manager.add_listener(
+        EnabledManager.DISABLED, consumer._decided.set
+    )
     consumer._failed_over = False
 
     async def list_regions() -> list[str]:
@@ -90,18 +93,17 @@ async def test_endpoint_waits_for_registration_then_names_the_region(
 
 
 @pytest.mark.asyncio
-async def test_endpoint_is_legacy_without_regions(
+async def test_endpoint_fails_without_regions(
     backend: Any, auth: Any, client_session: ClientSession
 ) -> None:
     _, api_url = backend
     consumer = _consumer(_robot_session(api_url, auth, client_session), [], auth)
 
-    await consumer.get_sse_client_config()
+    with pytest.raises(RuntimeError):
+        await consumer.get_sse_client_config()
 
-    assert await consumer.endpoint() == (
-        f"{STREAM_API_URL}/org/{ORG_ID}/signalling",
-        auth.get_headers(),
-    )
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(consumer.endpoint(), timeout=1)
 
 
 @pytest.mark.asyncio
