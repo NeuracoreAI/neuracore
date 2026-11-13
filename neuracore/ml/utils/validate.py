@@ -56,9 +56,9 @@ class AlgorithmCheck(BaseModel):
 
 
 def _indexed_names(data_type: DataType) -> dict[int, str]:
-    return {
-        index: f"{data_type.value}_{index}" for index in range(MAX_LEN_PER_DATA_TYPE)
-    }
+    # A robot logs a single done stream, so DONE never has more than one slot.
+    num_slots = 1 if data_type == DataType.DONE else MAX_LEN_PER_DATA_TYPE
+    return {index: f"{data_type.value}_{index}" for index in range(num_slots)}
 
 
 def setup_logging(output_dir: Path) -> None:
