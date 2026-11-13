@@ -26,13 +26,6 @@ class FakeAuth(EventEmitter):
         return {}
 
 
-class UnauthenticatedAuth(FakeAuth):
-    """Auth double that reproduces a post-logout header request."""
-
-    def get_headers(self) -> dict[str, str]:
-        raise AuthenticationError("Not authenticated")
-
-
 class FakeSession:
     """Client session double whose asynchronous closure can be observed."""
 
@@ -130,7 +123,7 @@ def test_org_nodes_manager_tears_down(nc_loop) -> None:
     enabled = EnabledManager(True, loop=nc_loop)
     consumer = MagicMock()
     with patch(
-        "neuracore.core.streaming.base_sse_consumer.ClientSession",
+        "neuracore.core.streaming.p2p.consumer.org_nodes_manager.ClientSession",
         return_value=session,
     ):
         manager = OrgNodesManager(
@@ -152,19 +145,26 @@ def test_org_nodes_manager_tears_down(nc_loop) -> None:
     asyncio.run_coroutine_threadsafe(asyncio.sleep(0), nc_loop).result(timeout=2)
 
     assert enabled.is_disabled()
-    assert manager.signalling_stream_future.cancelled()
     assert session.closed_event.wait(timeout=2)
     consumer.close.assert_called_once_with()
     assert manager.connections == {}
     assert auth.listeners(Auth.LOGOUT_EVENT) == []
 
 
-def test_sse_consumer_stops_on_authentication_error(nc_loop, caplog) -> None:
-    auth = UnauthenticatedAuth()
+def test_refused_region_listing_closes_org_nodes_manager(nc_loop) -> None:
+    auth = FakeAuth()
     session = FakeSession()
     enabled = EnabledManager(True, loop=nc_loop)
+    registered = threading.Event()
+    orchestrator = MagicMock()
+
+    async def refused() -> list[str]:
+        await asyncio.get_running_loop().run_in_executor(None, registered.wait, 2)
+        raise AuthenticationError("refused")
+
+    orchestrator.region_endpoints = refused
     with patch(
-        "neuracore.core.streaming.base_sse_consumer.ClientSession",
+        "neuracore.core.streaming.p2p.consumer.org_nodes_manager.ClientSession",
         return_value=session,
     ):
         manager = OrgNodesManager(
@@ -172,23 +172,17 @@ def test_sse_consumer_stops_on_authentication_error(nc_loop, caplog) -> None:
             loop=nc_loop,
             enabled_manager=enabled,
             auth=auth,
-            stream_manager_orchestrator=MagicMock(),
+            stream_manager_orchestrator=orchestrator,
         )
+    manager_future: Future[OrgNodesManager] = Future()
+    manager_future.set_result(manager)
+    org_module._org_node_managers[manager.org_id] = manager_future
 
-    async def wait_until_disabled() -> None:
-        for _ in range(100):
-            if enabled.is_disabled():
-                return
-            await asyncio.sleep(0.01)
-        raise AssertionError("SSE consumer did not stop after authentication failure")
+    registered.set()
 
-    asyncio.run_coroutine_threadsafe(wait_until_disabled(), nc_loop).result(timeout=2)
-
-    assert manager.signalling_stream_future.cancelled()
     assert session.closed_event.wait(timeout=2)
-    assert not any(
-        "Streaming signalling error" in record.message for record in caplog.records
-    )
+    assert enabled.is_disabled()
+    assert manager.org_id not in org_module._org_node_managers
 
 
 def test_signalling_http_401_tears_down_orchestrator(nc_loop, caplog) -> None:

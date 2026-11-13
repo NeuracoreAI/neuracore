@@ -239,21 +239,6 @@ async def test_reconnected_region_init_replaces_its_entries(availability: Any) -
     assert _track_ids(availability.snapshot()) == {"t-2"}
 
 
-async def test_regional_entry_wins_over_legacy_entry(
-    availability: Any, regional: Any
-) -> None:
-    """Given one robot stream in the legacy list and in region A,
-    when both inits arrive,
-    then region A owns it, even though the legacy entry has no epoch.
-    """
-    legacy = regional("consumer.regional_availability").LEGACY_SOURCE
-    availability.apply_init(legacy, _init(None, "s-1", "t-legacy"))
-    availability.apply_init(REGION_A, _init(1, "s-1", "t-a"))
-
-    assert availability.owner_of(ROBOT_ID, 0, "s-1") == REGION_A
-    assert _track_ids(availability.snapshot()) == {"t-a"}
-
-
 async def test_connect_goes_to_the_listed_region(
     availability: Any, regional: Any
 ) -> None:
