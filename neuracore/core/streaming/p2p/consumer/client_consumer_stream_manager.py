@@ -17,8 +17,6 @@ from neuracore_types import (
     SynchronizedPoint,
 )
 
-from neuracore.core.auth import Auth, get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )
@@ -31,10 +29,7 @@ from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
     get_consume_live_data_enabled_manager,
 )
-from neuracore.core.streaming.p2p.signalling_endpoint import (
-    SignallingTarget,
-    legacy_endpoint,
-)
+from neuracore.core.streaming.p2p.signalling_endpoint import SignallingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -50,33 +45,22 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         self,
         robot_id: str,
         robot_instance: int,
-        local_stream_id: str,
         client_session: ClientSession,
         loop: asyncio.AbstractEventLoop,
-        org_id: str | None = None,
-        auth: Auth | None = None,
     ):
         """Initialize the client streaming manager.
 
         Args:
             robot_id: Unique identifier for the robot
             robot_instance: Instance number of the robot
-            local_stream_id: Unique identifier of this recipient.
             client_session: HTTP client session for API requests
             loop: Event loop for async operations
-            org_id: The unique identifier for the organization. If not provided,
-                defaults to the current org.
-            auth: Authentication object. If not provided, uses default auth
         """
         self.robot_id = robot_id
         self.robot_instance = robot_instance
-        self.local_stream_id = local_stream_id
         self.loop = loop
         self.client_session = client_session
         self._current_track_information: AvailableRobotInstance | None = None
-        self.org_id = org_id or get_current_org()
-        self.auth = auth or get_auth()
-        self.signalling = legacy_endpoint(self.org_id, self.auth)
         self.streaming = EnabledManager.derived_manger(
             get_consume_live_data_enabled_manager(), loop=loop
         )
@@ -174,7 +158,6 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             stream_id in connection_stream_map
             and connection_stream_map[stream_id].fully_connected()
             for stream_id in self.current_track_information.tracks.keys()
-            if stream_id != self.local_stream_id
         )
 
     def num_remote_nodes(self) -> int:
@@ -189,18 +172,14 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         if self.current_track_information is None:
             return 0
 
-        return sum(
-            1
-            for stream_id in self.current_track_information.tracks.keys()
-            if stream_id != self.local_stream_id
-        )
+        return len(self.current_track_information.tracks)
 
     async def create_new_connection(
         self,
         remote_stream_id: str,
         connection_id: str,
         connection_details: OpenConnectionDetails,
-        target: SignallingTarget | None = None,
+        target: SignallingTarget,
     ) -> EnabledManager:
         """Create a new peer-to-peer connection to a remote stream.
 
@@ -208,8 +187,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             remote_stream_id: ID of the remote stream to connect to
             connection_id: Unique identifier for this connection
             connection_details: The describes the type of connection to establish.
-            target: The stream that signals the connection. Defaults to this
-                manager's legacy stream.
+            target: The stream that signals the connection.
 
         Returns:
             The enabled manager for this connection.
@@ -220,7 +198,6 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
                 remote_stream_id, []
             )
 
-        target = target or SignallingTarget(self.local_stream_id, self.signalling)
         connection = PeerToPeerConsumerConnection(
             connection_id=connection_id,
             local_stream_id=target.stream_id,
@@ -229,9 +206,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             client_session=self.client_session,
             expected_tracks=expected_tracks,
             ice_config=await self._get_ice_config(target),
-            org_id=self.org_id,
             loop=self.loop,
-            auth=self.auth,
             signalling=target.endpoint,
         )
 

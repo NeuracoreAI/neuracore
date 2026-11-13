@@ -285,13 +285,9 @@ class OrgNodesManager:
                 self._create_new_connection(
                     manager=self.consumers[key],
                     track_hash=track_hash,
-                    connection_request=OpenConnectionRequest(
-                        from_id=self.stream_manager_orchestrator.signalling_consumer.local_stream_id,
-                        to_id=remote_stream_id,
-                        robot_id=robot_id,
-                        robot_instance=robot_instance,
-                        video_format=VideoFormat.NEURACORE_CUSTOM,
-                    ),
+                    robot_id=robot_id,
+                    robot_instance=robot_instance,
+                    remote_stream_id=remote_stream_id,
                 )
             )
 
@@ -333,7 +329,9 @@ class OrgNodesManager:
         self,
         track_hash: int,
         manager: ClientConsumerStreamManager,
-        connection_request: OpenConnectionRequest,
+        robot_id: str,
+        robot_instance: int,
+        remote_stream_id: str,
     ) -> None:
         """Create a new connection, unless one is already opening for these tracks.
 
@@ -341,20 +339,21 @@ class OrgNodesManager:
             track_hash: a hash over the tracks this connection is setup to handle.
             manager: the consumer manager that will be responsible for this new
                 connection.
-            connection_request: the details of the connection to be opened.
+            robot_id: the robot to connect to.
+            robot_instance: the robot instance to connect to.
+            remote_stream_id: the robot stream to connect to.
         """
         pending_key = (
-            RobotInstanceIdentifier(
-                robot_id=connection_request.robot_id,
-                robot_instance=connection_request.robot_instance,
-            ),
-            connection_request.to_id,
+            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=robot_instance),
+            remote_stream_id,
         )
         if self._pending_connections.get(pending_key) == track_hash:
             return
         self._pending_connections[pending_key] = track_hash
         try:
-            await self._open_new_connection(track_hash, manager, connection_request)
+            await self._open_new_connection(
+                track_hash, manager, robot_id, robot_instance, remote_stream_id
+            )
         finally:
             if self._pending_connections.get(pending_key) == track_hash:
                 del self._pending_connections[pending_key]
@@ -363,7 +362,9 @@ class OrgNodesManager:
         self,
         track_hash: int,
         manager: ClientConsumerStreamManager,
-        connection_request: OpenConnectionRequest,
+        robot_id: str,
+        robot_instance: int,
+        remote_stream_id: str,
     ) -> None:
         """Create a new connection for a specific robot instance.
 
@@ -374,23 +375,27 @@ class OrgNodesManager:
             track_hash: a hash over the tracks this connection is setup to handle.
             manager: the consumer manager that will be responsible for this new
                 connection.
-            connection_request: the details of the connection to be opened.
+            robot_id: the robot to connect to.
+            robot_instance: the robot instance to connect to.
+            remote_stream_id: the robot stream to connect to.
         """
         orchestrator = self.stream_manager_orchestrator
         used: list[SignallingEventsConsumer] = []
 
         async def open_connection(owner: str) -> tuple[int, dict[str, Any]]:
-            signalling_consumer = orchestrator.viewer_consumer(
-                owner, connection_request.robot_id
-            )
+            signalling_consumer = orchestrator.viewer_consumer(owner, robot_id)
             used[:] = [signalling_consumer]
             # The robot's first offer would be lost on a stream not open yet.
             await asyncio.wait_for(
                 signalling_consumer.wait_open(), VIEWER_STREAM_OPEN_TIMEOUT_S
             )
             base_url, headers = await signalling_consumer.endpoint()
-            request = connection_request.model_copy(
-                update={"from_id": signalling_consumer.local_stream_id}
+            request = OpenConnectionRequest(
+                from_id=signalling_consumer.local_stream_id,
+                to_id=remote_stream_id,
+                robot_id=robot_id,
+                robot_instance=robot_instance,
+                video_format=VideoFormat.NEURACORE_CUSTOM,
             )
             # Read within a context manager, which releases the connection.
             async with self.client_session.post(
@@ -404,13 +409,13 @@ class OrgNodesManager:
         try:
             status, body = await connect_to_listed_region(
                 self.availability,
-                connection_request.robot_id,
-                connection_request.robot_instance,
-                connection_request.to_id,
+                robot_id,
+                robot_instance,
+                remote_stream_id,
                 open_connection,
             )
         except RobotInstanceUnavailableError:
-            logger.info("Robot %s is no longer listed", connection_request.robot_id)
+            logger.info("Robot %s is no longer listed", robot_id)
             return
         if status != 200:
             raise RuntimeError(f"signalling refused the connection: {status} {body}")
@@ -419,11 +424,10 @@ class OrgNodesManager:
         (signalling_consumer,) = used
 
         robot_identifier = RobotInstanceIdentifier(
-            robot_id=connection_request.robot_id,
-            robot_instance=connection_request.robot_instance,
+            robot_id=robot_id, robot_instance=robot_instance
         )
         existing_connection = self.connections[robot_identifier].pop(
-            connection_request.to_id, None
+            remote_stream_id, None
         )
         if existing_connection is not None:
             self.background_tracker.submit_background_coroutine(
@@ -432,7 +436,7 @@ class OrgNodesManager:
                 )
             )
 
-        self.connections[robot_identifier][connection_request.to_id] = (
+        self.connections[robot_identifier][remote_stream_id] = (
             connection_message.connection_id,
             track_hash,
         )
@@ -444,13 +448,13 @@ class OrgNodesManager:
         @connection_enabled.on(EnabledManager.DISABLED)
         async def on_close() -> None:
             current_connection_details = self.connections[robot_identifier].get(
-                connection_request.to_id, None
+                remote_stream_id, None
             )
             if current_connection_details is None:
                 return
             connection_id, _ = current_connection_details
             if connection_message.connection_id == connection_id:
-                self.connections[robot_identifier].pop(connection_request.to_id, None)
+                self.connections[robot_identifier].pop(remote_stream_id, None)
 
     def _apply_stream_changes(
         self, old: InstanceStreamMap, current: InstanceStreamMap
@@ -463,10 +467,6 @@ class OrgNodesManager:
             old: the available nodes before the change
             current: the new nodes available for connection.
         """
-        local_stream_id = (
-            self.stream_manager_orchestrator.signalling_consumer.local_stream_id
-        )
-
         for robot, manager in self.consumers.items():
             robot_id, robot_instance = robot
             old_streams = set(self.connections[robot].keys())
@@ -488,13 +488,9 @@ class OrgNodesManager:
                     self._create_new_connection(
                         manager=manager,
                         track_hash=current[robot][added_stream],
-                        connection_request=OpenConnectionRequest(
-                            from_id=local_stream_id,
-                            to_id=added_stream,
-                            robot_id=robot_id,
-                            robot_instance=robot_instance,
-                            video_format=VideoFormat.NEURACORE_CUSTOM,
-                        ),
+                        robot_id=robot_id,
+                        robot_instance=robot_instance,
+                        remote_stream_id=added_stream,
                     )
                 )
 
@@ -512,13 +508,9 @@ class OrgNodesManager:
                     self._create_new_connection(
                         manager=manager,
                         track_hash=current[robot][existing_stream],
-                        connection_request=OpenConnectionRequest(
-                            from_id=local_stream_id,
-                            to_id=existing_stream,
-                            robot_id=robot_id,
-                            robot_instance=robot_instance,
-                            video_format=VideoFormat.NEURACORE_CUSTOM,
-                        ),
+                        robot_id=robot_id,
+                        robot_instance=robot_instance,
+                        remote_stream_id=existing_stream,
                     )
                 )
 

@@ -13,6 +13,7 @@ from neuracore.core.exceptions import AuthenticationError
 from neuracore.core.streaming.p2p.consumer import org_nodes_manager as org_module
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import OrgNodesManager
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.streaming.p2p.signalling_session import SignallingSession
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
@@ -72,17 +73,11 @@ def test_stream_orchestrator_tears_down_and_can_be_recreated(nc_loop) -> None:
     auth = FakeAuth()
     session = FakeSession()
     replacement_session = FakeSession()
-    signalling_consumer = MagicMock()
     provider_manager = MagicMock()
     consumer_manager = MagicMock()
 
     with (
         patch.dict(SingletonMetaclass._instances, {}, clear=True),
-        patch(
-            "neuracore.core.streaming.p2p.stream_manager_orchestrator."
-            "SignallingEventsConsumer",
-            return_value=signalling_consumer,
-        ),
         patch(
             "neuracore.core.streaming.p2p.stream_manager_orchestrator.ClientSession",
             side_effect=[session, replacement_session],
@@ -106,7 +101,6 @@ def test_stream_orchestrator_tears_down_and_can_be_recreated(nc_loop) -> None:
         assert replacement is not manager
 
         assert session.closed_event.wait(timeout=2)
-        signalling_consumer.close.assert_called_once_with()
         provider_manager.close.assert_called_once_with()
         consumer_manager.close.assert_called_once_with()
         assert manager._logout_listener not in auth.listeners(Auth.LOGOUT_EVENT)
@@ -190,9 +184,17 @@ def test_signalling_http_401_tears_down_orchestrator(nc_loop, caplog) -> None:
     session = FakeSession()
     enabled = EnabledManager(True, loop=nc_loop)
 
+    async def headers(self) -> dict[str, str]:
+        return {}
+
     with (
         patch.dict(SingletonMetaclass._instances, {}, clear=True),
-        patch.object(EnabledManager, "any_enabled", return_value=enabled),
+        patch.object(SignallingSession, "headers", headers),
+        patch(
+            "neuracore.core.streaming.p2p.stream_manager_orchestrator."
+            "get_consume_live_data_enabled_manager",
+            return_value=enabled,
+        ),
         patch(
             "neuracore.core.streaming.p2p.stream_manager_orchestrator.ClientSession",
             return_value=session,
@@ -207,6 +209,7 @@ def test_signalling_http_401_tears_down_orchestrator(nc_loop, caplog) -> None:
             loop=nc_loop,
             auth=auth,
         )
+        manager.viewer_consumer("https://region.test", "robot-1")
 
         assert session.closed_event.wait(timeout=2)
         assert manager._closed
