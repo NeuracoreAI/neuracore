@@ -439,7 +439,7 @@ class Pi05(NeuracoreModel):
 
         Each camera's projected image tokens are attention-pooled to one
         vector, the vectors are concatenated across cameras, and an MLP maps
-        them to one logit per done feature. The head is kept in float32.
+        them to one logit for the done flag. The head is kept in float32.
         """
         num_cameras = len(self.rgb_input_statistics)
         vision_config = self.model.paligemma_with_expert.paligemma.config.vision_config
