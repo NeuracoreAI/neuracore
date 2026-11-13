@@ -45,8 +45,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, HEALTH, HEALTH_MAX_PAYLOAD_BYTES,
     LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE, MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE,
-    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION,
-    VERSION_MAX_PAYLOAD_BYTES,
+    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, STATUS,
+    STATUS_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
 };
 use data_daemon_shared::{microseconds_to_seconds, BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -117,6 +117,11 @@ pub(crate) struct ProducerState {
     _version_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
     /// Request-response client used to read the running daemon's build version.
     pub(crate) version_client: Client<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the status client so port discovery
+    /// doesn't race the handle going out of scope.
+    _status_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response client used to ask what the daemon is waiting on.
+    pub(crate) status_client: Client<ipc::Service, [u8], (), [u8], ()>,
 }
 
 /// Work item for the publisher thread.
@@ -367,6 +372,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         open_query_client(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
     let (version_service, version_client) =
         open_query_client(&node, VERSION, VERSION_MAX_PAYLOAD_BYTES)?;
+    let (status_service, status_client) =
+        open_query_client(&node, STATUS, STATUS_MAX_PAYLOAD_BYTES)?;
 
     Ok(ProducerState {
         _node: node,
@@ -378,6 +385,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         health_client,
         _version_service: version_service,
         version_client,
+        _status_service: status_service,
+        status_client,
     })
 }
 
