@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{NaiveDateTime, Utc};
@@ -231,8 +232,26 @@ pub trait StateStore: Send + Sync {
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Count what the recordings on this machine are waiting on, for the
-    /// status query. Read-only.
-    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError>;
+    /// status query. Read-only. `failed_retention` is how long after a
+    /// recording is stamped `failed_at` the reaper deletes it, or `None` when
+    /// the reaper is off; a recording not stamped yet counts from now.
+    async fn status_counts(
+        &self,
+        failed_retention: Option<Duration>,
+    ) -> Result<StatusCounts, StateStoreError>;
+
+    /// Stamp `failed_at = now` on every recording that can never upload and is
+    /// not stamped yet: its robot or dataset was refused, the backend no
+    /// longer holds it, or a trace failed to write, register or upload. Cancelled
+    /// recordings are left alone. Returns how many were stamped.
+    async fn stamp_failed_recordings(&self) -> Result<u64, StateStoreError>;
+
+    /// List the recordings that can never upload and were stamped `failed_at`
+    /// at or before `cutoff`, for the reaper to delete. Oldest first.
+    async fn recordings_failed_before(
+        &self,
+        cutoff: NaiveDateTime,
+    ) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state under
     /// an existing recording. Idempotent on `trace_id`.
@@ -1136,7 +1155,10 @@ impl StateStore for SqliteStateStore {
         Ok(recording_index)
     }
 
-    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError> {
+    async fn status_counts(
+        &self,
+        failed_retention: Option<Duration>,
+    ) -> Result<StatusCounts, StateStoreError> {
         // Bytes left per recording: a trace's size is only final once it is
         // written, so the bytes written so far stand in until then.
         const BYTES_LEFT: &str = "SELECT recording_index, \
@@ -1189,9 +1211,14 @@ impl StateStore for SqliteStateStore {
         .fetch_all(&self.read_pool)
         .await?;
         // One reason per recording, in the order the daemon finds them: its
-        // robot, its dataset, then the backend or the upload.
-        let failed: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
-            "SELECT reason, kind, name, COUNT(*) FROM ( \
+        // robot, its dataset, then the backend or the upload. A recording not
+        // stamped yet by the reaper counts as failing now. The latest stamp
+        // bounds when all of a reason's recordings are deleted; a recording
+        // that failed to write goes sooner, at the next startup recovery.
+        let now = Utc::now().naive_utc();
+        let failed: Vec<(String, Option<String>, Option<String>, i64, NaiveDateTime)> =
+            sqlx::query_as(&format!(
+                "SELECT reason, kind, name, COUNT(*), MAX(failed_at) FROM ( \
                  SELECT CASE \
                           WHEN r.offline = 'failed' \
                             THEN COALESCE(ro.failure, 'unknown') \
@@ -1199,16 +1226,18 @@ impl StateStore for SqliteStateStore {
                           ELSE ?2 \
                         END AS reason, \
                         CASE WHEN r.offline = 'failed' THEN ro.failure_kind END AS kind, \
-                        CASE WHEN r.offline = 'failed' THEN ro.failure_name END AS name \
+                        CASE WHEN r.offline = 'failed' THEN ro.failure_name END AS name, \
+                        COALESCE(r.failed_at, ?3) AS failed_at \
                    FROM recordings r \
                    LEFT JOIN recording_offline ro USING (recording_index) \
                   WHERE r.cancelled_at IS NULL AND {NEVER_UPLOADS} \
              ) GROUP BY reason, kind, name ORDER BY reason, kind, name"
-        ))
-        .bind(resolution_detail::NOT_ON_SERVER)
-        .bind(resolution_detail::UPLOAD_FAILED)
-        .fetch_all(&self.read_pool)
-        .await?;
+            ))
+            .bind(resolution_detail::NOT_ON_SERVER)
+            .bind(resolution_detail::UPLOAD_FAILED)
+            .bind(now)
+            .fetch_all(&self.read_pool)
+            .await?;
 
         let count = |(recordings, bytes): (i64, i64)| RecordingCount {
             recordings: u64::try_from(recordings).unwrap_or(0),
@@ -1217,14 +1246,21 @@ impl StateStore for SqliteStateStore {
         let reason = |reason: String,
                       kind: Option<String>,
                       name: Option<String>,
-                      recordings: i64| ReasonCount {
+                      recordings: i64,
+                      deleted_within_seconds: Option<u64>| ReasonCount {
             reason,
             recordings: u64::try_from(recordings).unwrap_or(0),
+            deleted_within_seconds,
             subject: kind
                 .as_deref()
                 .and_then(SubjectKind::parse)
                 .zip(name)
                 .map(|(kind, name)| Subject::new(kind, &name)),
+        };
+        let deleted_within_seconds = |failed_at: NaiveDateTime| {
+            let retention = chrono::Duration::from_std(failed_retention?).ok()?;
+            let seconds = (failed_at + retention - now).num_seconds();
+            Some(u64::try_from(seconds).unwrap_or(0))
         };
         Ok(StatusCounts {
             waiting: count(waiting),
@@ -1232,16 +1268,58 @@ impl StateStore for SqliteStateStore {
             blocked: limit_reasons(
                 blocked
                     .into_iter()
-                    .map(|(code, kind, name, recordings)| reason(code, kind, name, recordings))
+                    .map(|(code, kind, name, recordings)| {
+                        reason(code, kind, name, recordings, None)
+                    })
                     .collect(),
             ),
             failed: limit_reasons(
                 failed
                     .into_iter()
-                    .map(|(code, kind, name, recordings)| reason(code, kind, name, recordings))
+                    .map(|(code, kind, name, recordings, failed_at)| {
+                        reason(
+                            code,
+                            kind,
+                            name,
+                            recordings,
+                            deleted_within_seconds(failed_at),
+                        )
+                    })
                     .collect(),
             ),
         })
+    }
+
+    async fn stamp_failed_recordings(&self) -> Result<u64, StateStoreError> {
+        let result = sqlx::query(&format!(
+            "UPDATE recordings SET failed_at = ?1 \
+              WHERE recording_index IN ( \
+                    SELECT r.recording_index FROM recordings r \
+                     WHERE r.failed_at IS NULL AND r.cancelled_at IS NULL \
+                       AND {NEVER_UPLOADS})"
+        ))
+        .bind(Utc::now().naive_utc())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn recordings_failed_before(
+        &self,
+        cutoff: NaiveDateTime,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(&format!(
+            "SELECT r.* FROM recordings r \
+              WHERE r.failed_at <= ?1 AND r.cancelled_at IS NULL AND {NEVER_UPLOADS} \
+           ORDER BY r.failed_at ASC, r.recording_index ASC"
+        ))
+        .bind(cutoff)
+        .fetch_all(&self.read_pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
@@ -2969,7 +3047,7 @@ mod tests {
             .await
             .unwrap();
 
-        let counts = store.status_counts().await.unwrap();
+        let counts = store.status_counts(None).await.unwrap();
 
         assert_eq!(
             counts,
@@ -3015,6 +3093,7 @@ mod tests {
         ReasonCount {
             reason: code.into(),
             recordings,
+            deleted_within_seconds: None,
             subject: None,
         }
     }
@@ -3026,14 +3105,137 @@ mod tests {
         }
     }
 
+    /// A recording whose dataset was refused: it can never upload.
+    async fn refused_recording(store: &SqliteStateStore, name: &str) -> i64 {
+        let dataset_id = format!("local-dataset-{name}");
+        let index = offline_recording(store, &format!("local-robot-{name}"), 0, &dataset_id).await;
+        store
+            .fail_local_dataset(&dataset_id, resolution_detail::REJECTED)
+            .await
+            .unwrap();
+        store.settle_offline_recordings().await.unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn status_counts_say_when_recordings_that_will_not_upload_are_deleted() {
+        const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+        let (store, _tempdir) = open_store().await;
+        refused_recording(&store, "1").await;
+
+        // Not stamped by the reaper yet: counted from now.
+        let failed = store.status_counts(Some(WEEK)).await.unwrap().failed;
+        let deleted_within = failed[0].deleted_within_seconds.expect("deleted");
+        assert!((WEEK.as_secs() - 5..=WEEK.as_secs()).contains(&deleted_within));
+
+        // Stamped a day ago: six days left.
+        store.stamp_failed_recordings().await.unwrap();
+        sqlx::query("UPDATE recordings SET failed_at = ?1")
+            .bind(Utc::now().naive_utc() - chrono::Duration::days(1))
+            .execute(&store.write_pool)
+            .await
+            .unwrap();
+        let failed = store.status_counts(Some(WEEK)).await.unwrap().failed;
+        let deleted_within = failed[0].deleted_within_seconds.expect("deleted");
+        let six_days = 6 * 24 * 60 * 60;
+        assert!((six_days - 5..=six_days).contains(&deleted_within));
+
+        // Overdue: deleted on the reaper's next pass.
+        let failed = store
+            .status_counts(Some(Duration::from_secs(60)))
+            .await
+            .unwrap()
+            .failed;
+        assert_eq!(failed[0].deleted_within_seconds, Some(0));
+
+        // Another refused just now: all of them are gone within its week.
+        refused_recording(&store, "2").await;
+        let failed = store.status_counts(Some(WEEK)).await.unwrap().failed;
+        assert_eq!(failed[0].recordings, 2);
+        let deleted_within = failed[0].deleted_within_seconds.expect("deleted");
+        assert!((WEEK.as_secs() - 5..=WEEK.as_secs()).contains(&deleted_within));
+
+        // The reaper is off: never deleted.
+        let failed = store.status_counts(None).await.unwrap().failed;
+        assert_eq!(
+            failed,
+            vec![about(
+                resolution_detail::REJECTED,
+                2,
+                SubjectKind::Dataset,
+                "warehouse"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_recordings_that_can_never_upload_are_stamped_failed() {
+        let (store, _tempdir) = open_store().await;
+        let refused = refused_recording(&store, "refused").await;
+        let not_found = seed_recording(&store, 1).await;
+        store.mark_recording_not_found(not_found).await.unwrap();
+        // A trace the backend would not register, past its retries.
+        let unregistered = seed_recording(&store, 3).await;
+        store
+            .create_trace(unregistered, "t-unregistered", None, None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-unregistered",
+                TraceUpdate {
+                    registration_status: Some(TraceRegistrationStatus::Failed),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Uploading normally.
+        let healthy = seed_recording(&store, 2).await;
+        trace_with_bytes(&store, healthy, "t-healthy", 1_000, 400).await;
+        // Cancelled: the reaper removes it once the cancel is sent.
+        let cancelled = refused_recording(&store, "cancelled").await;
+        store
+            .cancel_recording(cancelled, RecordingTimestamp::observed_at(1))
+            .await
+            .unwrap();
+
+        assert_eq!(store.stamp_failed_recordings().await.unwrap(), 3);
+        // A stamp is kept: the time counts from the first one.
+        let first_stamp = row(&store, refused).await.failed_at.expect("stamped");
+        assert_eq!(store.stamp_failed_recordings().await.unwrap(), 0);
+        assert_eq!(row(&store, refused).await.failed_at, Some(first_stamp));
+        assert_eq!(row(&store, healthy).await.failed_at, None);
+        assert_eq!(row(&store, cancelled).await.failed_at, None);
+
+        let now = Utc::now().naive_utc();
+        let due: Vec<i64> = store
+            .recordings_failed_before(now)
+            .await
+            .unwrap()
+            .iter()
+            .map(|recording| recording.recording_index)
+            .collect();
+        assert_eq!(due, vec![refused, not_found, unregistered]);
+        assert!(store
+            .recordings_failed_before(now - chrono::Duration::hours(1))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn status_counts_nothing_on_an_empty_store() {
         let (store, _tempdir) = open_store().await;
 
         assert_eq!(
-            store.status_counts().await.unwrap(),
+            store.status_counts(None).await.unwrap(),
             StatusCounts::default()
         );
+    }
+
+    async fn row(store: &SqliteStateStore, recording_index: i64) -> RecordingRow {
+        store.get_recording(recording_index).await.unwrap().unwrap()
     }
 
     #[tokio::test]

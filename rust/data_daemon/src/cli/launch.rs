@@ -19,6 +19,7 @@ use crate::cli::launch_logging::{
 };
 use crate::cloud::{
     read_org_id_from_config, spawn_config_watcher, spawn_recording_reaper, ConfigRefreshRequest,
+    FAILED_RECORDING_RETENTION,
 };
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
@@ -519,6 +520,7 @@ fn run_daemon(
                     config_path: config_path.clone(),
                     fallback_org_id: org_id.clone(),
                     reachable,
+                    failed_retention: reaper_enabled.then_some(FAILED_RECORDING_RETENTION),
                 },
                 shutdown_tx.subscribe(),
             )

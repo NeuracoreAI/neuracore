@@ -1077,6 +1077,9 @@ pub struct ReasonCount {
     pub reason: String,
     /// Number of recordings with it.
     pub recordings: u64,
+    /// For recordings that will never upload: the daemon deletes all of them
+    /// from this machine within this many seconds. `None` when it will not.
+    pub deleted_within_seconds: Option<u64>,
     /// The robot or dataset the reason is about, so the user knows which.
     /// `None` for a reason about the account (a rejected key, not being in
     /// the org) or one past [`MAX_NAMED_REASONS`].
@@ -1145,7 +1148,8 @@ impl Subject {
 
 /// Keep the first [`MAX_NAMED_REASONS`] named reasons of `reasons` and merge
 /// the rest into one unnamed entry per reason code, so a [`StatusReply`]
-/// fits its service. Order is kept.
+/// fits its service. Order is kept; a merged entry deletes its recordings by
+/// the latest of the times it merged.
 pub fn limit_reasons(reasons: Vec<ReasonCount>) -> Vec<ReasonCount> {
     let mut named = 0;
     let mut kept: Vec<ReasonCount> = Vec::new();
@@ -1163,6 +1167,11 @@ pub fn limit_reasons(reasons: Vec<ReasonCount>) -> Vec<ReasonCount> {
         {
             Some(merged) => {
                 merged.recordings = merged.recordings.saturating_add(reason.recordings);
+                merged.deleted_within_seconds =
+                    match (merged.deleted_within_seconds, reason.deleted_within_seconds) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
             }
             None => kept.push(ReasonCount {
                 subject: None,
@@ -1361,7 +1370,8 @@ const DISCARD_BLOCKED: &str = "Waiting recordings are kept until the problem is 
      discard them instead, run `neuracore data-daemon reset`: it deletes every recording on \
      this machine that has not finished uploading, not only these.";
 
-/// "2 recordings are waiting because the robot is archived. Unarchive it ...".
+/// "2 recordings are waiting because the robot is archived. Unarchive it ...",
+/// then when they are deleted, if they are.
 fn reason_sentence(reason: &ReasonCount, one: &str, many: &str) -> String {
     let verb = if reason.recordings == 1 { one } else { many };
     let count = recordings(reason.recordings);
@@ -1388,7 +1398,18 @@ fn reason_sentence(reason: &ReasonCount, one: &str, many: &str) -> String {
             None => format!("{count} {verb} (reason: {}).", reason.reason),
         },
     };
-    sentence
+    match reason.deleted_within_seconds {
+        Some(seconds) => format!(
+            "{sentence} {} deleted from this machine within {}.",
+            if reason.recordings == 1 {
+                "It will be"
+            } else {
+                "They will be"
+            },
+            days(seconds),
+        ),
+        None => sentence,
+    }
 }
 
 /// [`resolution_detail::explain`]'s cause naming the robot or dataset, for
@@ -1407,6 +1428,15 @@ fn named_cause(code: &str, subject: &Subject) -> Option<String> {
         resolution_detail::REJECTED => format!("the server rejected the {kind} \"{name}\""),
         _ => return None,
     })
+}
+
+/// "a day", "6 days": whole days, rounded up.
+fn days(seconds: u64) -> String {
+    const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+    match seconds.div_ceil(SECONDS_PER_DAY) {
+        0 | 1 => "a day".to_string(),
+        days => format!("{days} days"),
+    }
 }
 
 /// "1 recording", "3 recordings".
@@ -1509,11 +1539,13 @@ mod tests {
             vec![ReasonCount {
                 reason: "robot_archived".into(),
                 recordings: 2,
+                deleted_within_seconds: None,
                 subject: Some(Subject::new(SubjectKind::Robot, "arm")),
             }],
             vec![ReasonCount {
                 reason: "shared_not_allowed".into(),
                 recordings: 1,
+                deleted_within_seconds: Some(600),
                 subject: None,
             }],
         );
@@ -1549,6 +1581,7 @@ mod tests {
         ReasonCount {
             reason: reason.into(),
             recordings,
+            deleted_within_seconds: None,
             subject: None,
         }
     }
@@ -1556,6 +1589,13 @@ mod tests {
     fn about(reason: ReasonCount, kind: SubjectKind, name: &str) -> ReasonCount {
         ReasonCount {
             subject: Some(Subject::new(kind, name)),
+            ..reason
+        }
+    }
+
+    fn deleted_within(reason: ReasonCount, seconds: u64) -> ReasonCount {
+        ReasonCount {
+            deleted_within_seconds: Some(seconds),
             ..reason
         }
     }
@@ -1609,6 +1649,34 @@ mod tests {
                  machine that has not finished uploading, not only these."
                     .to_string(),
                 "1 recording will not upload because the account may not create shared datasets."
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn recordings_that_will_not_upload_say_when_they_are_deleted() {
+        const DAY: u64 = 24 * 60 * 60;
+        let reply = StatusReply {
+            failed: vec![
+                deleted_within(reason(resolution_detail::NOT_ON_SERVER, 1), 6 * DAY + 1),
+                deleted_within(reason(resolution_detail::UPLOAD_FAILED, 2), DAY),
+                deleted_within(reason(resolution_detail::REJECTED, 1), 0),
+            ],
+            ..healthy()
+        };
+
+        assert_eq!(
+            reply.problems(),
+            vec![
+                "1 recording will not upload because the server no longer holds the recording. \
+                 It will be deleted from this machine within 7 days."
+                    .to_string(),
+                "2 recordings will not upload because part of the recording could not be saved \
+                 or uploaded. They will be deleted from this machine within a day."
+                    .to_string(),
+                "1 recording will not upload because the server rejected the robot or dataset. \
+                 It will be deleted from this machine within a day."
                     .to_string(),
             ]
         );
@@ -1719,15 +1787,18 @@ mod tests {
 
     #[test]
     fn names_past_the_limit_are_merged_by_reason() {
-        let named = |name: &str| {
-            about(
-                reason(resolution_detail::REJECTED, 1),
-                SubjectKind::Robot,
-                name,
+        let named = |name: &str, seconds: u64| {
+            deleted_within(
+                about(
+                    reason(resolution_detail::REJECTED, 1),
+                    SubjectKind::Robot,
+                    name,
+                ),
+                seconds,
             )
         };
         let reasons: Vec<ReasonCount> = (0..MAX_NAMED_REASONS + 3)
-            .map(|index| named(&format!("arm-{index}")))
+            .map(|index| named(&format!("arm-{index}"), index as u64))
             .collect();
 
         let limited = limit_reasons(reasons);
@@ -1739,6 +1810,10 @@ mod tests {
         let merged = &limited[MAX_NAMED_REASONS];
         assert_eq!(merged.subject, None);
         assert_eq!(merged.recordings, 3);
+        assert_eq!(
+            merged.deleted_within_seconds,
+            Some(MAX_NAMED_REASONS as u64 + 2)
+        );
     }
 
     #[test]
@@ -1828,6 +1903,7 @@ mod tests {
         let reason = |code: &str, subject: Option<Subject>| ReasonCount {
             reason: code.into(),
             recordings: u64::MAX,
+            deleted_within_seconds: Some(u64::MAX),
             subject,
         };
         let longest = "\u{1F916}".repeat(MAX_SUBJECT_NAME_BYTES);

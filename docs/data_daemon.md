@@ -500,6 +500,14 @@ Waiting recordings are kept until the problem is fixed. To discard them instead,
 3 recordings (1.2 GB) are kept on this machine until the Neuracore server can be reached.
 ```
 
+A recording that can never upload is deleted from this machine within 7 days of the daemon finding it, so it does not fill the disk. That is a recording whose robot or dataset the server refused, one the server no longer holds, or one that could not be fully saved or uploaded. Until then, the status and the warning in your scripts say when it will be deleted:
+
+```text
+1 recording will not upload because the server no longer holds the recording. It will be deleted from this machine within 7 days.
+```
+
+With `recording_reaper` turned off, the daemon deletes no recordings.
+
 ### `neuracore data-daemon stop`
 
 ```bash
