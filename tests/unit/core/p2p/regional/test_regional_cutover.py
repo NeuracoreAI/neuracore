@@ -4,7 +4,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import pytest_asyncio
@@ -220,8 +220,7 @@ def test_each_provided_robot_instance_has_its_own_stream(orchestrator: Any) -> N
     first = orchestrator.get_provider_manager(ROBOT_ID, 0)
     second = orchestrator.get_provider_manager(ROBOT_ID, 1)
 
-    viewer, robot_0, robot_1 = consumers
-    assert viewer.kwargs.get("signalling_session") is None
+    robot_0, robot_1 = consumers
     assert robot_0.kwargs["signalling_session"].robot_instance == 0
     assert robot_1.kwargs["signalling_session"].robot_instance == 1
     assert robot_0.kwargs["regions"] == orchestrator.region_endpoints
@@ -238,8 +237,7 @@ def test_removing_a_provider_closes_its_stream(orchestrator: Any) -> None:
 
     orchestrator.remove_manager(ROBOT_ID, 0)
 
-    consumers[1].close.assert_called_once()
-    consumers[0].close.assert_not_called()
+    consumers[0].close.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -317,7 +315,7 @@ async def test_a_failed_region_request_is_asked_again(orchestrator: Any) -> None
 def test_a_stopped_robot_stream_removes_its_provider(orchestrator: Any) -> None:
     orchestrator, consumers = orchestrator
     orchestrator.get_provider_manager(ROBOT_ID, 0)
-    robot_consumer = consumers[1]
+    robot_consumer = consumers[0]
     (_, on_disabled), _ = robot_consumer.enabled_manager.add_listener.call_args
 
     on_disabled()
@@ -327,7 +325,7 @@ def test_a_stopped_robot_stream_removes_its_provider(orchestrator: Any) -> None:
 
 
 def test_streams_follow_their_live_data_settings() -> None:
-    """The viewer stream follows consume; a robot's stream follows provide."""
+    """A viewer's stream follows consume; a robot's stream follows provide."""
     module = "neuracore.core.streaming.p2p.stream_manager_orchestrator"
     consume, provide = MagicMock(name="consume"), MagicMock(name="provide")
     with (
@@ -343,11 +341,12 @@ def test_streams_follow_their_live_data_settings() -> None:
             org_id=ORG_ID, loop=MagicMock(), auth=MagicMock()
         )
         orchestrator.get_provider_manager(ROBOT_ID, 0)
+        orchestrator.viewer_consumer("https://region.example.com", ROBOT_ID)
 
-    enabled_manager.any_enabled.assert_called_once_with(consume)
-    enabled_manager.derived_manger.assert_called_once_with(
-        provide, loop=orchestrator.loop
-    )
+    assert enabled_manager.derived_manger.call_args_list == [
+        call(provide, loop=orchestrator.loop),
+        call(consume, loop=orchestrator.loop),
+    ]
 
 
 def test_own_stream_ids_include_every_robot_stream(orchestrator: Any) -> None:
@@ -355,7 +354,7 @@ def test_own_stream_ids_include_every_robot_stream(orchestrator: Any) -> None:
     orchestrator.get_provider_manager(ROBOT_ID, 0)
     orchestrator.get_provider_manager(ROBOT_ID, 1)
 
-    assert orchestrator.own_stream_ids() == {"stream-0", "stream-1", "stream-2"}
+    assert orchestrator.own_stream_ids() == {"stream-0", "stream-1"}
 
 
 def _stoppable(loop: Any) -> MagicMock:
@@ -393,7 +392,7 @@ def test_teardown_with_real_enabled_managers_finishes() -> None:
         orchestrator.get_provider_manager(ROBOT_ID, 0)
         orchestrator.get_provider_manager(ROBOT_ID, 1)
         # A robot stream that stops by itself, as on a lower epoch.
-        consumers[1].close()
+        consumers[0].close()
         done = threading.Event()
 
         def close() -> None:
@@ -451,8 +450,14 @@ async def test_robot_authentication_error_closes_only_that_stream(
     assert robot_consumer.enabled_manager.is_disabled()
     robot_consumer.manager_factory.close.assert_not_called()
 
-    viewer_consumer = _consumer(robot_session, [], client_session)
-    viewer_consumer.signalling_session = None
+    viewer_session = SignallingSession(
+        api_url="http://unused",
+        org_id=ORG_ID,
+        auth=auth,
+        client_session=client_session,
+        robot_id=ROBOT_ID,
+    )
+    viewer_consumer = _consumer(viewer_session, [], client_session)
     viewer_consumer.manager_factory = MagicMock()
 
     viewer_consumer.on_authentication_error()

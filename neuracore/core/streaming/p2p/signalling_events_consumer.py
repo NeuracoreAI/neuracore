@@ -17,9 +17,8 @@ from neuracore_types import (
     StreamAliveResponse,
 )
 
-from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import SIGNALLING_URL, STREAM_API_URL
+from neuracore.core.const import SIGNALLING_URL
 from neuracore.core.streaming.base_sse_consumer import (
     BaseSSEConsumer,
     EventSourceConfig,
@@ -57,8 +56,8 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         enabled_manager: EnabledManager | None = None,
         background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
         client_session: ClientSession | None = None,
-        auth: Auth | None = None,
-        signalling_session: SignallingSession | None = None,
+        *,
+        signalling_session: SignallingSession,
         regions: Callable[[], Awaitable[list[str]]] | None = None,
     ):
         """Initialise the signalling events consumer.
@@ -77,10 +76,8 @@ class SignallingEventsConsumer(BaseSSEConsumer):
                 provided.
             client_session: The http session to use. Defaults to a new session
                 if not provided.
-            auth: The auth instance used to connect to the signalling server or
-                defaults to the global auth provider if not provided.
-            signalling_session: In regional mode, the session whose region and
-                token the stream and heartbeats use. None: the legacy service.
+            signalling_session: The session whose region and token the stream
+                and heartbeats use.
             regions: The organization's signalling regions. A robot session
                 with none stops signalling.
         """
@@ -95,10 +92,9 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         self.local_stream_id = uuid4().hex
         self.connection_managers: dict[str, BaseP2PStreamManager] = {}
         self.message_queue: list[HandshakeMessage] = []
-        self.auth = auth or get_auth()
         self.signalling_session = signalling_session
         self.regions = regions
-        # Set once the stream knows its service: legacy, or registered.
+        # Set once the stream knows its region.
         self._decided = asyncio.Event()
         self._opened = asyncio.Event()
         self._failed_over = False
@@ -106,25 +102,20 @@ class SignallingEventsConsumer(BaseSSEConsumer):
 
     def on_authentication_error(self) -> None:
         """Close this robot's stream, or the orchestrator for the viewer stream."""
-        session = self.signalling_session
-        if session is not None and session.robot_instance is not None:
+        if self.signalling_session.robot_instance is not None:
             self.close()
             return
         self.manager_factory.close()
 
     async def get_sse_client_config(self) -> EventSourceConfig:
-        """Return the stream configuration; in regional mode, the region's.
+        """Return the stream configuration of the session's region.
 
         Returns:
             the configuration to be used to connect to the client
         """
         session = self.signalling_session
         registered = False
-        if (
-            session is not None
-            and session.robot_instance is not None
-            and session.base_url is None
-        ):
+        if session.robot_instance is not None and session.base_url is None:
             await self._register_first(session)
             registered = True
         self._decided.set()
@@ -132,20 +123,13 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             # The new region has the registration but not the tracks.
             self._failed_over = False
             self.background_tracker.submit_background_coroutine(self._resubmit_tracks())
-        if session is None:
-            return EventSourceConfig(
-                url=f"{STREAM_API_URL}/org/{self.org_id}/signalling/notifications/{self.local_stream_id}",
-                request_options={
-                    "headers": self.auth.get_headers(),
-                },
-            )
         return EventSourceConfig(
             url=f"{self._signalling_url()}/notifications/{self.local_stream_id}",
             request_options={"headers": await session.headers()},
         )
 
     async def on_reconnect(self) -> None:
-        """In regional mode, register the robot again: a reconnect is a registration."""
+        """Register the robot again: a reconnect is a registration."""
         await self._register_again(fail_over=True)
 
     async def on_close(self, reason: str) -> None:
@@ -173,18 +157,13 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         await self._decided.wait()
         if self.enabled_manager.is_disabled():
             raise RuntimeError("signalling stopped")
-        session = self.signalling_session
-        if session is None:
-            return self._signalling_url(), self.auth.get_headers()
         # Headers first: they wait for a registration that may move the region.
-        headers = await session.headers()
+        headers = await self.signalling_session.headers()
         return self._signalling_url(), headers
 
     async def _resubmit_tracks(self) -> None:
         session = self.signalling_session
-        if session is None or session.robot_id is None:
-            return
-        if session.robot_instance is None:
+        if session.robot_id is None or session.robot_instance is None:
             return
         manager = self.manager_factory.get_manager(
             type=ManagerType.PROVIDER,
@@ -195,8 +174,6 @@ class SignallingEventsConsumer(BaseSSEConsumer):
 
     def _signalling_url(self) -> str:
         session = self.signalling_session
-        if session is None:
-            return f"{STREAM_API_URL}/org/{self.org_id}/signalling"
         if session.base_url is None:
             raise RuntimeError("signalling session has no region")
         return f"{session.base_url}/org/{self.org_id}/signalling"
@@ -220,9 +197,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
     async def _register_again(self, fail_over: bool = False) -> None:
         """Register the robot again; stop if another process holds a newer epoch."""
         session = self.signalling_session
-        if session is None or session.robot_instance is None:
-            return
-        if session.base_url is None:
+        if session.robot_instance is None or session.base_url is None:
             return
         try:
             await session.register(session.base_url, self.local_stream_id)

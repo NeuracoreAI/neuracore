@@ -247,7 +247,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         remote_stream_id: str,
         connection_id: str,
         connection_details: OpenConnectionDetails,
-        target: SignallingTarget | None = None,
+        target: SignallingTarget,
     ) -> EnabledManager:
         """Create a new peer-to-peer connection to a remote stream.
 
