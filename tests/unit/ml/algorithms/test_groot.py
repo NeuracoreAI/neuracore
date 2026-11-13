@@ -93,6 +93,7 @@ def pytorch_dummy_dataset(Groot) -> PytorchDummyDataset:  # noqa: N803
     output_cross_embodiment_description: CrossEmbodimentDescription = {
         "robot_1": {data_type: {} for data_type in output_data_types}
     }
+    output_cross_embodiment_description["robot_1"][DataType.DONE] = {0: "done"}
 
     dataset = PytorchDummyDataset(
         num_samples=5,
@@ -287,7 +288,7 @@ def test_done_head_forward_backward(
         output = model(_inference_batch(batch))
     assert DataType.JOINT_TARGET_POSITIONS in output
     done_outputs = output[DataType.DONE]
-    assert len(done_outputs) == len(model.done_slot_dims)
+    assert len(done_outputs) == 1
     for done_output in done_outputs:
         assert isinstance(done_output, BatchedDoneData)
         assert done_output.done.shape == (BS, 1, 1)
