@@ -119,6 +119,11 @@ class StreamManagerOrchestrator(
             self._region_endpoints = self._org_session.region_endpoints
         return self._region_endpoints
 
+    @property
+    def org_session(self) -> SignallingSession:
+        """The organization's session, whose token lists robots in a region."""
+        return self._org_session
+
     def own_stream_ids(self) -> set[str]:
         """Return the stream IDs of this process, which its viewers skip."""
         return {self.signalling_consumer.local_stream_id} | {

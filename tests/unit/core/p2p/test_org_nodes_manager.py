@@ -9,6 +9,9 @@ import pytest
 from neuracore_types import AvailableRobotCapacityInit
 
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import OrgNodesManager
+from neuracore.core.streaming.p2p.consumer.regional_availability import (
+    RegionalAvailability,
+)
 
 
 def _track(
@@ -41,6 +44,9 @@ def _manager() -> OrgNodesManager:
         own_stream_ids=lambda: {"local-stream", "own-robot-stream"},
     )
     manager._apply_stream_changes = MagicMock()
+    manager.availability = RegionalAvailability(keep_seconds=25.0)
+    manager.merged_update = None
+    manager.enabled_manager = MagicMock(is_disabled=MagicMock(return_value=False))
     return manager
 
 
