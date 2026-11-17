@@ -148,6 +148,7 @@ eprintln
 erfinv
 errno
 ESRCH
+evdev
 EWOULDBLOCK
 excinfo
 execv

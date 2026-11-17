@@ -62,10 +62,20 @@ For training and ML development:
 pip install neuracore[ml]
 ```
 
+**Note:** on macOS, Python 3.14 needs macOS 14 or newer for this extra, because PyTorch 2.10 publishes its Python 3.14 macOS wheel for macOS 14 and newer only. On macOS 14 or newer, the command above installs it with any supported Python. On macOS 11 to 13, use Python 3.10 to 3.13.
+
 For bulk importing datasets:
 
 ```bash
 pip install neuracore[import]
+```
+
+**Note:** on Linux, this extra builds the `evdev` package from source, because `evdev` publishes no wheels. Install a C compiler and the Python headers first.
+
+Linux (Debian/Ubuntu):
+
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential python3-dev
 ```
 
 To run our examples:
