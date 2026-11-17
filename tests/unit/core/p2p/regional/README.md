@@ -9,7 +9,6 @@ the backend token route and one region.
 
 | Name | Behaviour |
 |---|---|
-| `LEGACY_SOURCE` | Source name of the legacy stream during cutover. |
 | `RegionalAvailability(keep_seconds, clock=time.monotonic)` | Merged robot list of all sources. |
 | `.apply_init(source, init)` | Replaces every entry of `source`. |
 | `.apply_update(source, update)` | Applies a delta to the entries of `source`. |
@@ -22,7 +21,6 @@ the backend token route and one region.
 | `RobotInstanceUnavailableError` | Raised after `tries` failed tries. |
 
 Merge rule: highest epoch wins. Equal epochs: the source that sorts first wins.
-A regional entry wins over a `LEGACY_SOURCE` entry.
 
 `neuracore.core.streaming.p2p.signalling_session`:
 
