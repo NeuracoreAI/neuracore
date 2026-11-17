@@ -27,7 +27,12 @@ from neuracore.ml.logging.training_logger import TrainingLogger
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.trainers.metric_accumulator import MetricAccumulator
 from neuracore.ml.utils.device_utils import get_default_device
-from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
+from neuracore.ml.utils.memory_monitor import (
+    TRAINING_MAX_GPU_UTILIZATION,
+    TRAINING_MAX_RAM_UTILIZATION,
+    MemoryMonitor,
+    OutOfMemoryError,
+)
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validation_rollouts import (
@@ -221,8 +226,8 @@ class DistributedTrainer:
         accumulator = MetricAccumulator()
 
         memory_monitor = MemoryMonitor(
-            max_ram_utilization=0.8,
-            max_gpu_utilization=0.95,
+            max_ram_utilization=TRAINING_MAX_RAM_UTILIZATION,
+            max_gpu_utilization=TRAINING_MAX_GPU_UTILIZATION,
             gpu_id=self.device.index if self.device.type == "cuda" else None,
         )
 

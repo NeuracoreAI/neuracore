@@ -276,6 +276,7 @@ def assert_valid_batch_size(
     input_cross_embodiment_description: CrossEmbodimentDescription,
     output_cross_embodiment_description: CrossEmbodimentDescription,
     device: torch.device | None = None,
+    trial_under_ddp: bool = False,
 ) -> None:
     """Assert that a user-selected batch size fits in GPU memory.
 
@@ -318,6 +319,7 @@ def assert_valid_batch_size(
             dataset=assert_dataset,
             batch_size=batch_size,
             device=device,
+            trial_under_ddp=trial_under_ddp,
         )
     except Exception:
         logger.error("Batch size validation failed", exc_info=True)
@@ -345,6 +347,7 @@ def determine_optimal_batch_size(
     input_cross_embodiment_description: CrossEmbodimentDescription,
     output_cross_embodiment_description: CrossEmbodimentDescription,
     device: torch.device | None = None,
+    trial_under_ddp: bool = False,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
     if not torch.cuda.is_available() or (
@@ -378,6 +381,7 @@ def determine_optimal_batch_size(
             model_factory=model_factory,
             dataset=autotuning_dataset,
             device=device,
+            trial_under_ddp=trial_under_ddp,
         )
     except Exception:
         logger.error("Batch size autotuning failed", exc_info=True)
@@ -943,6 +947,7 @@ def _main(cfg: DictConfig) -> None:
                 input_cross_embodiment_description=input_cross_embodiment_description,
                 output_cross_embodiment_description=output_cross_embodiment_description,
                 device=device,
+                trial_under_ddp=world_size > 1,
             )
 
             batch_size = optimal_batch_size
@@ -955,6 +960,7 @@ def _main(cfg: DictConfig) -> None:
                 input_cross_embodiment_description=input_cross_embodiment_description,
                 output_cross_embodiment_description=output_cross_embodiment_description,
                 device=device,
+                trial_under_ddp=world_size > 1,
             )
 
             batch_size = int(batch_size)

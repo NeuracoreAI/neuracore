@@ -7,6 +7,9 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+TRAINING_MAX_RAM_UTILIZATION = 0.8
+TRAINING_MAX_GPU_UTILIZATION = 0.95
+
 
 class OutOfMemoryError(Exception):
     """Custom exception for GPU or RAM out of memory."""
