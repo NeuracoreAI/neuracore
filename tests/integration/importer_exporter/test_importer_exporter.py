@@ -63,10 +63,10 @@ def _import_config(recording, dataset_name: str, robot_name: str):
         DataType.END_EFFECTOR_POSES: "pose",
         DataType.CUSTOM_1D: "data",
         DataType.LANGUAGE: "text",
-        # Image messages carry compressed pixels; map the complete message.
-        DataType.RGB_IMAGES: "",
-        DataType.DEPTH_IMAGES: "",
-        DataType.POINT_CLOUDS: "",
+        # The importer fills frame and points from the export attachments.
+        DataType.RGB_IMAGES: "frame",
+        DataType.DEPTH_IMAGES: "frame",
+        DataType.POINT_CLOUDS: "points",
     }
     mappings = {}
     for kind, names in recording.sensor_manifest.items():
