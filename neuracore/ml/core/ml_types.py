@@ -26,7 +26,7 @@ class BatchedTrainingSamples:
     batch_size: int
 
     def to(self, device: torch.device) -> "BatchedTrainingSamples":
-        """Move all tensors to the specified device.
+        """Move all tensors to the device and convert them to their compute dtype.
 
         Args:
             device: Target device for tensor placement
@@ -34,21 +34,26 @@ class BatchedTrainingSamples:
         Returns:
             BatchedTrainingSamples: New instance with tensors moved to device
         """
+        inputs = {
+            key: [item.to(device) for item in value]
+            for key, value in self.inputs.items()
+        }
+        outputs = {
+            key: [item.to(device) for item in value]
+            for key, value in self.outputs.items()
+        }
+        for items in (*inputs.values(), *outputs.values()):
+            for item in items:
+                item.to_compute_dtype()
+        inputs_mask = {key: value.to(device) for key, value in self.inputs_mask.items()}
+        outputs_mask = {
+            key: value.to(device) for key, value in self.outputs_mask.items()
+        }
         return BatchedTrainingSamples(
-            inputs={
-                key: [item.to(device) for item in value]
-                for key, value in self.inputs.items()
-            },
-            inputs_mask={
-                key: value.to(device) for key, value in self.inputs_mask.items()
-            },
-            outputs={
-                key: [item.to(device) for item in value]
-                for key, value in self.outputs.items()
-            },
-            outputs_mask={
-                key: value.to(device) for key, value in self.outputs_mask.items()
-            },
+            inputs=inputs,
+            inputs_mask=inputs_mask,
+            outputs=outputs,
+            outputs_mask=outputs_mask,
             batch_size=self.batch_size,
         )
 
@@ -86,7 +91,7 @@ class BatchedInferenceInputs:
     batch_size: int
 
     def to(self, device: torch.device) -> "BatchedInferenceInputs":
-        """Move all tensors to the specified device.
+        """Move all tensors to the device and convert them to their compute dtype.
 
         Args:
             device: Target device for tensor placement
@@ -94,13 +99,16 @@ class BatchedInferenceInputs:
         Returns:
             The same BatchedInferenceSamples instance with tensors moved to device
         """
-        self.inputs = {
+        inputs = {
             key: [item.to(device) for item in value]
             for key, value in self.inputs.items()
         }
-        self.inputs_mask = {
-            key: value.to(device) for key, value in self.inputs_mask.items()
-        }
+        for items in inputs.values():
+            for item in items:
+                item.to_compute_dtype()
+        inputs_mask = {key: value.to(device) for key, value in self.inputs_mask.items()}
+        self.inputs = inputs
+        self.inputs_mask = inputs_mask
         return self
 
     def __len__(self) -> int:
