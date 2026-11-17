@@ -55,6 +55,9 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
     wait_for_recordings_finalized,
 )
+from tests.integration.platform.data_daemon.shared.depth_artefacts import (
+    verify_depth_uploads,
+)
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
     _live_daemon_pids,
@@ -864,8 +867,9 @@ def _verify_recording_structure(
     """Assert structural properties of an unsynced recording.
 
     Checks that the recording's duration, byte size, and robot ID are
-    consistent with what was logged during the recording phase.  Does not
-    require synchronization or data download.
+    consistent with what was logged during the recording phase, and that
+    each depth camera uploaded lossless.bin, lossy.mp4 and trace.json in the
+    depth formats. Does not require synchronization.
 
     Duration is checked against ``case.duration_sec`` scaled by
     ``DURATION_VARIABLE_MIN_FACTOR``–``DURATION_VARIABLE_MAX_FACTOR`` when
@@ -924,6 +928,15 @@ def _verify_recording_structure(
     assert recording.robot_id, (  # type: ignore[union-attr]
         f"Recording {rec_id} of dataset {dataset_name!r} has no robot_id"
     )
+
+    if result.has_depth:
+        verify_depth_uploads(
+            recording=recording,
+            camera_names=result.depth_camera_names,
+            height=int(case.image_height),
+            width=int(case.image_width),
+            depth_mode=result.depth_mode,
+        )
 
 
 def verify_cloud_results(

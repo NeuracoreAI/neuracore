@@ -359,3 +359,8 @@ DEPTH_SCALE_M_BY_MODE: dict[DepthMode, float] = {
 # corner. Both sit away from pixel (0, 0), which frame matching reads first.
 DEPTH_HOLE_SIZE = 8
 DEPTH_SATURATED_VALUE = 65535
+
+# Bounds on the depth viewer video, in grey levels, against the log curve of
+# the frames in the lossless archive.
+DEPTH_PREVIEW_MEDIAN_LEVEL_TOLERANCE = 2.0
+DEPTH_PREVIEW_MAX_CHROMA_OFFSET = 2.0
