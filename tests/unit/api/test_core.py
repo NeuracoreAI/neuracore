@@ -512,7 +512,9 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         def get_cloud_recording_id(self) -> str:
             return "rec-123"
 
-        def stop_recording(self, timestamp: float | None = None) -> None:
+        def stop_recording(
+            self, timestamp: float | None = None, tags: list[str] | None = None
+        ) -> None:
             nonlocal stops
             stops += 1
 
@@ -550,7 +552,9 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         def get_cloud_recording_id(self) -> str:
             return "rec-123"
 
-        def stop_recording(self, timestamp: float | None = None) -> None:
+        def stop_recording(
+            self, timestamp: float | None = None, tags: list[str] | None = None
+        ) -> None:
             pass
 
     def upload_never_completes(recording_id: str) -> bool:
@@ -650,6 +654,28 @@ def test_recording_lifecycle_passes_microseconds_to_the_daemon(
     assert recording_robot.start_recording.call_args.args[5] == expected_us
     assert recording_robot.stop_recording.call_args.args[2] == expected_us
     assert recording_robot.cancel_recording.call_args.args[2] == expected_us
+
+
+def test_stop_recording_sends_normalized_tags_to_the_daemon(recording_robot) -> None:
+    nc.stop_recording(tags=[" Good Run", "good run", "Edge"])
+
+    assert recording_robot.stop_recording.call_args.args[3] == ["good-run", "edge"]
+
+
+def test_stop_recording_without_tags_sends_an_empty_list(recording_robot) -> None:
+    nc.stop_recording()
+
+    assert recording_robot.stop_recording.call_args.args[3] == []
+
+
+@pytest.mark.parametrize("tags", [["ok", "a,b"], ["  "], "good-run", [None], ["ok", 1]])
+def test_stop_recording_rejects_an_invalid_tag_without_stopping(
+    recording_robot, tags
+) -> None:
+    with pytest.raises(ValueError):
+        nc.stop_recording(tags=tags)
+
+    recording_robot.stop_recording.assert_not_called()
 
 
 def test_start_recording_rejects_a_timestamp_outside_the_microsecond_range(
