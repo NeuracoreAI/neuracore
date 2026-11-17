@@ -27,6 +27,7 @@ from neuracore_types.importer.config import (
     JointPositionInputTypeConfig,
 )
 from neuracore_types.importer.data_config import DataFormat
+from neuracore_types.importer.transform import DepthFrame
 from neuracore_types.nc_data import DatasetImportConfig, DataType, NCDataImportConfig
 from neuracore_types.nc_data.nc_data import MappingItem
 from rich.console import Console
@@ -856,9 +857,14 @@ class NeuracoreDatasetImporter(ABC):
                 dry_run=self.dry_run,
             )
         elif data_type == DataType.DEPTH_IMAGES:
+            if not isinstance(transformed_data, DepthFrame):
+                raise ImporterError(
+                    f"Depth transforms for {name} must produce a DepthFrame"
+                )
             nc.log_depth(
                 name=name,
-                depth=transformed_data,
+                depth=transformed_data.frame,
+                depth_scale=transformed_data.depth_scale_m,
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,

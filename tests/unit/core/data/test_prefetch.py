@@ -1,16 +1,20 @@
 """Tests for the concurrent metadata and video prefetch."""
 
 import asyncio
+import re
 import threading
 import time
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 from neuracore_types import DataType, SynchronizationDetails
 
 import neuracore as nc
 import neuracore.core.data.frame_cache as frame_cache
+from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
+from neuracore.core.data.frame_cache import DEPTH_FRAMES_FILENAME, read_depth_frame
 from neuracore.core.data.prefetch import VideoPrefetcher
 
 
@@ -142,6 +146,37 @@ class TestVideoStage:
             rgb_root = dataset_mock.cache_dir / recording.id / DataType.RGB_IMAGES.value
             for camera_dir in rgb_root.iterdir():
                 assert (camera_dir / "0.png").exists()
+
+    def test_prefetch_caches_depth_frames_unchanged(
+        self, dataset_mock, details, mock_data_requests, depth_frames_fn
+    ):
+        """Depth cameras cache the frames file itself and serve its exact frames."""
+        frames = np.zeros((2, 6, 8), dtype=np.uint16)
+        frames[1, 2:, 3:] = 41234
+        payload, ranges = depth_frames_fn(frames)
+        mock_data_requests.get(
+            re.compile(
+                f"{API_URL}/org/{dataset_mock.org_id}/recording/.*/download_url"
+                r"\?filepath=DEPTH_IMAGES.*lossless\.bin"
+            ),
+            json={"url": "https://example.com/depth.bin"},
+        )
+        mock_data_requests.get("https://example.com/depth.bin", content=payload)
+        prefetcher = _prefetcher(
+            dataset_mock, details, download_videos=True, decode_workers=2
+        )
+        prefetcher.run()
+
+        cached = list(
+            dataset_mock.cache_dir.rglob(
+                f"{DataType.DEPTH_IMAGES.value}/*/{DEPTH_FRAMES_FILENAME}"
+            )
+        )
+        assert cached
+        for frames_file in cached:
+            assert frames_file.read_bytes() == payload
+            frame = read_depth_frame(frames_file.parent, *ranges[1])
+            np.testing.assert_array_equal(frame, frames[1])
 
     def test_no_locks_are_left_behind(self, dataset_mock, details):
         """Every lock taken must be released, whatever happened to its camera."""

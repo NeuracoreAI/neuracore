@@ -107,7 +107,8 @@ def test_non_404_on_lossless_raises_without_falling_back() -> None:
 
 def test_depth_requests_lossless_only_and_never_falls_back_to_lossy() -> None:
     # Depth's lossy.mp4 is a visualisation, never a valid source, so a missing
-    # depth lossless must fail loudly rather than silently decode the proxy.
+    # depth archive and lossless video must fail loudly rather than silently
+    # decode the proxy.
     requested: list[str] = []
 
     def fake_get(url, params=None, headers=None):
@@ -119,7 +120,10 @@ def test_depth_requests_lossless_only_and_never_falls_back_to_lossy() -> None:
 
     with pytest.raises(requests.HTTPError):
         _call_get_video_url(session, DataType.DEPTH_IMAGES)
-    assert requested == ["DEPTH_IMAGES/cam/lossless.mp4"]
+    assert requested == [
+        "DEPTH_IMAGES/cam/lossless.bin",
+        "DEPTH_IMAGES/cam/lossless.mp4",
+    ]
 
 
 def test_get_video_url_requests_a_retrying_session() -> None:

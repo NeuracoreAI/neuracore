@@ -1,6 +1,8 @@
 """On-disk video frame cache: its lock protocol and its decoding step.
 
 Frames live at ``<cache_dir>/<recording_id>/<data_type>/<sensor_id>/<idx>.png``.
+A depth camera with JPEG-XL frames keeps them at <sensor_id>/lossless.bin,
+where the trace entry of each frame holds its byte range.
 A directory is published with a single ``os.replace`` once decoding finishes, so
 one that exists is always complete; while it is being produced, a sibling
 ``<sensor_id>.recording.lock`` marks it as owned.
@@ -13,8 +15,12 @@ import subprocess
 import time
 from pathlib import Path
 
+import numpy as np
 from neuracore_types import DataType
+from neuracore_types.utils.depth_utils import metres_to_depth_u16
 from PIL import Image
+
+from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +30,13 @@ STALE_LOCK_TIMEOUT_S = 300
 PNG_COMPRESSION_LEVEL = 3
 """zlib level used when writing cached frames."""
 
+DEPTH_FRAMES_FILENAME = "lossless.bin"
+"""Name of the JPEG-XL depth frames file inside its camera directory."""
+
+_JXL_SIGNATURES = (b"\xff\x0a", b"\x00\x00\x00\x0cJXL \r\n\x87\n")
+
 _RGB_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
-_DEPTH_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4",)
+_DEPTH_VIDEO_FILENAME_PREFERENCE = (DEPTH_FRAMES_FILENAME, "lossless.mp4")
 
 _FFMPEG_AVAILABLE: bool | None = None
 
@@ -299,3 +310,119 @@ def publish_decoded_frames(
         return
     decode_video(video_path, staging_dir)
     os.replace(staging_dir, frames_dir)
+
+
+def decode_depth_frame(payload: bytes) -> np.ndarray:
+    """Decode one JPEG-XL depth frame.
+
+    Args:
+        payload: JPEG-XL codestream of the frame.
+
+    Returns:
+        The uint16 frame of sensor units.
+
+    Raises:
+        ValueError: If the frame decodes to another dtype.
+    """
+    import imagecodecs
+
+    frame = np.asarray(imagecodecs.jpegxl_decode(payload))
+    if frame.dtype != np.uint16:
+        raise ValueError(f"Depth frame decodes as {frame.dtype}, expected uint16")
+    return frame
+
+
+def is_depth_frames_file(media_path: Path) -> bool:
+    """Return whether a downloaded depth file holds JPEG-XL frames.
+
+    Args:
+        media_path: Downloaded depth file.
+
+    Returns:
+        True for JPEG-XL frames, False for a video.
+    """
+    with open(media_path, "rb") as handle:
+        header = handle.read(max(len(signature) for signature in _JXL_SIGNATURES))
+    return header.startswith(_JXL_SIGNATURES)
+
+
+def publish_depth_frames(media_path: Path, staging_dir: Path, frames_dir: Path) -> None:
+    """Publish a downloaded depth frames file or packed depth video atomically.
+
+    A frames file moves into the staging directory unchanged. A packed depth
+    video decodes to PNG frames.
+    Does nothing if the frames were published in the meantime, so a reader only
+    ever sees a complete directory.
+
+    Args:
+        media_path: Downloaded depth frames file or packed depth video, on the
+            same filesystem as the staging directory.
+        staging_dir: Empty directory on the same filesystem to stage into.
+        frames_dir: Final location to publish the frames to.
+    """
+    if frames_dir.exists():
+        return
+    if not is_depth_frames_file(media_path):
+        publish_decoded_frames(media_path, staging_dir, frames_dir)
+        return
+    os.replace(media_path, staging_dir / DEPTH_FRAMES_FILENAME)
+    os.replace(staging_dir, frames_dir)
+
+
+def publish_camera_frames(
+    camera_type: DataType, media_path: Path, staging_dir: Path, frames_dir: Path
+) -> None:
+    """Publish a downloaded camera video or depth frames file atomically.
+
+    Args:
+        camera_type: Data type of the camera.
+        media_path: Downloaded video or depth frames file, on the same
+            filesystem as the staging directory.
+        staging_dir: Empty directory on the same filesystem to stage into.
+        frames_dir: Final location to publish the frames to.
+    """
+    publish = (
+        publish_depth_frames
+        if camera_type == DataType.DEPTH_IMAGES
+        else publish_decoded_frames
+    )
+    publish(media_path, staging_dir, frames_dir)
+
+
+def read_depth_frame(frames_dir: Path, offset: int, length: int) -> np.ndarray:
+    """Read one JPEG-XL depth frame from a published directory.
+
+    Args:
+        frames_dir: Published depth camera directory holding lossless.bin.
+        offset: Byte offset of the frame in lossless.bin.
+        length: Length in bytes of the frame.
+
+    Returns:
+        The uint16 frame of shape (height, width) in sensor units.
+
+    Raises:
+        ValueError: If the file ends inside the frame.
+    """
+    frames_path = frames_dir / DEPTH_FRAMES_FILENAME
+    with open(frames_path, "rb") as frames:
+        frames.seek(offset)
+        payload = frames.read(length)
+    if len(payload) != length:
+        raise ValueError(
+            f"Depth frames file {frames_path} ends inside the frame at byte {offset}"
+        )
+    return decode_depth_frame(payload)
+
+
+def read_packed_depth_frame(frames_dir: Path, frame_idx: int) -> np.ndarray:
+    """Read one frame of a packed depth video from a published directory.
+
+    Args:
+        frames_dir: Published depth camera directory of packed PNG frames.
+        frame_idx: Index of the frame to read.
+
+    Returns:
+        The uint16 frame of shape (height, width) in units of DEPTH_GRID_SCALE_M.
+    """
+    packed = np.asarray(Image.open(frames_dir / f"{frame_idx}.png"))
+    return metres_to_depth_u16(rgb_to_depth_storage(packed))

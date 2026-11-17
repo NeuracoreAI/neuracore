@@ -11,6 +11,24 @@ import torch
 from neuracore_types import BatchedNCData, DataType
 
 
+def _items_to_device(
+    items: list[BatchedNCData], device: torch.device
+) -> list[BatchedNCData]:
+    """Move items to the device and convert them to their compute dtype.
+
+    Args:
+        items: Batched data items to move.
+        device: Target device.
+
+    Returns:
+        The moved items in the dtype models consume.
+    """
+    moved = [item.to(device) for item in items]
+    for item in moved:
+        item.to_compute_dtype()
+    return moved
+
+
 @dataclass
 class BatchedTrainingSamples:
     """Container for batched training samples with inputs and target outputs.
@@ -26,7 +44,7 @@ class BatchedTrainingSamples:
     batch_size: int
 
     def to(self, device: torch.device) -> "BatchedTrainingSamples":
-        """Move all tensors to the specified device.
+        """Move all tensors to the device and convert them to their compute dtype.
 
         Args:
             device: Target device for tensor placement
@@ -36,14 +54,14 @@ class BatchedTrainingSamples:
         """
         return BatchedTrainingSamples(
             inputs={
-                key: [item.to(device) for item in value]
+                key: _items_to_device(value, device)
                 for key, value in self.inputs.items()
             },
             inputs_mask={
                 key: value.to(device) for key, value in self.inputs_mask.items()
             },
             outputs={
-                key: [item.to(device) for item in value]
+                key: _items_to_device(value, device)
                 for key, value in self.outputs.items()
             },
             outputs_mask={
@@ -86,7 +104,7 @@ class BatchedInferenceInputs:
     batch_size: int
 
     def to(self, device: torch.device) -> "BatchedInferenceInputs":
-        """Move all tensors to the specified device.
+        """Move all tensors to the device and convert them to their compute dtype.
 
         Args:
             device: Target device for tensor placement
@@ -95,8 +113,7 @@ class BatchedInferenceInputs:
             The same BatchedInferenceSamples instance with tensors moved to device
         """
         self.inputs = {
-            key: [item.to(device) for item in value]
-            for key, value in self.inputs.items()
+            key: _items_to_device(value, device) for key, value in self.inputs.items()
         }
         self.inputs_mask = {
             key: value.to(device) for key, value in self.inputs_mask.items()
