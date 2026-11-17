@@ -10,7 +10,7 @@ import json
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from neuracore_types import (
     AvailableRobot,
@@ -43,8 +43,13 @@ from neuracore.core.streaming.p2p.consumer.region_availability_consumer import (
 from neuracore.core.streaming.p2p.consumer.regional_availability import (
     LEGACY_SOURCE,
     RegionalAvailability,
+    RobotInstanceUnavailableError,
+    connect_to_listed_region,
 )
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.streaming.p2p.signalling_events_consumer import (
+    SignallingEventsConsumer,
+)
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
@@ -55,6 +60,7 @@ logger = logging.getLogger(__name__)
 DROPPED_REGION_KEEP_S = 25.0
 REGIONS_RETRY_MIN_S = 1.0
 REGIONS_RETRY_MAX_S = 30.0
+VIEWER_STREAM_OPEN_TIMEOUT_S = 15.0
 
 
 # Mapping each robot instance to its nodes and a hash over it's connections
@@ -114,6 +120,7 @@ class OrgNodesManager(BaseSSEConsumer):
         self.consumers: dict[RobotInstanceIdentifier, ClientConsumerStreamManager] = {}
 
         self.connections: InstanceConnectionMap = defaultdict(dict)
+        self._pending_connections: dict[tuple[RobotInstanceIdentifier, str], int] = {}
 
         self.last_nodes: InstanceStreamMap = defaultdict(dict)
 
@@ -355,7 +362,19 @@ class OrgNodesManager(BaseSSEConsumer):
         if robot is None:
             return None
 
-        return robot.instances.get(robot_instance, None)
+        instance = robot.instances.get(robot_instance, None)
+        if instance is None:
+            return None
+        own_stream_ids = self.stream_manager_orchestrator.own_stream_ids()
+        return instance.model_copy(
+            update={
+                "tracks": {
+                    stream_id: tracks
+                    for stream_id, tracks in instance.tracks.items()
+                    if stream_id not in own_stream_ids
+                }
+            }
+        )
 
     def get_robot_consumer(
         self, robot_id: str, robot_instance: int
@@ -439,6 +458,36 @@ class OrgNodesManager(BaseSSEConsumer):
         manager: ClientConsumerStreamManager,
         connection_request: OpenConnectionRequest,
     ) -> None:
+        """Create a new connection, unless one is already opening for these tracks.
+
+        Args:
+            track_hash: a hash over the tracks this connection is setup to handle.
+            manager: the consumer manager that will be responsible for this new
+                connection.
+            connection_request: the details of the connection to be opened.
+        """
+        pending_key = (
+            RobotInstanceIdentifier(
+                robot_id=connection_request.robot_id,
+                robot_instance=connection_request.robot_instance,
+            ),
+            connection_request.to_id,
+        )
+        if self._pending_connections.get(pending_key) == track_hash:
+            return
+        self._pending_connections[pending_key] = track_hash
+        try:
+            await self._open_new_connection(track_hash, manager, connection_request)
+        finally:
+            if self._pending_connections.get(pending_key) == track_hash:
+                del self._pending_connections[pending_key]
+
+    async def _open_new_connection(
+        self,
+        track_hash: int,
+        manager: ClientConsumerStreamManager,
+        connection_request: OpenConnectionRequest,
+    ) -> None:
         """Create a new connection for a specific robot instance.
 
         Requests a connection from the signalling server and registers it with
@@ -450,16 +499,50 @@ class OrgNodesManager(BaseSSEConsumer):
                 connection.
             connection_request: the details of the connection to be opened.
         """
-        # The response is read within a context manager so the underlying
-        # connection is released back to the session pool.
-        async with self.client_session.post(
-            url=f"{STREAM_API_URL}/org/{self.org_id}/signalling/connection?signature=temp",
-            json=connection_request.model_dump(mode="json"),
-            headers=self.auth.get_headers(),
-        ) as response:
-            response.raise_for_status()
-            connection_message = HandshakeMessage.model_validate(await response.json())
+        orchestrator = self.stream_manager_orchestrator
+        used: list[SignallingEventsConsumer] = []
+
+        async def open_connection(owner: str) -> tuple[int, dict[str, Any]]:
+            signalling_consumer = (
+                orchestrator.signalling_consumer
+                if owner == LEGACY_SOURCE
+                else orchestrator.viewer_consumer(owner, connection_request.robot_id)
+            )
+            used[:] = [signalling_consumer]
+            if owner != LEGACY_SOURCE:
+                # The robot's first offer would be lost on a stream not open yet.
+                await asyncio.wait_for(
+                    signalling_consumer.wait_open(), VIEWER_STREAM_OPEN_TIMEOUT_S
+                )
+            base_url, headers = await signalling_consumer.endpoint()
+            request = connection_request.model_copy(
+                update={"from_id": signalling_consumer.local_stream_id}
+            )
+            # Read within a context manager, which releases the connection.
+            async with self.client_session.post(
+                url=f"{base_url}/connection?signature=temp",
+                json=request.model_dump(mode="json"),
+                headers=headers,
+            ) as response:
+                body = await response.json(content_type=None)
+                return response.status, body if isinstance(body, dict) else {}
+
+        try:
+            status, body = await connect_to_listed_region(
+                self.availability,
+                connection_request.robot_id,
+                connection_request.robot_instance,
+                connection_request.to_id,
+                open_connection,
+            )
+        except RobotInstanceUnavailableError:
+            logger.info("Robot %s is no longer listed", connection_request.robot_id)
+            return
+        if status != 200:
+            raise RuntimeError(f"signalling refused the connection: {status} {body}")
+        connection_message = HandshakeMessage.model_validate(body)
         assert connection_message.type == MessageType.OPEN_CONNECTION
+        (signalling_consumer,) = used
 
         robot_identifier = RobotInstanceIdentifier(
             robot_id=connection_request.robot_id,
@@ -479,8 +562,6 @@ class OrgNodesManager(BaseSSEConsumer):
             connection_message.connection_id,
             track_hash,
         )
-
-        signalling_consumer = self.stream_manager_orchestrator.signalling_consumer
 
         connection_enabled = await signalling_consumer.create_new_connection(
             message=connection_message, manager=manager
@@ -580,6 +661,8 @@ class OrgNodesManager(BaseSSEConsumer):
 
         self.consumers[key].close()
         del self.consumers[key]
+        if not any(other.robot_id == robot_id for other in self.consumers):
+            self.stream_manager_orchestrator.close_viewer_consumers(robot_id)
 
     async def close_robot_consumers(self) -> None:
         """Close all active peer-to-peer connections for this org."""
@@ -600,6 +683,7 @@ class OrgNodesManager(BaseSSEConsumer):
 
         self.consumers.clear()
         self.connections.clear()
+        self._pending_connections.clear()
         self.last_nodes.clear()
         self.last_update = None
         self.merged_update = None
