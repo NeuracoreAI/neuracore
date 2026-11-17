@@ -222,6 +222,9 @@ pub trait StateStore: Send + Sync {
     /// Mark a recording as stopped, setting `stopped_at` (daemon wall clock)
     /// and the `stop` timestamp.
     ///
+    /// Non-empty `tags` replace the stored stop tags. Empty `tags` keep them,
+    /// so a stop without tags cannot erase the tags of an earlier one.
+    ///
     /// Idempotent: re-stopping a recording that already has a `stopped_at`
     /// leaves the existing timestamps untouched so a duplicate `StopRecording`
     /// envelope does not slide the window forward.
@@ -229,6 +232,7 @@ pub trait StateStore: Send + Sync {
         &self,
         recording_index: i64,
         stop: RecordingTimestamp,
+        tags: &[String],
     ) -> Result<RecordingRow, StateStoreError>;
 
     /// Refine a retired recording's stop timestamp to the true stop that arrived
@@ -236,13 +240,19 @@ pub trait StateStore: Send + Sync {
     /// pair). Unlike [`mark_recording_stopped`](Self::mark_recording_stopped)
     /// this overwrites the stop timestamp even when already set, because the stop
     /// that superseded it was the *earlier*, accurate one; `stopped_at` (wall
-    /// clock, already set when the recording was retired) is preserved.
+    /// clock, already set when the recording was retired) is preserved. `tags`
+    /// behave as in [`mark_recording_stopped`](Self::mark_recording_stopped).
     async fn refine_recording_stop(
         &self,
         recording_index: i64,
         stop: RecordingTimestamp,
+        tags: &[String],
     ) -> Result<RecordingRow, StateStoreError>;
 
+    /// Store the user tag names given with a recording's stop.
+    ///
+    /// Empty `tags` change nothing, so a stop without tags cannot erase the
+    /// tags of an earlier one.
     /// Stamp `backend_stop_notified_at = now` after the recording-stop
     /// notifier successfully POSTed `/recording/stop`. Idempotent: a second
     /// call leaves the existing timestamp untouched.
@@ -794,6 +804,16 @@ impl SqliteStateStore {
 /// directly: actor updates funnel through the coalescing write-behind batcher
 /// ([`crate::state::trace_event_database_writer::TraceEventDatabaseWriter`]) and
 /// are applied here as one batched transaction.
+/// Encode stop tags as JSON, or `None` when empty so the stored tags stay.
+fn stop_tags_json(tags: &[String]) -> Result<Option<String>, StateStoreError> {
+    if tags.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(tags)
+        .map(Some)
+        .map_err(|error| sqlx::Error::Encode(Box::new(error)).into())
+}
+
 #[async_trait]
 impl StateStore for SqliteStateStore {
     async fn create_recording(
@@ -1181,7 +1201,9 @@ impl StateStore for SqliteStateStore {
         &self,
         recording_index: i64,
         stop: RecordingTimestamp,
+        tags: &[String],
     ) -> Result<RecordingRow, StateStoreError> {
+        let tags_json = stop_tags_json(tags)?;
         let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
@@ -1190,6 +1212,7 @@ impl StateStore for SqliteStateStore {
                 SET stopped_at = COALESCE(stopped_at, ?2), \
                     stop_timestamp_us = COALESCE(stop_timestamp_us, ?3, start_timestamp_us + (?4 - start_publish_timestamp_ns) / ?5), \
                     stop_publish_timestamp_ns = COALESCE(stop_publish_timestamp_ns, ?4), \
+                    stop_tags = COALESCE(?6, stop_tags), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
@@ -1198,6 +1221,7 @@ impl StateStore for SqliteStateStore {
         .bind(stop.timestamp_us)
         .bind(stop.publish_timestamp_ns)
         .bind(NANOSECONDS_PER_MICROSECOND)
+        .bind(tags_json.as_deref())
         .execute(&mut *tx)
         .await?;
 
@@ -1213,7 +1237,9 @@ impl StateStore for SqliteStateStore {
         &self,
         recording_index: i64,
         stop: RecordingTimestamp,
+        tags: &[String],
     ) -> Result<RecordingRow, StateStoreError> {
+        let tags_json = stop_tags_json(tags)?;
         let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
@@ -1222,6 +1248,7 @@ impl StateStore for SqliteStateStore {
                 SET stop_timestamp_us = COALESCE(?3, start_timestamp_us + (?4 - start_publish_timestamp_ns) / ?5), \
                     stop_publish_timestamp_ns = ?4, \
                     stopped_at = COALESCE(stopped_at, ?2), \
+                    stop_tags = COALESCE(?6, stop_tags), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
@@ -1230,6 +1257,7 @@ impl StateStore for SqliteStateStore {
         .bind(stop.timestamp_us)
         .bind(stop.publish_timestamp_ns)
         .bind(NANOSECONDS_PER_MICROSECOND)
+        .bind(tags_json.as_deref())
         .execute(&mut *tx)
         .await?;
 
@@ -1845,6 +1873,7 @@ mod tests {
             .mark_recording_stopped(
                 recording_index,
                 RecordingTimestamp::observed_at(1_700_000_002_000_000_000),
+                &[],
             )
             .await
             .unwrap();
@@ -2066,11 +2095,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_tags_survive_a_reopen_and_an_empty_later_stop() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("state.db");
+        let store = SqliteStateStore::open(&db_path).await.expect("open store");
+        let index = seed_recording(&store, 0).await;
+        store
+            .mark_recording_stopped(
+                index,
+                RecordingTimestamp::observed_at(1),
+                &["kept".to_string()],
+            )
+            .await
+            .unwrap();
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(2), &[])
+            .await
+            .unwrap();
+        store.close().await;
+
+        let reopened = SqliteStateStore::open(&db_path).await.expect("reopen");
+        let row = reopened.get_recording(index).await.unwrap().unwrap();
+
+        assert_eq!(row.stop_tags, vec!["kept".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn refine_recording_stop_stores_its_tags() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(5), &[])
+            .await
+            .unwrap();
+
+        let row = store
+            .refine_recording_stop(
+                index,
+                RecordingTimestamp::observed_at(3),
+                &["late".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(row.stop_tags, vec!["late".to_string()]);
+    }
+
+    #[tokio::test]
     async fn stop_notify_sweep_requires_a_cloud_id() {
         let (store, _tempdir) = open_store().await;
         let index = seed_recording(&store, 0).await;
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(2))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(2), &[])
             .await
             .unwrap();
         // Stopped but no cloud id yet → not eligible for the stop sweep.
@@ -2479,7 +2555,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0))
+            .mark_recording_stopped(recording_index, RecordingTimestamp::observed_at(0), &[])
             .await
             .unwrap();
         assert_eq!(store.recordings_pending_progress().await.unwrap().len(), 1);
@@ -2802,7 +2878,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1), &[])
             .await
             .unwrap();
         store.mark_recording_stop_notified(index).await.unwrap();
