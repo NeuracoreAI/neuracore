@@ -21,13 +21,14 @@ jobs:
   pre-commit:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.11"
-      - uses: pre-commit/action@v3.0.1
+          activate-environment: true
+      - run: uvx pre-commit run --color=always --show-diff-on-failure --all-files
 
   test:
     needs: pre-commit
@@ -50,12 +51,11 @@ jobs:
           environment: staging
           ref: ${{ inputs.ref }}
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
-        id: setup-python
+      - name: Set up uv with Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+          activate-environment: true
 
       - name: Verify importer datasets token
         run: |
@@ -65,7 +65,7 @@ jobs:
           fi
 
       - name: Checkout importer integration test datasets
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: ${{ env.IMPORTER_DATASETS_REPO }}
           ref: ${{ env.IMPORTER_DATASETS_REF }}

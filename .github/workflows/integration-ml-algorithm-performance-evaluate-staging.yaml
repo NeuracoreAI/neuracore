@@ -11,14 +11,15 @@ jobs:
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7.0.1
       with:
         ref: ${{ github.ref_name }}
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3
     - name: List algorithm names
       id: list
       run: |
-        pip install pyyaml -q
-        python3 << 'EOF' >> $GITHUB_OUTPUT
+        uv run --no-project --with pyyaml python3 << 'EOF' >> $GITHUB_OUTPUT
         import json
 
         import yaml
@@ -55,7 +56,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
     - name: Restore training metadata from cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6.1.0
       with:
         path: |
           training_job_id.txt
@@ -79,19 +80,18 @@ jobs:
         echo "Test harness ref: main"
 
     - name: Checkout test harness
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ steps.training-metadata.outputs.test_harness_ref }}
         fetch-depth: 0
     - name: Pull LFS objects
       run: git lfs pull
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
-      id: setup-python
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v10.3.3
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+        activate-environment: true
 
     - name: Set up neuracore with Rust data daemon
       uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main

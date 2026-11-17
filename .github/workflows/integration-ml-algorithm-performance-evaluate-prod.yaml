@@ -12,7 +12,7 @@ jobs:
       latest_release_tag: ${{ steps.release-tag.outputs.latest_release_tag }}
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7.0.1
       with:
         fetch-depth: 0
     - name: Resolve latest release tag
@@ -27,13 +27,14 @@ jobs:
         fi
         echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
         echo "Latest release tag: $latest_release_tag"
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3
     - name: List algorithm names
       id: list
       env:
         LATEST_RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
       run: |
-        pip install pyyaml -q
-        python3 << 'EOF' >> $GITHUB_OUTPUT
+        uv run --no-project --with pyyaml python3 << 'EOF' >> $GITHUB_OUTPUT
         import json
         import os
         import subprocess
@@ -76,7 +77,7 @@ jobs:
 
     steps:
     - name: Restore training metadata from cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6.1.0
       with:
         path: |
           training_job_id.txt
@@ -106,7 +107,7 @@ jobs:
         echo "Test harness ref: $test_harness_ref"
 
     - name: Checkout test harness
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ steps.training-metadata.outputs.test_harness_ref }}
         fetch-depth: 0
@@ -121,10 +122,11 @@ jobs:
           exit 1
         fi
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v10.3.3
       with:
         python-version: ${{ matrix.python-version }}
+        activate-environment: true
 
     - name: Set up neuracore from PyPI
       uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main

@@ -20,8 +20,8 @@ jobs:
       deps: ${{ steps.filter.outputs.deps }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3.0.2
+      - uses: actions/checkout@v7.0.1
+      - uses: dorny/paths-filter@v4.0.3
         id: filter
         with:
           filters: |
@@ -49,11 +49,12 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.14"]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: pre-commit/action@v3.0.1
+          activate-environment: true
+      - run: uvx pre-commit run --color=always --show-diff-on-failure --all-files
 
   test-non-ml:
     needs: [detect-changes, pre-commit]
@@ -71,13 +72,13 @@ jobs:
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        if: env.SHOULD_RUN == 'true'
-        uses: actions/setup-python@v6
+        if: env.SHOULD_RUN == 'true' && matrix.package-manager == 'pip'
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -87,17 +88,18 @@ jobs:
 
       - name: Cache cargo build
         if: env.SHOULD_RUN == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
 
       - name: Set up uv
         if: env.SHOULD_RUN == 'true' && matrix.package-manager == 'uv'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
+          activate-environment: true
 
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
@@ -158,7 +160,7 @@ jobs:
 
       - name: Upload coverage artifacts
         if: env.SHOULD_RUN == 'true' && env.SHOULD_RUN_COVERAGE == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: coverage-artifacts
           path: |
@@ -190,7 +192,7 @@ jobs:
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
         if: env.SHOULD_RUN == 'true'
@@ -198,17 +200,18 @@ jobs:
 
       - name: Cache cargo build
         if: env.SHOULD_RUN == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
 
       - name: Set up uv
         if: env.SHOULD_RUN == 'true'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
+          activate-environment: true
 
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'

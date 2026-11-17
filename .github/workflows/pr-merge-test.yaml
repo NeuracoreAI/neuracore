@@ -29,22 +29,23 @@ jobs:
         python-version: ["3.10", "3.11", "3.14"]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: rust
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
+          activate-environment: true
 
       - name: Install Python dependencies
         run: uv pip install ".[dev,ml]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match

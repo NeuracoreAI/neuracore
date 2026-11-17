@@ -63,15 +63,16 @@ jobs:
           esac
           echo "test-paths=$test_paths" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         if: steps.plan.outputs.test-paths == '[]'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
       - id: training-cases
         if: steps.plan.outputs.test-paths == '[]'
         env:
           TEST_PATH: ${{ inputs.test-path }}
         run: |
-          pip install pyyaml -q
-          python3 << 'EOF' >> "$GITHUB_OUTPUT"
+          uv run --no-project --with pyyaml python3 << 'EOF' >> "$GITHUB_OUTPUT"
           import json
           import os
 
@@ -142,15 +143,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Pull LFS objects
         run: git lfs pull
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+      - name: Set up uv with Python 3.11
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.11"
-          cache: "pip"
+          activate-environment: true
 
       - name: Set up neuracore with Rust data daemon
         uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main

@@ -12,7 +12,7 @@ jobs:
       latest_release_tag: ${{ steps.release-tag.outputs.latest_release_tag }}
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7.0.1
       with:
         fetch-depth: 0
     - name: Resolve latest release tag
@@ -27,13 +27,14 @@ jobs:
         fi
         echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
         echo "Latest release tag: $latest_release_tag"
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3
     - name: List auto batch size cases
       id: list
       env:
         LATEST_RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
       run: |
-        pip install pyyaml -q
-        python3 << 'EOF' >> $GITHUB_OUTPUT
+        uv run --no-project --with pyyaml python3 << 'EOF' >> $GITHUB_OUTPUT
         import json
         import os
         import subprocess
@@ -80,7 +81,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ matrix.test-harness-ref }}
         fetch-depth: 0
@@ -96,12 +97,11 @@ jobs:
           exit 1
         fi
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
-      id: setup-python
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v10.3.3
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+        activate-environment: true
 
     - name: Set up neuracore from PyPI
       uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main

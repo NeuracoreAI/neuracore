@@ -49,7 +49,7 @@ jobs:
         fi
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ inputs.alpha_release && inputs.branch || (inputs.emergency_deploy && github.ref_name || 'main') }}
         fetch-depth: 0
@@ -94,7 +94,7 @@ jobs:
 
     - name: Fetch PR data and determine version bump
       id: analyze
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9.0.0
       env:
         COMMIT_SHAS: ${{ steps.get_commits.outputs.commit_shas || '[]' }}
         EMERGENCY: ${{ inputs.emergency_deploy }}
@@ -195,7 +195,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ inputs.alpha_release && inputs.branch || (inputs.emergency_deploy && github.ref_name || 'main') }}
         fetch-depth: 0
@@ -269,7 +269,7 @@ jobs:
 
     - name: Generate changelog
       id: generate
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9.0.0
       env:
         PENDING_CONTENT: ${{ steps.read_pending.outputs.pending_content }}
         PR_DATA: ${{ needs.analyze-changes.outputs.pr_data }}
@@ -341,25 +341,22 @@ jobs:
     steps:
     - name: Generate GitHub App Token
       id: generate-token
-      uses: actions/create-github-app-token@v1
+      uses: actions/create-github-app-token@v3.3.0
       with:
         app-id: ${{ vars.NC_VERSION_BUMPER_APP_ID }}
         private-key: ${{ secrets.NC_VERSION_BUMPER_PRIVATE_KEY }}
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ inputs.alpha_release && inputs.branch || (inputs.emergency_deploy && github.ref_name || 'main') }}
         token: ${{ steps.generate-token.outputs.token }}
         fetch-depth: 0
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3
       with:
         python-version: '3.11'
-
-    - name: Install build tools
-      run: pip install bump2version
 
     - name: Bump version
       run: |
@@ -370,7 +367,7 @@ jobs:
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git config user.name "github-actions[bot]"
 
-        bump2version $BUMP_TYPE --allow-dirty --no-commit --no-tag
+        uvx bump2version $BUMP_TYPE --allow-dirty --no-commit --no-tag
 
         NEW_VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
         echo "Bumped to version: $NEW_VERSION"
@@ -423,13 +420,13 @@ jobs:
     steps:
     - name: Generate GitHub App Token
       id: generate-token
-      uses: actions/create-github-app-token@v1
+      uses: actions/create-github-app-token@v3.3.0
       with:
         app-id: ${{ vars.NC_VERSION_BUMPER_APP_ID }}
         private-key: ${{ secrets.NC_VERSION_BUMPER_PRIVATE_KEY }}
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
         ref: ${{ needs.release.outputs.commit_sha }}
         token: ${{ steps.generate-token.outputs.token }}
@@ -452,7 +449,7 @@ jobs:
         fi
 
     - name: Create GitHub Release
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9.0.0
       env:
         CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
       with:
@@ -487,7 +484,7 @@ jobs:
           console.log(`Release URL: ${release.data.html_url}`);
 
     - name: Generate release summary
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9.0.0
       env:
         ALPHA_BRANCH: ${{ inputs.alpha_release && inputs.branch || '' }}
       with:
@@ -533,11 +530,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download wheel artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: neuracore-wheels-*
           path: dist
           merge-multiple: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Publish wheels to PyPI
         env:
@@ -548,9 +548,8 @@ jobs:
           # 3 platform legs x 5 Python minors (cp310-cp314)
           [ "$(ls dist/*.whl | wc -l)" -eq 15 ] || { echo "expected 15 wheels"; exit 1; }
           # packaging>=24.2 is required for twine to parse maturin's
-          # Metadata-Version 2.4 License-File field; the runner ships an older one.
-          python -m pip install --upgrade twine "packaging>=24.2"
-          twine upload --skip-existing dist/*.whl
+          # Metadata-Version 2.4 License-File field.
+          uvx --with "packaging>=24.2" twine upload --skip-existing dist/*.whl
 
   dry-run-summary:
     needs: [analyze-changes, generate-changelog]
@@ -559,7 +558,7 @@ jobs:
 
     steps:
     - name: Generate dry run summary
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9.0.0
       env:
         CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
         ALPHA_BRANCH: ${{ inputs.alpha_release && inputs.branch || '' }}
