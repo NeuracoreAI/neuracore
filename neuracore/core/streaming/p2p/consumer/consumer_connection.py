@@ -29,8 +29,6 @@ from neuracore_types import (
     VideoFormat,
 )
 
-from neuracore.core.auth import Auth, get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.consumer.ice_models import IceConfig
 from neuracore.core.streaming.p2p.consumer.sync_point_parser import (
@@ -38,10 +36,7 @@ from neuracore.core.streaming.p2p.consumer.sync_point_parser import (
     parse_sync_point,
 )
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
-from neuracore.core.streaming.p2p.signalling_endpoint import (
-    SignallingEndpoint,
-    legacy_endpoint,
-)
+from neuracore.core.streaming.p2p.signalling_endpoint import SignallingEndpoint
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +57,10 @@ class PeerToPeerConsumerConnection:
         connection_details: OpenConnectionDetails,
         expected_tracks: list[RobotStreamTrack],
         client_session: ClientSession = None,
-        org_id: str | None = None,
         enabled_manager: EnabledManager | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
-        auth: Auth | None = None,
-        signalling: SignallingEndpoint | None = None,
+        *,
+        signalling: SignallingEndpoint,
     ) -> None:
         """Initialize the connection.
 
@@ -79,15 +73,11 @@ class PeerToPeerConsumerConnection:
             expected_tracks: The tracks that are expected to be received from the
                 remote peer on this connection.
             client_session: The http session to use.
-            auth: The auth instance used to connect to the signalling server or
-                defaults to the global auth provider if not provided.
-            org_id: the organization to receive signalling from. If not provided
-                defaults to the current org.
             loop: the event loop to run on. Defaults to the running loop if not
                 provided.
             enabled_manager: The enabled manager for whether this should be
                 consuming. Defaults to a new enabled manger if not provided.
-            signalling: Where the messages go. Defaults to the legacy service.
+            signalling: Where the messages go.
 
         """
         self.id = connection_id
@@ -115,9 +105,7 @@ class PeerToPeerConsumerConnection:
         self.handle_offer_lock = asyncio.Lock()
         self.handle_ice_lock = asyncio.Lock()
 
-        self.org_id = org_id or get_current_org()
-        self.auth = auth or get_auth()
-        self.signalling = signalling or legacy_endpoint(self.org_id, self.auth)
+        self.signalling = signalling
         self.loop = loop or get_running_loop()
         self.enabled_manager = enabled_manager or EnabledManager(True, loop=self.loop)
         self.enabled_manager.add_listener(EnabledManager.DISABLED, self._on_close)
