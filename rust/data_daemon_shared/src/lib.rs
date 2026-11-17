@@ -490,6 +490,9 @@ pub enum Envelope {
         /// the row's stop and POSTed to the backend as `end_time`; never used
         /// for routing.
         timestamp_us: i64,
+        /// Normalized user tag names for the recording. The daemon sends them
+        /// to the backend with the stop.
+        tags: Vec<String>,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -1145,6 +1148,7 @@ mod tests {
             robot_instance: 2,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_us: 1_700_000_000_000_000,
+            tags: vec!["good-run".into(), "edge".into()],
         };
         let bytes = stop.encode().expect("encode");
         assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));

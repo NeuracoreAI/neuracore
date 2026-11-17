@@ -31,13 +31,18 @@ def test_start_recording_sends_microseconds(native: MagicMock) -> None:
     )
 
 
-@pytest.mark.parametrize("operation", ["stop_recording", "cancel_recording"])
-def test_stop_and_cancel_send_microseconds(native: MagicMock, operation: str) -> None:
+@pytest.mark.parametrize(
+    ("operation", "trailing_args"),
+    [("stop_recording", ([],)), ("cancel_recording", ())],
+)
+def test_stop_and_cancel_send_microseconds(
+    native: MagicMock, operation: str, trailing_args: tuple
+) -> None:
     context = bridge.RecordingContext()
     context.bind_source(ROBOT_ID, ROBOT_INSTANCE)
 
     getattr(context, operation)(TIMESTAMP_US)
 
     getattr(native, operation).assert_called_once_with(
-        ROBOT_ID, ROBOT_INSTANCE, TIMESTAMP_US
+        ROBOT_ID, ROBOT_INSTANCE, TIMESTAMP_US, *trailing_args
     )

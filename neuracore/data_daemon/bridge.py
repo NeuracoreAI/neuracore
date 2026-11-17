@@ -339,13 +339,14 @@ class RecordingContext:
             )
         return self._robot_id
 
-    def stop_recording(self, timestamp_us: int) -> None:
+    def stop_recording(self, timestamp_us: int, tags: list[str] | None = None) -> None:
         """Publish one ``StopRecording`` tagged with the source.
 
         The daemon uses the publish-clock stop boundary to close the recording
         window. ``timestamp_us`` is the recording's *capture* stop time in
         microseconds and is separate from that boundary, never used for window
-        membership.
+        membership. ``tags`` are normalized user tag names that the daemon sends
+        to the backend with the stop.
 
         This publishes the stop only; :meth:`flush_source` seals the writer's
         tail chunks and must be called straight after, so the caller can close
@@ -354,7 +355,7 @@ class RecordingContext:
         if not self._robot_id:
             return
         _load_native().stop_recording(
-            self._robot_id, self._robot_instance, timestamp_us
+            self._robot_id, self._robot_instance, timestamp_us, tags or []
         )
 
     def flush_source(self) -> None:
