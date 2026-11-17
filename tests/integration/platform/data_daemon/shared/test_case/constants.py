@@ -359,14 +359,3 @@ DEPTH_SCALE_M_BY_MODE: dict[DepthMode, float] = {
 # corner. Both sit away from pixel (0, 0), which frame matching reads first.
 DEPTH_HOLE_SIZE = 8
 DEPTH_SATURATED_VALUE = 65535
-
-# Numerical tolerance for comparing depth in meters retrieved from a
-# synchronized recording against the depth `nc.log_depth()` records: the
-# uint16 frame times its depth_scale, with depth beyond MAX_DEPTH as no return.
-# The lossy steps between those two points are the 24-bit depth-to-RGB24
-# storage quantization (MAX_DEPTH / (2**24 - 1) ~= 5.96e-7 m), the training
-# cache's uint16 grid (at most half of MAX_DEPTH / 65535 ~= 7.6e-5 m) and
-# ordinary float32 rounding, all smaller than this. Genuine corruption (wrong
-# channel order, wrong dtype, transposed axes) produces errors many orders of
-# magnitude larger, so this stays tight enough to catch it.
-DEPTH_ROUND_TRIP_ATOL_M = 1e-4

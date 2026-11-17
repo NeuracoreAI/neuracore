@@ -6,7 +6,7 @@ This guide is for developers working on the Rust data daemon under [rust/](../ru
 
 ## Workspace layout
 
-The [rust/](../rust/) directory is a Cargo workspace with three members declared in [rust/Cargo.toml](../rust/Cargo.toml):
+The [rust/](../rust/) directory is a Cargo workspace with four members declared in [rust/Cargo.toml](../rust/Cargo.toml):
 
 | Crate | Path | What it is |
 |---|---|---|
@@ -106,6 +106,14 @@ CI uses `stable` (via `dtolnay/rust-toolchain@stable`), so any recent stable too
     ```bash
     sudo apt-get update && sudo apt-get install -y ffmpeg
     ```
+
+- **CMake (3.16 or newer), a C++17 compiler and libclang**: `data-daemon` encodes depth frames (`lossless.bin`) with the `gamut-jxl` crate, whose build script compiles libjxl 0.12.0 from source and links it statically. The first build compiles libjxl, and cargo caches the result for later builds. iceoryx2 runs bindgen, which needs libclang. The wheel ships the licences of libjxl and its bundled libraries in `neuracore/data_daemon/THIRD_PARTY_LICENSES`:
+
+    ```bash
+    sudo apt-get update && sudo apt-get install -y cmake g++ libclang-dev
+    ```
+
+    On macOS, `xcode-select --install` provides the compiler, and `brew install cmake llvm` provides CMake and libclang.
 
 - **maturin** (only when working on the `data_daemon_bridge` PyO3 crate):
 
