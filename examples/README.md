@@ -169,5 +169,13 @@ This example shows you how to:
 python example_flag_data.py
 ```
 
+### Read an MCAP export
+This example reads one file from `neuracore export mcap` with only the `mcap`, `av`, `imagecodecs` and `numpy` packages. It decodes every camera frame and point cloud and prints one line per sensor. The [MCAP export format](../docs/mcap_export_format.md) describes the file.
+
+```bash
+neuracore export mcap --dataset "My Dataset" --output ./my_dataset_mcap
+python example_read_mcap_export.py "./my_dataset_mcap/nc_<recording name>.mcap"
+```
+
 ### Work with your own robot
 If you want to get your own robot working with neuracore, please refer to and also [tutorial](../docs/tutorial.md) and use the example files as a reference.
