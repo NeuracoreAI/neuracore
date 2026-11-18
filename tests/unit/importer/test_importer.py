@@ -136,7 +136,7 @@ def test_robot_exists_checks_private_and_shared_mixed_lists(monkeypatch):
 
 
 class _FakeConnect:
-    """nc.connect_robot that refuses the first calls as archived."""
+    """resolve_robot that refuses the first calls as archived."""
 
     def __init__(self, archived_refusals: int) -> None:
         self.archived_refusals = archived_refusals
@@ -163,7 +163,7 @@ def _patch_robot_api(monkeypatch, connect, unarchive_error=None):
                 raise unarchive_error
             unarchived.append((self.robot_name, self.shared, archived))
 
-    monkeypatch.setattr("neuracore.importer.importer.nc.connect_robot", connect)
+    monkeypatch.setattr("neuracore.importer.importer.resolve_robot", connect)
     monkeypatch.setattr("neuracore.importer.importer.Robot", FakeRobot)
     return unarchived
 

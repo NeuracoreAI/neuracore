@@ -173,12 +173,17 @@ class Robot:
         if self.urdf_path:
             self.joint_info = self._get_joint_info()
 
-    def init(self) -> None:
+    def init(self, register_instance: bool = True) -> None:
         """Initialize the robot on the Neuracore server.
 
         Creates the robot instance on the server and uploads the kinematic model
         if provided. This must be called before using the robot for data streaming
         or recording.
+
+        Args:
+            register_instance: Whether to register this robot instance. When
+                False the robot is only resolved, as dataset imports record
+                through an import session rather than a robot instance.
 
         Raises:
             RobotError: If not authenticated, if the robot is archived or if
@@ -196,14 +201,22 @@ class Robot:
 
         try:
             session = thread_local_session(retry_transient=True)
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
-                json={
-                    "name": self.name,
-                    "instance": self.instance,
-                },  # TODO: Add camera support
-                headers=self._auth.get_headers(),
-            )
+            robots_url = f"{API_URL}/org/{self.org_id}/robots"
+            if register_instance:
+                response = session.post(
+                    f"{robots_url}?is_shared={self.shared}",
+                    json={
+                        "name": self.name,
+                        "instance": self.instance,
+                    },  # TODO: Add camera support
+                    headers=self._auth.get_headers(),
+                )
+            else:
+                response = session.post(
+                    f"{robots_url}/resolve?is_shared={self.shared}",
+                    json={"name": self.name},
+                    headers=self._auth.get_headers(),
+                )
             response.raise_for_status()
             response_body = response.json()
             self.id = response_body["robot_id"]
@@ -1016,6 +1029,63 @@ def init(
         raise RobotError("Robot not initialized. Call init() first.")
     _robot_name_id_mapping[robot_name] = robot.id
     _robots[RobotInstanceIdentifier(robot_id=robot.id, robot_instance=instance)] = robot
+    return robot
+
+
+def resolve(
+    robot_name: str,
+    urdf_path: str | None = None,
+    mjcf_path: str | None = None,
+    overwrite: bool = False,
+    shared: bool = False,
+) -> Robot:
+    """Get or create a robot on the server without registering an instance.
+
+    The returned robot is not added to the global registry, so it cannot
+    stream or record on its own.
+
+    Args:
+        robot_name: Unique identifier for the robot type.
+        urdf_path: Path to URDF kinematic model file.
+        mjcf_path: Path to MJCF kinematic model file.
+        overwrite: Whether to overwrite existing robot configuration.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The resolved Robot.
+    """
+    if not robot_name:
+        raise ValueError("Robot name cannot be empty")
+    robot = Robot(robot_name, 0, urdf_path, mjcf_path, overwrite, shared)
+    robot.init(register_instance=False)
+    if not robot.id:
+        raise RobotError("Robot not initialized. Call init() first.")
+    return robot
+
+
+def attach(robot_name: str, robot_id: str, instance: int, shared: bool) -> Robot:
+    """Register a local handle for an existing robot without contacting the server.
+
+    Used by dataset import workers, whose recording source comes from an
+    import session the parent process already created.
+
+    Args:
+        robot_name: Name of the robot.
+        robot_id: ID of the existing robot.
+        instance: Recording source the handle records under.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The registered Robot handle.
+    """
+    if not robot_name:
+        raise ValueError("Robot name cannot be empty")
+    if not robot_id:
+        raise ValueError("Robot ID cannot be empty")
+    robot = Robot(robot_name, instance, shared=shared)
+    robot.id = robot_id
+    _robot_name_id_mapping[robot_name] = robot_id
+    _robots[RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)] = robot
     return robot
 
 

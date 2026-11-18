@@ -23,7 +23,9 @@ from neuracore.data_daemon.daemon_control import ensure_daemon_running
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
 from ..core.exceptions import DatasetError, RobotError
-from ..core.robot import Robot, get_robot
+from ..core.robot import Robot
+from ..core.robot import attach as _attach_local_robot
+from ..core.robot import get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
@@ -172,6 +174,19 @@ def connect_robot(
         DaemonLifecycleError: If the data daemon could not be started.
     """
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
+    return _activate_robot(robot)
+
+
+def _attach_robot(robot_name: str, robot_id: str, instance: int, shared: bool) -> Robot:
+    """Make an existing robot active under an import session recording source.
+
+    Unlike connect_robot, this registers no robot instance on the server.
+    """
+    robot = _attach_local_robot(robot_name, robot_id, instance, shared)
+    return _activate_robot(robot)
+
+
+def _activate_robot(robot: Robot) -> Robot:
     GlobalSingleton()._active_robot = robot
     # Initialize push update managers
     if robot.id is None:

@@ -205,12 +205,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=str(episode_id),
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name,
-                instance=self.robot_instance(self._worker_id),
-                wait=True,
-                timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
-            )
+            self._stop_recording(recording_stop_us / MICROSECONDS_PER_SECOND)
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _convert_v21_to_v30(self) -> None:

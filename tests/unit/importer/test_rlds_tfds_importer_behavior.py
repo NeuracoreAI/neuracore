@@ -87,7 +87,7 @@ def test_rlds_import_item_logs_steps_on_a_microsecond_frequency_grid():
     importer._episode_iter = iter([{"steps": [{"v": 1}, {"v": 2}]}])
     importer.frequency = 30.0
     importer._worker_id = 0
-    importer._instance_base = 0
+    importer._instance_start = 0
     importer.num_episodes = 1
     importer.robot_name = "test_robot"
     importer.dry_run = False
@@ -106,6 +106,10 @@ def test_rlds_import_item_logs_steps_on_a_microsecond_frequency_grid():
         patch(
             "neuracore.importer.rlds_tfds_importer.nc.stop_recording"
         ) as stop_recording,
+        patch(
+            "neuracore.importer.rlds_tfds_importer.nc.get_cloud_recording_id",
+            return_value="recording-1",
+        ),
     ):
         importer.import_item(ImportItem(index=0))
 

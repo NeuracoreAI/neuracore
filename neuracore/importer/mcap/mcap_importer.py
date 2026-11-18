@@ -200,7 +200,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 label=label,
                 recording_start_us=recording_start_us,
             )
-        finally:
+        except BaseException:
             if not self.dry_run:
                 nc.stop_recording(
                     robot_name=self.robot_name,
@@ -208,6 +208,9 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                     wait=True,
                     timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
                 )
+            raise
+        if not self.dry_run:
+            self._stop_recording(recording_stop_us / MICROSECONDS_PER_SECOND)
 
         self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
 

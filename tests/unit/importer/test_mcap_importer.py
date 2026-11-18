@@ -252,6 +252,10 @@ def test_mcap_importer_import_item_starts_and_stops_recording(
         "neuracore.importer.mcap.mcap_importer.nc.stop_recording",
         lambda robot_name, instance, wait, timestamp: calls.append(("stop", timestamp)),
     )
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.nc.get_cloud_recording_id",
+        lambda robot_name, instance: "recording-1",
+    )
 
     importer = _make_importer(monkeypatch, tmp_path)
 
