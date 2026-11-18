@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import requests
@@ -48,6 +48,7 @@ _ROBOT_ARCHIVED_MESSAGE = (
     "Robot '{robot_name}' is archived. Unarchive it on the Archived Robots "
     "page of the Neuracore dashboard, then connect again."
 )
+_SUPPORTED_MESH_EXTENSIONS = (".stl", ".dae")
 
 
 @dataclass
@@ -109,7 +110,8 @@ class Robot:
 
         Raises:
             ValidationError: If both URDF and MJCF paths are provided,
-                if files don't exist, or if file extensions are incorrect.
+                if files don't exist, if file extensions are incorrect,
+                or if a URDF visual mesh has an unsupported format.
             ImportError: If MJCF conversion is requested but mujoco is not available.
         """
         self.name = robot_name
@@ -141,6 +143,7 @@ class Robot:
                 raise ValidationError(f"URDF file not found: {urdf_path}")
             if not urdf_path.lower().endswith(".urdf"):
                 raise ValidationError("URDF file must have .urdf extension.")
+            self._check_mesh_formats()
         elif mjcf_path:
             mjcf_abs_path = Path(mjcf_path).expanduser().resolve()
 
@@ -517,6 +520,28 @@ class Robot:
 
         # Create the files dict with the ZIP data
         return {"robot_package": ("robot_package.zip", zip_data, "application/zip")}
+
+    def _check_mesh_formats(self) -> None:
+        """Check that every URDF visual mesh uses a supported file format.
+
+        Raises:
+            ValidationError: If a visual mesh filename has an unsupported extension.
+        """
+        unsupported_filenames: list[str] = []
+        for mesh in self._load_urdf().findall(".//visual//mesh"):
+            filename = mesh.get("filename")
+            if not filename or filename in unsupported_filenames:
+                continue
+            extension = PureWindowsPath(filename).suffix.lower()
+            if extension not in _SUPPORTED_MESH_EXTENSIONS:
+                unsupported_filenames.append(filename)
+        if unsupported_filenames:
+            raise ValidationError(
+                "URDF has unsupported visual mesh formats: "
+                f"{', '.join(unsupported_filenames)}\n"
+                "Convert these meshes to one of: "
+                f"{', '.join(_SUPPORTED_MESH_EXTENSIONS)}"
+            )
 
     def _load_urdf(self) -> ET.Element:
         """Load the URDF contents either from disk or by downloading the package.

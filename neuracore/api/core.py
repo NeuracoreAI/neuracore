@@ -171,6 +171,8 @@ def connect_robot(
 
     Raises:
         RobotError: If the robot could not be initialized or is archived.
+        ValidationError: If the model paths are not valid or if a URDF visual
+            mesh has an unsupported format.
         DaemonLifecycleError: If the data daemon could not be started.
     """
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)

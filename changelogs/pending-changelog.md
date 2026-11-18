@@ -18,3 +18,5 @@ The `StopRecording` message to the data daemon carries a list of user tag names.
 The data daemon keeps the tag names of a stop in its state store and sends them in the `/recording/stop` request, also after an offline period or a restart. A stop without tags sends the same request as before.
 
 `nc.stop_recording` takes an optional `tags` list of user tag names, so a script tags a recording when it stops it. The names are normalized like `recording.add_tag`, and a name given twice gives one tag. An invalid name raises `ValueError` and the recording does not stop. The tags also reach a recording that was made offline.
+
+Breaking change: `nc.connect_robot` raises `ValidationError` if the URDF has a visual mesh that is not STL or DAE, because the web viewer shows only these formats. The error lists each unsupported mesh file. Convert these meshes to STL or DAE before you connect the robot.
