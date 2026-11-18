@@ -1,5 +1,7 @@
 """Tests for PolicyInference's array-native action-chunk path."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -14,7 +16,10 @@ from ordered_set import OrderedSet
 
 from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
-from neuracore.ml.utils.policy_inference import PolicyInference
+from neuracore.ml.utils.policy_inference import (
+    PolicyInference,
+    _tensor_from_action_item,
+)
 from neuracore.ml.utils.real_time_chunking import RTCConfig
 
 HORIZON = 8
@@ -331,3 +336,37 @@ def test_unguided_chunk_does_not_swallow_errors_from_the_model(policy_inference)
             policy_inference.predict_action_chunk(_sync_point())
     finally:
         model._predict_action = original
+
+
+def test_tensor_from_action_item_reads_pose() -> None:
+    pose = torch.zeros(1, HORIZON, 7)
+    item = SimpleNamespace(value=None, open_amount=None, data=None, pose=pose)
+    assert _tensor_from_action_item(item, DataType.END_EFFECTOR_POSES) is pose
+
+
+def test_pose_slots_use_item_width_not_scalar_column_count() -> None:
+    """act_pose output_dims is 7 scalars; embodiment names one EE stream."""
+    inference = PolicyInference.__new__(PolicyInference)
+    inference.model = SimpleNamespace(
+        output_dims={DataType.END_EFFECTOR_POSES: (0, 7)},
+        output_item_dims={DataType.END_EFFECTOR_POSES: [7]},
+        ordered_output_data_types=[DataType.END_EFFECTOR_POSES],
+        action_output_data_types=[DataType.END_EFFECTOR_POSES],
+    )
+    inference.output_embodiment_description = {
+        DataType.END_EFFECTOR_POSES: {0: "/plate_track/right/ee_pose_delta"}
+    }
+
+    names = inference.output_action_names()
+    assert len(names) == 7
+    assert all(
+        entry == (DataType.END_EFFECTOR_POSES, "/plate_track/right/ee_pose_delta")
+        for entry in names
+    )
+
+    pose = torch.arange(HORIZON * 7, dtype=torch.float32).reshape(1, HORIZON, 7)
+    packed = inference._pack_action_outputs(
+        {DataType.END_EFFECTOR_POSES: [SimpleNamespace(pose=pose)]}
+    )
+    assert packed.shape == (1, HORIZON, 7)
+    assert torch.equal(packed, pose)

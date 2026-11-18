@@ -41,6 +41,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _embodiment_name(indexed: object, index: int) -> str | None:
+    """Return the sensor name at ``index`` from an embodiment spec."""
+    if isinstance(indexed, dict):
+        name = indexed.get(index)
+        if name is None:
+            name = indexed.get(str(index))
+        return name
+    if isinstance(indexed, list) and 0 <= index < len(indexed):
+        return indexed[index]
+    return None
+
+
+def _tensor_from_action_item(item: BatchedNCData, data_type: DataType) -> torch.Tensor:
+    """Extract the action tensor from a batched NC item, including EE poses."""
+    for attr in ("value", "open_amount", "data", "pose"):
+        tensor = getattr(item, attr, None)
+        if tensor is not None:
+            return tensor
+    raise ValueError(f"Cannot pack {type(item).__name__} for {data_type}")
+
+
 class PolicyInference:
     """PolicyInference class for handling model inference.
 
@@ -152,15 +173,16 @@ class PolicyInference:
         array produced by :meth:`predict_action_chunk` belongs to. ``None`` marks
         a cross-embodiment padding column with no sensor in this embodiment.
 
+        ``output_dims`` is a scalar-column range. Pose (and other wide) items
+        occupy several columns; ``output_item_dims`` is the per-slot width, and
+        the embodiment name is the slot index, not the column index.
+
         Returns:
             list[tuple[DataType, str | None]]: One entry per action column.
         """
         names: list[tuple[DataType, str | None]] = []
-        for data_type in self._action_output_data_types():
-            start_idx, end_idx = self.model.output_dims[data_type]
-            indexed = self.output_embodiment_description.get(data_type, {})
-            for index in range(end_idx - start_idx):
-                names.append((data_type, indexed.get(index)))
+        for data_type, width, name in self._action_slot_layout():
+            names.extend([(data_type, name)] * width)
         return names
 
     def predict_action_chunk(
@@ -252,27 +274,29 @@ class PolicyInference:
         """
         pieces: list[torch.Tensor] = []
         for data_type in self._action_output_data_types():
-            start_idx, end_idx = self.model.output_dims[data_type]
-            width = end_idx - start_idx
-            slots = outputs[data_type]
-            if len(slots) < width:
-                raise ValueError(
-                    f"Model returned {len(slots)} {data_type} slots but "
-                    f"output_dims expects {width}"
-                )
-            for index in range(width):
-                item = slots[index]
-                tensor = getattr(item, "value", None)
-                if tensor is None:
-                    tensor = getattr(item, "open_amount", None)
-                if tensor is None:
-                    tensor = getattr(item, "data", None)
-                if tensor is None:
-                    raise ValueError(
-                        f"Cannot pack {type(item).__name__} for {data_type}"
-                    )
-                pieces.append(tensor)
+            for item in outputs[data_type]:
+                pieces.append(_tensor_from_action_item(item, data_type))
+        if not pieces:
+            raise ValueError("model produced no packable action outputs")
         return torch.cat(pieces, dim=-1)
+
+    def _action_slot_layout(self) -> list[tuple[DataType, int, str | None]]:
+        """Return ``(data_type, column_width, sensor_name)`` per action slot."""
+        layout: list[tuple[DataType, int, str | None]] = []
+        item_dims = getattr(self.model, "output_item_dims", None) or {}
+        for data_type in self._action_output_data_types():
+            indexed = self.output_embodiment_description.get(data_type, {}) or {}
+            widths = item_dims.get(data_type) if isinstance(item_dims, dict) else None
+            if widths:
+                for slot_index, width in enumerate(widths):
+                    layout.append(
+                        (data_type, int(width), _embodiment_name(indexed, slot_index))
+                    )
+                continue
+            start_idx, end_idx = self.model.output_dims[data_type]
+            for index in range(end_idx - start_idx):
+                layout.append((data_type, 1, _embodiment_name(indexed, index)))
+        return layout
 
     @contextmanager
     def _sampler_steps(self, num_inference_steps: int | None) -> Iterator[None]:
