@@ -20,19 +20,17 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import torch
 from neuracore_types import DataType, SynchronizedPoint
 
 from neuracore.ml.utils.policy_inference import PolicyInference
-from neuracore.ml.utils.real_time_chunking import (
-    RTCConfig,
-    align_previous_chunk,
-    max_feasible_inference_delay,
-)
 from neuracore.ml.utils.temporal_ensemble import TemporalEnsembleConfig
+
+if TYPE_CHECKING:
+    from neuracore.ml.utils.real_time_chunking import RTCConfig
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +136,8 @@ class RTCReplanner:
         execution_horizon: int,
     ) -> np.ndarray:
         """Run guided (or bootstrap) RTC sampling."""
+        from neuracore.ml.utils.real_time_chunking import align_previous_chunk
+
         aligned: np.ndarray | None = None
         if prev_chunk is not None:
             aligned = align_previous_chunk(
@@ -592,6 +592,8 @@ class ChunkingController:
         self._delays.append(observed_ticks)
         if not self._adapt:
             return
+        from neuracore.ml.utils.real_time_chunking import max_feasible_inference_delay
+
         ceiling = max_feasible_inference_delay(
             self._horizon, self._min_execution_horizon
         )
