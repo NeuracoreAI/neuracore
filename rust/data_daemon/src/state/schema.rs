@@ -138,6 +138,37 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// Whether the server has confirmed a robot or dataset row.
+    pub enum ResolutionStatus {
+        /// The server has yet to confirm the row: it is new, or connected or
+        /// selected again and due to be checked.
+        Pending => "pending",
+        /// The server confirmed the row; its server id is set.
+        Done    => "done",
+        /// The server refused the row for good.
+        Failed  => "failed",
+    }
+}
+
+string_enum! {
+    /// Why a robot or dataset row is held `pending`, or why it `failed`.
+    pub enum ResolutionReason {
+        /// The account cannot record in the row's organization.
+        NotInOrg         => "not_in_org",
+        /// The API key was rejected or is missing.
+        Credentials      => "credentials",
+        /// A dataset of the other kind, shared or private, has the name.
+        NameTaken        => "name_taken",
+        /// The robot instance is archived.
+        RobotArchived    => "robot_archived",
+        /// The account may not create shared datasets. Final.
+        SharedNotAllowed => "shared_not_allowed",
+        /// The server rejected the request itself. Final.
+        Rejected         => "rejected",
+    }
+}
+
 /// A row from the `recordings` table.
 ///
 /// The daemon owns recording identity: `recording_index` is the local primary
@@ -160,6 +191,10 @@ pub struct RecordingRow {
     pub robot_instance: Option<i64>,
     /// Dataset identifier, when supplied.
     pub dataset_id: Option<String>,
+    /// The recording's row in `robots`.
+    pub robot_index: Option<i64>,
+    /// The recording's row in `datasets`.
+    pub dataset_index: Option<i64>,
     /// Caller's start of the recording in microseconds on its data clock.
     pub start_timestamp_us: Option<i64>,
     /// Wall-clock time of the start (Unix nanoseconds): the producer's publish time, or the daemon's clock when the daemon
@@ -226,6 +261,8 @@ impl RecordingRow {
             robot_id: row.try_get("robot_id")?,
             robot_instance: row.try_get("robot_instance")?,
             dataset_id: row.try_get("dataset_id")?,
+            robot_index: row.try_get("robot_index")?,
+            dataset_index: row.try_get("dataset_index")?,
             start_timestamp_us: row.try_get("start_timestamp_us")?,
             start_publish_timestamp_ns: row.try_get("start_publish_timestamp_ns")?,
             stop_timestamp_us: row.try_get("stop_timestamp_us")?,
@@ -242,6 +279,103 @@ impl RecordingRow {
             backend_not_found_at: row.try_get("backend_not_found_at")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
+        })
+    }
+}
+
+/// A row from the `robots` table: one robot instance, connected online or
+/// offline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RobotRow {
+    /// Primary key; what the rest of the daemon uses for this robot instance.
+    pub robot_index: i64,
+    /// The organization it is connected in. `None` only for a row made for a
+    /// recording that predates the `robots` table.
+    pub org_id: Option<String>,
+    /// `None` only for a row made for a recording that predates the table.
+    pub name: Option<String>,
+    pub shared: bool,
+    pub instance: i64,
+    /// Overwrite the server's URDF with the saved package.
+    pub overwrite_urdf: bool,
+    /// The URDF package the SDK saved for the server, until it is sent.
+    pub package_path: Option<String>,
+    /// The server's id, once confirmed.
+    pub cloud_robot_id: Option<String>,
+    pub status: ResolutionStatus,
+    pub reason: Option<ResolutionReason>,
+    /// When the server may next be asked about a pending row; `None`: now.
+    pub next_attempt_at: Option<NaiveDateTime>,
+    pub last_used_at: NaiveDateTime,
+    pub created_at: NaiveDateTime,
+}
+
+impl RobotRow {
+    /// Decode a SQLite row into a [`RobotRow`].
+    pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(RobotRow {
+            robot_index: row.try_get("robot_index")?,
+            org_id: row.try_get("org_id")?,
+            name: row.try_get("name")?,
+            shared: row.try_get("shared")?,
+            instance: row.try_get("instance")?,
+            overwrite_urdf: row.try_get("overwrite_urdf")?,
+            package_path: row.try_get("package_path")?,
+            cloud_robot_id: row.try_get("cloud_robot_id")?,
+            status: parse_column(row, "status")?,
+            reason: parse_optional_column(row, "reason")?,
+            next_attempt_at: row.try_get("next_attempt_at")?,
+            last_used_at: row.try_get("last_used_at")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+/// A row from the `datasets` table: one dataset, selected online or offline,
+/// or named by a recording started from the web app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetRow {
+    /// Primary key; what the rest of the daemon uses for this dataset.
+    pub dataset_index: i64,
+    /// `None` only for a row made for a recording that predates the table.
+    pub org_id: Option<String>,
+    /// `None` for a row made for a recording that predates the table, or for
+    /// a recording started from the web app.
+    pub name: Option<String>,
+    pub shared: bool,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+    /// The server's id, once confirmed.
+    pub cloud_dataset_id: Option<String>,
+    pub status: ResolutionStatus,
+    pub reason: Option<ResolutionReason>,
+    /// When the server may next be asked about a pending row; `None`: now.
+    pub next_attempt_at: Option<NaiveDateTime>,
+    pub last_used_at: NaiveDateTime,
+    pub created_at: NaiveDateTime,
+}
+
+impl DatasetRow {
+    /// Decode a SQLite row into a [`DatasetRow`].
+    pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        let tags: String = row.try_get("tags")?;
+        let tags = serde_json::from_str(&tags).map_err(|error| sqlx::Error::ColumnDecode {
+            index: "tags".into(),
+            source: Box::new(error),
+        })?;
+        Ok(DatasetRow {
+            dataset_index: row.try_get("dataset_index")?,
+            org_id: row.try_get("org_id")?,
+            name: row.try_get("name")?,
+            shared: row.try_get("shared")?,
+            description: row.try_get("description")?,
+            tags,
+            cloud_dataset_id: row.try_get("cloud_dataset_id")?,
+            status: parse_column(row, "status")?,
+            reason: parse_optional_column(row, "reason")?,
+            next_attempt_at: row.try_get("next_attempt_at")?,
+            last_used_at: row.try_get("last_used_at")?,
+            created_at: row.try_get("created_at")?,
         })
     }
 }
@@ -338,6 +472,18 @@ where
 {
     let raw: String = row.try_get(column)?;
     T::from_str(&raw).map_err(|error| decode_error(column, error))
+}
+
+fn parse_optional_column<T>(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &'static str,
+) -> Result<Option<T>, sqlx::Error>
+where
+    T: FromStr<Err = ParseEnumError>,
+{
+    let raw: Option<String> = row.try_get(column)?;
+    raw.map(|raw| T::from_str(&raw).map_err(|error| decode_error(column, error)))
+        .transpose()
 }
 
 fn decode_error(column: &'static str, error: ParseEnumError) -> sqlx::Error {
