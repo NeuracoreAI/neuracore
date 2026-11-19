@@ -358,7 +358,16 @@ pub async fn notify_recording_lifecycle(
         );
         return;
     };
-    let Some(org_id) = org_rx.borrow().clone() else {
+    // A recording made offline is stopped or cancelled in the organisation it
+    // was made in: the backend refuses a cancel sent under another one.
+    let org_id = match crate::cloud::recording_org_id(store, recording_index, org_rx).await {
+        Ok(org_id) => org_id,
+        Err(error) => {
+            tracing::warn!(%error, recording_index, "failed to read the recording's organisation");
+            return;
+        }
+    };
+    let Some(org_id) = org_id else {
         tracing::warn!(
             recording_index,
             recording_id,

@@ -20,7 +20,6 @@ use tokio::time::{sleep, timeout};
 
 use super::status::StatusUpdate;
 use crate::api::ApiClient;
-use crate::cloud::OrgIdRx;
 use crate::state::{DaemonEvent, EventBus, TraceRecord, TraceWriteHandle};
 
 /// Chunk size used for resumable uploads.
@@ -97,7 +96,7 @@ pub(crate) async fn upload_one_file(
     client: &Arc<ApiClient>,
     trace_writer: &TraceWriteHandle,
     bus: &EventBus,
-    org_rx: &OrgIdRx,
+    org_id: Option<&str>,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     trace: &TraceRecord,
     recording_id: &str,
@@ -122,7 +121,7 @@ pub(crate) async fn upload_one_file(
     let mut session_uri = session_uri;
     let recording_index = trace.recording_index;
     let trace_id = trace.trace_id.clone();
-    let Some(org_id) = org_rx.borrow().clone() else {
+    let Some(org_id) = org_id.map(str::to_string) else {
         return Err(UploadFileError::Retry(
             "no current org_id configured; cannot refresh session URI".to_string(),
         ));

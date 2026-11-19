@@ -93,7 +93,19 @@ async fn sweep_once(
         if recording.stopped_at.is_none() || recording.cancelled_at.is_some() {
             continue;
         }
-        let Some(org_id) = org_rx.borrow().clone() else {
+        let org_id =
+            match crate::cloud::recording_org_id(store, recording.recording_index, org_rx).await {
+                Ok(org_id) => org_id,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        recording_index = recording.recording_index,
+                        "progress reporter could not read the recording's organisation"
+                    );
+                    continue;
+                }
+            };
+        let Some(org_id) = org_id else {
             continue;
         };
         // Every cloud URL needs the backend `recording_id`. A None here means
