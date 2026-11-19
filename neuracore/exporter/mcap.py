@@ -1,34 +1,42 @@
 """Export original Neuracore traces and media to generic JSON MCAP files."""
 
-import base64
 import io
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
 import av
-import numpy as np
 import requests
-from neuracore_types import DataType
-from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
+from neuracore_types import DATA_TYPE_TO_NC_DATA_CLASS, DataType
 from neuracore_types.timestamps import NANOSECONDS_PER_MICROSECOND
-from PIL import Image
 
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.frame_cache import get_camera_data_filenames
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.sensor_paths import sensor_directory
-from neuracore.core.utils.depth_utils import decode_depth_frame, rgb_to_depth_storage
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
+
+VIDEO_TIMESTAMP_TOLERANCE_US = 2
+"""Largest gap in microseconds between a video frame time and its trace time."""
+
+TRACE_SCHEMA_NAME_FORMAT = "neuracore.{data_type}.v1"
+"""Name of the JSON Schema that describes the trace entries of one data type."""
 
 
 class McapExporter(DatasetExporter):
-    """Write one standalone JSON MCAP per recording."""
+    """Write one standalone JSON MCAP per recording.
 
-    format_name = "neuracore-mcap-json-v1"
+    Every trace sample becomes one JSON message holding the trace entry unchanged.
+    Each data type has its own JSON Schema, generated from its neuracore_types
+    model.
+    RGB videos, depth frames files (lossless.bin) and point cloud binaries are
+    attached as stored. The MCAP chunks are compressed with zstd.
+    """
+
+    format_name = "neuracore-mcap-json-v2"
 
     def __init__(self) -> None:
         """Create a writer; output is assigned when the export is prepared."""
@@ -51,28 +59,69 @@ class McapExporter(DatasetExporter):
         return cls._timestamp_ns(sample["timestamp"])
 
     @staticmethod
+    def _trace_entry_json_schema(data_type: DataType) -> dict:
+        """Return the JSON Schema of one stored trace entry of a data type.
+
+        The schema comes from the neuracore_types model of the data type. Fields
+        with a default are optional, because stored entries leave some of them
+        out. Extra keys, such as the byte range of a depth frame, stay allowed.
+
+        Args:
+            data_type: Data type of the trace.
+
+        Returns:
+            The JSON Schema as a dictionary.
+        """
+        model = DATA_TYPE_TO_NC_DATA_CLASS[data_type]
+        schema = model.model_json_schema(mode="serialization")
+        properties = schema.get("properties", {})
+        schema["required"] = [
+            name
+            for name in schema.get("required", [])
+            if "default" not in properties.get(name, {})
+        ]
+        schema["additionalProperties"] = True
+        return {"$schema": "https://json-schema.org/draft/2020-12/schema", **schema}
+
+    @staticmethod
+    def _download_if_present(recording: Recording, path: str) -> bytes | None:
+        """Download a recording file, returning None when storage has no such file."""
+        try:
+            return recording.download(path)
+        except requests.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            return None
+
+    @classmethod
     def _media(
-        recording: Recording, data_type: DataType, prefix: str
+        cls, recording: Recording, data_type: DataType, prefix: str
     ) -> tuple[str, str, bytes] | None:
-        """Resolve the stored binary payload for a sensor, if it has one."""
+        """Resolve the stored binary payload for a sensor, if it has one.
+
+        RGB cameras use their lossless video, or their lossy video when no
+        lossless video exists. Depth cameras use only their depth frames file.
+        Point clouds use trace.bin when the recording has one; otherwise the
+        point cloud is inline in trace.json.
+        """
         if data_type == DataType.POINT_CLOUDS:
             path = f"{prefix}/trace.bin"
-            return path, "application/octet-stream", recording.download(path)
+            payload = cls._download_if_present(recording, path)
+            if payload is None:
+                return None
+            return path, "application/octet-stream", payload
         if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
             return None
-        filenames = get_camera_data_filenames(data_type)
-        if data_type == DataType.DEPTH_IMAGES:
-            filenames += get_camera_data_filenames(data_type, legacy_depth=True)
-        for filename in filenames:
+        for filename in get_camera_data_filenames(data_type):
             path = f"{prefix}/{filename}"
-            media_type = (
-                "video/mp4" if filename.endswith(".mp4") else "application/octet-stream"
-            )
-            try:
-                return path, media_type, recording.download(path)
-            except requests.HTTPError as exc:
-                if exc.response is None or exc.response.status_code != 404:
-                    raise
+            payload = cls._download_if_present(recording, path)
+            if payload is not None:
+                media_type = (
+                    "video/mp4"
+                    if filename.endswith(".mp4")
+                    else "application/octet-stream"
+                )
+                return path, media_type, payload
         raise ValueError(f"No camera data found for sensor {prefix}.")
 
     def check_dependencies(self) -> None:
@@ -108,81 +157,63 @@ class McapExporter(DatasetExporter):
                 if not isinstance(name, str) or not name or name in (".", ".."):
                     raise ValueError("Invalid sensor name in recording manifest.")
 
-    @staticmethod
-    def _samples(
-        trace: list[dict], data_type: DataType, media: tuple[str, str, bytes] | None
-    ) -> Iterator[dict]:
-        """Keep raw trace fields and embed independently decodable camera frames.
-
-        Original videos and depth frames files remain attachments. Inline PNG (RGB)
-        and float TIFF (depth in meters) let message-based importers read every
-        image without needing Neuracore-specific attachment handling. Depth in a
-        video is legacy packed RGB depth; its samples carry the legacy scale so
-        importers can convert the metres back to sensor units.
-        """
-        if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
-            yield from trace
-            return
-        if media is None:
-            raise ValueError("Camera trace has no camera data.")
-        if data_type == DataType.DEPTH_IMAGES and media[1] != "video/mp4":
-            yield from McapExporter._depth_frames_samples(trace, media)
-            return
-        with av.open(io.BytesIO(media[2])) as video:
-            frames = video.decode(video=0)
-            for index, item in enumerate(trace):
-                if item.get("frame_idx") != index:
-                    raise ValueError(f"Invalid frame index in {media[0]}: {item}.")
-                frame = next(frames, None)
-                if frame is None:
-                    raise ValueError(f"Missing video frame {index} in {media[0]}.")
-                pixels = frame.to_ndarray(format="rgb24")
-                image_format = "PNG"
-                if data_type == DataType.DEPTH_IMAGES:
-                    pixels = rgb_to_depth_storage(pixels)
-                    image_format = "TIFF"
-                with io.BytesIO() as encoded:
-                    Image.fromarray(pixels).save(encoded, format=image_format)
-                    sample = {
-                        **item,
-                        "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
-                    }
-                    if data_type == DataType.DEPTH_IMAGES:
-                        sample.setdefault("depth_scale_m", float(LEGACY_DEPTH_SCALE_M))
-                    yield sample
-            if next(frames, None) is not None:
-                raise ValueError(f"Unreferenced video frames in {media[0]}.")
-
-    @staticmethod
-    def _depth_frames_samples(
-        trace: list[dict], media: tuple[str, str, bytes]
-    ) -> Iterator[dict]:
-        """Embed each frame of a depth frames file as a float TIFF in meters.
+    @classmethod
+    def _check_video_matches_trace(
+        cls, trace: list[dict], media: tuple[str, str, bytes]
+    ) -> None:
+        """Check that the video holds one frame per trace entry at its trace time.
 
         Args:
-            trace: Trace entries of the depth camera, each holding the offset,
-                length and metres per unit of its frame.
-            media: Frames file path, media type and bytes.
-
-        Yields:
-            Trace entries with their frame attached as base64 TIFF data.
+            trace: Trace entries of the camera, in frame order.
+            media: Video path, media type and bytes.
 
         Raises:
-            ValueError: If a trace entry has no byte range inside the file.
+            ValueError: If the frame count, a frame index or a frame time differs
+                from the trace.
         """
-        payload = media[2]
+        path, _, payload = media
+        with av.open(io.BytesIO(payload)) as container:
+            stream = container.streams.video[0]
+            packets = container.demux(stream)
+            frame_times = sorted(
+                packet.pts for packet in packets if packet.pts is not None
+            )
+            time_base = stream.time_base
+        if len(frame_times) != len(trace):
+            raise ValueError(
+                f"Video {path} holds {len(frame_times)} frames but the trace has "
+                f"{len(trace)} entries."
+            )
+        first_trace_ns = cls._sample_timestamp_ns(trace[0])
+        for index, (item, frame_time) in enumerate(zip(trace, frame_times)):
+            if item.get("frame_idx") != index:
+                raise ValueError(f"Invalid frame index in {path}: {item}.")
+            video_us = float((frame_time - frame_times[0]) * time_base * 1_000_000)
+            trace_us = (cls._sample_timestamp_ns(item) - first_trace_ns) / 1_000
+            if abs(video_us - trace_us) > VIDEO_TIMESTAMP_TOLERANCE_US:
+                raise ValueError(
+                    f"Frame {index} of {path} is at {video_us:.1f} us but the trace "
+                    f"says {trace_us:.1f} us."
+                )
+
+    @staticmethod
+    def _check_byte_ranges_inside_file(
+        trace: list[dict], media: tuple[str, str, bytes]
+    ) -> None:
+        """Check that every trace entry names a byte range inside the attachment.
+
+        Args:
+            trace: Trace entries, each holding the offset and length of its frame.
+            media: Attachment path, media type and bytes.
+
+        Raises:
+            ValueError: If an entry has no byte range inside the file.
+        """
+        path, _, payload = media
         for item in trace:
             offset, length = item.get("offset"), item.get("length")
             if offset is None or length is None or offset + length > len(payload):
-                raise ValueError(f"Invalid depth frame range in {media[0]}: {item}.")
-            frame = decode_depth_frame(payload[offset : offset + length])
-            metres = frame.astype(np.float32) * np.float32(item["depth_scale_m"])
-            with io.BytesIO() as encoded:
-                Image.fromarray(metres).save(encoded, format="TIFF")
-                yield {
-                    **item,
-                    "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
-                }
+                raise ValueError(f"Invalid frame range in {path}: {item}.")
 
     def prepare(self, dataset: Dataset, output: Path) -> None:
         """Set the destination for this dataset's MCAP files."""
@@ -206,19 +237,8 @@ class McapExporter(DatasetExporter):
         partial = destination.with_suffix(".mcap.partial")
         try:
             with partial.open("xb") as stream:
-                writer = Writer(stream, compression=CompressionType.NONE)
+                writer = Writer(stream, compression=CompressionType.ZSTD)
                 writer.start(profile="", library=f"neuracore/{__version__}")
-                schema_id = writer.register_schema(
-                    name="neuracore.raw_trace.v1",
-                    encoding="jsonschema",
-                    data=json.dumps({
-                        "$schema": "http://json-schema.org/draft-07/schema#",
-                        "type": "object",
-                        "properties": {"timestamp": {"type": "number"}},
-                        "required": ["timestamp"],
-                        "additionalProperties": True,
-                    }).encode(),
-                )
                 recording_metadata = {
                     "id": recording.id,
                     "robot_id": recording.robot_id,
@@ -237,6 +257,13 @@ class McapExporter(DatasetExporter):
                     {"json": json.dumps(recording_metadata, allow_nan=False)},
                 )
                 for data_type, names in sorted(recording.sensor_manifest.items()):
+                    schema_id = writer.register_schema(
+                        name=TRACE_SCHEMA_NAME_FORMAT.format(data_type=data_type.value),
+                        encoding="jsonschema",
+                        data=json.dumps(
+                            self._trace_entry_json_schema(data_type)
+                        ).encode(),
+                    )
                     for name in sorted(names):
                         prefix = sensor_directory(data_type, name)
                         trace = json.loads(recording.download(f"{prefix}/trace.json"))
@@ -248,6 +275,10 @@ class McapExporter(DatasetExporter):
                             "sensor_name": name,
                         }
                         if media is not None:
+                            if media[1] == "video/mp4":
+                                self._check_video_matches_trace(trace, media)
+                            else:
+                                self._check_byte_ranges_inside_file(trace, media)
                             path, media_type, payload = media
                             timestamp = (
                                 recording.start_timestamp_us
@@ -270,9 +301,7 @@ class McapExporter(DatasetExporter):
                             schema_id=schema_id,
                             metadata=channel_metadata,
                         )
-                        for sequence, item in enumerate(
-                            self._samples(trace, data_type, media)
-                        ):
+                        for sequence, item in enumerate(trace):
                             if not isinstance(item, dict) or not (
                                 "timestamp_us" in item or "timestamp" in item
                             ):

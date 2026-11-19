@@ -2,6 +2,7 @@
 
 import io
 import json
+from fractions import Fraction
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -115,6 +116,10 @@ def test_round_trip_raw_timestamps_payloads_and_attachments(
         assert len(messages) == 4
         for schema, channel, message in messages:
             assert schema.encoding == "jsonschema"
+            assert schema.name == f"neuracore.{channel.metadata['data_type']}.v1"
+            entry_schema = json.loads(schema.data)
+            assert entry_schema["additionalProperties"] is True
+            assert set(entry_schema["required"]) <= set(json.loads(message.data))
             assert channel.message_encoding == "json"
             assert message.publish_time == message.log_time
         attachments = {a.name: a.data for a in reader.iter_attachments()}
@@ -289,45 +294,10 @@ def test_second_recording_failure_retains_completed_file(dataset, recording, tmp
     assert not list(output.glob("*.partial"))
 
 
-@pytest.mark.parametrize("kind", [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES])
-def test_image_samples_are_readable_without_attachment_support(kind):
-    import logging
-
-    from neuracore_types.nc_data.camera_data import LEGACY_DEPTH_SCALE_M
-
-    from neuracore.core.utils.depth_utils import (
-        depth_to_rgb_storage,
-        legacy_rgb_to_depth_units,
-    )
-    from neuracore.importer.mcap.utils import read_image_data
-
-    pixels = np.full((16, 16, 3), 73, dtype=np.uint8)
-    if kind == DataType.DEPTH_IMAGES:
-        pixels = depth_to_rgb_storage(np.full((16, 16), 0.3, dtype=np.float32))
-    trace = [{"timestamp": 1.25, "frame_idx": 0, "frame": None}]
-    samples = list(
-        McapExporter._samples(
-            trace, kind, ("video.mp4", "video/mp4", _video_bytes(pixels))
-        )
-    )
-    assert samples[0]["timestamp"] == 1.25
-    assert samples[0]["frame_idx"] == 0
-    assert trace[0]["frame"] is None
-    decoded = read_image_data(
-        kind, samples[0], samples[0], logger=logging.getLogger(__name__)
-    )
-    if kind == DataType.DEPTH_IMAGES:
-        assert samples[0]["depth_scale_m"] == pytest.approx(LEGACY_DEPTH_SCALE_M)
-        expected = legacy_rgb_to_depth_units(pixels)
-    else:
-        expected = pixels
-    np.testing.assert_array_equal(decoded, expected)
-
-
-def test_legacy_depth_recording_exports_its_lossless_video(
+def test_depth_without_frames_file_fails_instead_of_using_legacy_video(
     dataset, recording, tmp_path
 ):
-    """Export a depth camera without lossless.bin from its legacy lossless.mp4."""
+    """Fail a depth camera that has only the legacy lossless.mp4."""
     files = {
         "DEPTH_IMAGES/d405/trace.json": json.dumps(
             [{"timestamp": 1.3, "frame_idx": 0}]
@@ -348,65 +318,17 @@ def test_legacy_depth_recording_exports_its_lossless_video(
     recording.sensor_manifest = {DataType.DEPTH_IMAGES: ["d405"]}
     recording.download = Mock(side_effect=download)
 
-    manifest = export_recordings(
-        dataset, [recording], tmp_path / "export", McapExporter()
-    )
+    with pytest.raises(ValueError, match="No camera data found"):
+        export_recordings(dataset, [recording], tmp_path / "export", McapExporter())
 
-    with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
-        attachments = list(mcap_reader.make_reader(stream).iter_attachments())
-    assert any(a.name.endswith("d405/lossless.mp4") for a in attachments)
+    assert not list((tmp_path / "export").glob("*.mcap"))
 
 
-def test_depth_frames_samples_are_float_metres(depth_frames_fn):
-    """Inline depth is float TIFF in metres yet imports as uint16 units."""
-    import base64
-    import logging
-
-    from PIL import Image
-
-    from neuracore.importer.mcap.utils import read_image_data
-
-    frames = np.zeros((2, 4, 6), dtype=np.uint16)
-    frames[0, 1:, 2:] = 26000
-    frames[1, :, :3] = 65535
-    payload, ranges = depth_frames_fn(frames)
-    trace = [
-        {
-            "timestamp": float(index + 1),
-            "frame_idx": index,
-            "frame": None,
-            "depth_scale_m": 1e-4,
-            "offset": offset,
-            "length": length,
-        }
-        for index, (offset, length) in enumerate(ranges)
-    ]
-    media = ("depth/lossless.bin", "application/octet-stream", payload)
-
-    samples = list(McapExporter._samples(trace, DataType.DEPTH_IMAGES, media))
-
-    for sample, frame in zip(samples, frames, strict=True):
-        with Image.open(io.BytesIO(base64.b64decode(sample["data"]))) as image:
-            metres = np.array(image)
-        assert metres.dtype == np.float32
-        np.testing.assert_array_equal(
-            metres, frame.astype(np.float32) * np.float32(1e-4)
-        )
-
-        imported = read_image_data(
-            DataType.DEPTH_IMAGES, sample, sample, logger=logging.getLogger(__name__)
-        )
-        assert imported.dtype == np.uint16
-        np.testing.assert_array_equal(imported, frame)
-
-
-def test_depth_recording_with_frames_file_roundtrip_uint16(
+def test_depth_recording_with_frames_file_exports_the_file_and_trace_unchanged(
     dataset, recording, tmp_path, depth_frames_fn
 ):
-    """Export a depth trace and frames file, then read it back as uint16 units."""
-    import logging
-
-    from neuracore.importer.mcap.utils import read_image_data
+    """Attach lossless.bin as stored and keep every trace member in the messages."""
+    from neuracore.core.utils.depth_utils import decode_depth_frame
 
     frames = np.zeros((2, 4, 6), dtype=np.uint16)
     frames[0, 1:, 2:] = 26000
@@ -434,34 +356,123 @@ def test_depth_recording_with_frames_file_roundtrip_uint16(
     )
 
     with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
+        reader = mcap_reader.make_reader(stream)
         payloads = [
-            json.loads(message.data)
-            for _, _, message in mcap_reader.make_reader(stream).iter_messages()
+            json.loads(message.data) for _, _, message in reader.iter_messages()
         ]
-    assert [payload["frame_idx"] for payload in payloads] == [0, 1]
-    for payload, frame in zip(payloads, frames, strict=True):
-        assert payload["depth_scale_m"] == 1e-4
-        decoded = read_image_data(
-            DataType.DEPTH_IMAGES, payload, payload, logger=logging.getLogger(__name__)
-        )
-        assert decoded.dtype == np.uint16
-        np.testing.assert_array_equal(decoded, frame)
+        attachments = {a.name: a.data for a in reader.iter_attachments()}
+    assert attachments == {"DEPTH_IMAGES/d405/lossless.bin": payload}
+    assert payloads == json.loads(files["DEPTH_IMAGES/d405/trace.json"])
+    for entry, frame in zip(payloads, frames, strict=True):
+        assert "data" not in entry
+        stored = payload[entry["offset"] : entry["offset"] + entry["length"]]
+        np.testing.assert_array_equal(decode_depth_frame(stored), frame)
 
 
-def test_camera_frame_count_mismatch_fails():
+def test_rgb_messages_hold_the_trace_entry_without_pixels(dataset, recording, tmp_path):
+    manifest = export_recordings(
+        dataset, [recording], tmp_path / "export", McapExporter()
+    )
+    with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
+        reader = mcap_reader.make_reader(stream)
+        camera_messages = [
+            json.loads(message.data)
+            for _, channel, message in reader.iter_messages()
+            if channel.metadata["data_type"] == "RGB_IMAGES"
+        ]
+    assert camera_messages == [{"timestamp": 1.3, "frame_idx": 0}]
+
+
+def test_mcap_chunks_are_zstd_compressed(dataset, recording, tmp_path):
+    manifest = export_recordings(
+        dataset, [recording], tmp_path / "export", McapExporter()
+    )
+    with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
+        summary = mcap_reader.make_reader(stream).get_summary()
+    assert {chunk.compression for chunk in summary.chunk_indexes} == {"zstd"}
+
+
+def test_point_cloud_without_trace_bin_exports_the_inline_trace(
+    dataset, recording, tmp_path
+):
+    """Export a point cloud held inline in trace.json, with no attachment."""
+    inline_entry = {
+        "timestamp": 1.4,
+        "frame_idx": 0,
+        "points": "AAAA",
+        "rgb_points": "BB",
+    }
+    files = {
+        "POINT_CLOUDS/lidar/trace.json": json.dumps([inline_entry]).encode(),
+    }
+    response = requests.Response()
+    response.status_code = 404
+
+    def download(path):
+        if path not in files:
+            raise requests.HTTPError(response=response)
+        return files[path]
+
+    recording.data_types = {DataType.POINT_CLOUDS}
+    recording.sensor_manifest = {DataType.POINT_CLOUDS: ["lidar"]}
+    recording.download = Mock(side_effect=download)
+
+    manifest = export_recordings(
+        dataset, [recording], tmp_path / "export", McapExporter()
+    )
+
+    with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
+        reader = mcap_reader.make_reader(stream)
+        messages = [json.loads(m.data) for _, _, m in reader.iter_messages()]
+        channel = next(c for _, c, _ in reader.iter_messages())
+        assert not list(reader.iter_attachments())
+    assert messages == [inline_entry]
+    assert "attachment" not in channel.metadata
+
+
+def test_video_frame_count_must_match_trace():
     media = (
         "video.mp4",
         "video/mp4",
         _video_bytes(np.zeros((16, 16, 3), dtype=np.uint8)),
     )
-    with pytest.raises(ValueError, match="Missing video frame"):
-        list(
-            McapExporter._samples(
-                [{"frame_idx": 0}, {"frame_idx": 1}], DataType.RGB_IMAGES, media
-            )
+    McapExporter._check_video_matches_trace([{"timestamp": 1.0, "frame_idx": 0}], media)
+    with pytest.raises(ValueError, match="holds 1 frames but the trace has 2"):
+        McapExporter._check_video_matches_trace(
+            [{"timestamp": 1.0, "frame_idx": 0}, {"timestamp": 1.1, "frame_idx": 1}],
+            media,
         )
-    with pytest.raises(ValueError, match="Unreferenced video frames"):
-        list(McapExporter._samples([], DataType.RGB_IMAGES, media))
+
+
+def test_video_frame_times_must_match_trace_timestamps():
+    pixels = np.zeros((16, 16, 3), dtype=np.uint8)
+    output = io.BytesIO()
+    with av.open(output, mode="w", format="mp4") as container:
+        stream = container.add_stream("libx264rgb", rate=10)
+        stream.width, stream.height = 16, 16
+        stream.pix_fmt = "rgb24"
+        stream.options = {"crf": "0"}
+        for index in range(2):
+            frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+            frame.pts = index * 100_000
+            frame.time_base = Fraction(1, 1_000_000)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    media = ("video.mp4", "video/mp4", output.getvalue())
+    on_time = [
+        {"timestamp_us": 5_000_000, "frame_idx": 0},
+        {"timestamp_us": 5_100_000, "frame_idx": 1},
+    ]
+    late = [
+        {"timestamp_us": 5_000_000, "frame_idx": 0},
+        {"timestamp_us": 5_100_050, "frame_idx": 1},
+    ]
+
+    McapExporter._check_video_matches_trace(on_time, media)
+    with pytest.raises(ValueError, match="Frame 1 of video.mp4"):
+        McapExporter._check_video_matches_trace(late, media)
 
 
 def test_dotted_sensor_name_does_not_conflict_with_importer_field_paths(

@@ -35,7 +35,7 @@ def writer(monkeypatch):
     package = ModuleType("mcap")
     module = ModuleType("mcap.writer")
     module.Writer = Mock()
-    module.CompressionType = SimpleNamespace(NONE=0)
+    module.CompressionType = SimpleNamespace(ZSTD=0)
     package.writer = module
     monkeypatch.setitem(sys.modules, "mcap", package)
     monkeypatch.setitem(sys.modules, "mcap.writer", module)
