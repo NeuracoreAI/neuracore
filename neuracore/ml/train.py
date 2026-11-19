@@ -23,6 +23,7 @@ import torch.multiprocessing as mp
 from neuracore_types import (
     CrossEmbodimentDescription,
     CrossEmbodimentUnion,
+    DataType,
     ModelInitDescription,
     TrainingJobStatus,
     TrainingPhaseProgress,
@@ -36,6 +37,9 @@ from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.embodiment_description_utils import (
     extract_data_types,
     merge_cross_embodiment_description,
+)
+from neuracore.core.utils.training_input_args_validation import (
+    add_artificial_done_flags,
 )
 from neuracore.ml import NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -76,6 +80,7 @@ os.environ["PJRT_DEVICE"] = "GPU"
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
 DEFAULT_OPEN_FILE_LIMIT = 10240
@@ -916,6 +921,9 @@ def _main(cfg: DictConfig) -> None:
             setup_storage_handler.update_training_progress(
                 TrainingProgress(status=TrainingJobStatus.CALCULATING_STATISTICS)
             )
+        should_add_done_flags = add_artificial_done_flags(
+            dataset, output_cross_embodiment_description
+        )
         pytorch_dataset = PytorchSynchronizedDataset(
             synchronized_dataset=synchronized_dataset,
             input_cross_embodiment_description=input_cross_embodiment_description,
@@ -924,7 +932,20 @@ def _main(cfg: DictConfig) -> None:
             input_preprocessing_config=train_input_preprocessing_config,
             output_preprocessing_config=train_output_preprocessing_config,
             sample_cache=cfg.get("dataset_sample_cache", True),
+            append_done_flags=should_add_done_flags,
         )
+        if should_add_done_flags:
+            logger.info(
+                "Adding artificial DONE labels because no recordings contain "
+                "logged DONE data. Regular samples are labeled done=0 and "
+                "terminal samples done=1 (%d Hz).",
+                cfg.frequency,
+            )
+        elif any(
+            DataType.DONE in robot_data
+            for robot_data in output_cross_embodiment_description.values()
+        ):
+            logger.info("Using logged DONE labels from the dataset.")
 
         # Handle batch size configuration
         if isinstance(batch_size, str) and batch_size.lower() == "auto":
