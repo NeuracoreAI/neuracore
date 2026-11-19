@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{NaiveDateTime, Utc};
-use data_daemon_shared::{DatasetSpec, RobotSpec, NANOSECONDS_PER_MICROSECOND};
+use data_daemon_shared::{
+    limit_reasons, resolution_detail, DatasetSpec, ReasonCount, RecordingCount, RobotSpec, Subject,
+    SubjectKind, NANOSECONDS_PER_MICROSECOND,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
@@ -104,6 +107,45 @@ pub struct NewRecording<'a> {
     pub dataset_index: Option<i64>,
     /// The recording's start.
     pub start: RecordingTimestamp,
+}
+
+/// SQL condition on `recordings r`: the recording can never upload. It is not
+/// registered with the server and its robot or dataset row was refused, the
+/// server no longer holds it, or one of its traces failed to write, register
+/// or upload. Callers add `r.cancelled_at IS NULL`: a cancelled recording
+/// fails its traces too, and the reaper removes it once the cancel is sent.
+const NEVER_UPLOADS: &str = "((r.recording_id IS NULL \
+         AND (EXISTS (SELECT 1 FROM robots rb_never \
+                       WHERE rb_never.robot_index = r.robot_index \
+                         AND rb_never.status = 'failed') \
+              OR EXISTS (SELECT 1 FROM datasets ds_never \
+                          WHERE ds_never.dataset_index = r.dataset_index \
+                            AND ds_never.status = 'failed'))) \
+       OR r.backend_not_found_at IS NOT NULL \
+       OR EXISTS (SELECT 1 FROM traces t \
+                   WHERE t.recording_index = r.recording_index \
+                     AND (t.write_status = 'failed' \
+                          OR t.registration_status = 'failed' \
+                          OR t.upload_status = 'failed')))";
+
+/// What the recordings on this machine are waiting on, for the status query.
+///
+/// Cancelled recordings, and ones the server no longer has, are left out:
+/// they are on their way to being cleaned up, not to the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusCounts {
+    /// Recordings the server has not heard of yet that can still upload,
+    /// including the ones held back.
+    pub waiting: RecordingCount,
+    /// Recordings the server has started whose data is still uploading.
+    pub uploading: RecordingCount,
+    /// Robot and dataset rows held back until the user fixes something, by
+    /// reason, with the recordings waiting on them. A recording whose robot
+    /// and dataset are both held back counts once under each reason.
+    pub blocked: Vec<ReasonCount>,
+    /// Recordings that will never upload, and robot and dataset rows the
+    /// server refused, by reason.
+    pub failed: Vec<ReasonCount>,
 }
 
 /// A robot instance's row after [`StateStore::connect_robot`].
@@ -259,6 +301,10 @@ pub trait StateStore: Send + Sync {
 
     /// Every saved robot package a robot row names, waiting to be sent.
     async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError>;
+
+    /// Count what the recordings, robots and datasets on this machine are
+    /// waiting on, for the status query. Read-only.
+    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError>;
 
     /// The start notifier's periodic set, oldest first: recordings not yet
     /// started on the server that are cancelled (to settle), or whose start
@@ -1480,6 +1526,150 @@ impl StateStore for SqliteStateStore {
         };
         tx.commit().await?;
         Ok(dataset_index)
+    }
+
+    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError> {
+        // Bytes left per recording: a trace's size is only final once it is
+        // written, so the bytes written so far stand in until then.
+        const BYTES_LEFT: &str = "SELECT recording_index, \
+                    SUM(MAX(MAX(total_bytes, bytes_written) - bytes_uploaded, 0)) AS bytes \
+               FROM traces \
+              WHERE upload_status <> 'uploaded' \
+              GROUP BY recording_index";
+        let can_upload = format!("r.cancelled_at IS NULL AND NOT {NEVER_UPLOADS}");
+
+        let waiting: (i64, i64) = sqlx::query_as(&format!(
+            "SELECT COUNT(*), COALESCE(SUM(unsent.bytes), 0) FROM recordings r \
+               LEFT JOIN ({BYTES_LEFT}) AS unsent USING (recording_index) \
+              WHERE r.recording_id IS NULL AND {can_upload}"
+        ))
+        .fetch_one(&self.read_pool)
+        .await?;
+        let uploading: (i64, i64) = sqlx::query_as(&format!(
+            "SELECT COUNT(*), COALESCE(SUM(unsent.bytes), 0) FROM recordings r \
+               JOIN ({BYTES_LEFT}) AS unsent USING (recording_index) \
+              WHERE r.recording_id IS NOT NULL AND {can_upload}"
+        ))
+        .fetch_one(&self.read_pool)
+        .await?;
+        // Every robot and dataset row held back with a reason, with the
+        // recordings not yet registered that wait on it: none, for a row
+        // connected or selected but not recorded with yet. A reason about the
+        // account (?1, ?2) is the same for every robot and dataset, so it is
+        // not split by name; not being able to record in the org (?2) is split
+        // by the org the robot or dataset is in, so the user knows which.
+        type Blocked = (String, Option<String>, Option<String>, Option<String>, i64);
+        let blocked: Vec<Blocked> = sqlx::query_as(&format!(
+            "SELECT reason, kind, name, org, COUNT(DISTINCT recording_index) FROM ( \
+                 SELECT rb.reason AS reason, \
+                        CASE WHEN rb.reason IN (?1, ?2) THEN NULL ELSE 'robot' END AS kind, \
+                        CASE WHEN rb.reason IN (?1, ?2) THEN NULL ELSE rb.name END AS name, \
+                        CASE WHEN rb.reason = ?2 THEN rb.org_id END AS org, \
+                        r.recording_index \
+                   FROM robots rb \
+                   LEFT JOIN recordings r ON r.robot_index = rb.robot_index \
+                        AND r.recording_id IS NULL AND {can_upload} \
+                  WHERE rb.status = 'pending' AND rb.reason IS NOT NULL \
+                 UNION ALL \
+                 SELECT ds.reason, \
+                        CASE WHEN ds.reason IN (?1, ?2) THEN NULL ELSE 'dataset' END, \
+                        CASE WHEN ds.reason IN (?1, ?2) THEN NULL ELSE ds.name END, \
+                        CASE WHEN ds.reason = ?2 THEN ds.org_id END, \
+                        r.recording_index \
+                   FROM datasets ds \
+                   LEFT JOIN recordings r ON r.dataset_index = ds.dataset_index \
+                        AND r.recording_id IS NULL AND {can_upload} \
+                  WHERE ds.status = 'pending' AND ds.reason IS NOT NULL \
+             ) GROUP BY reason, kind, name, org ORDER BY reason, kind, name, org"
+        ))
+        .bind(resolution_detail::CREDENTIALS)
+        .bind(resolution_detail::NOT_IN_ORG)
+        .fetch_all(&self.read_pool)
+        .await?;
+        // One reason per recording that will never upload, in the order the
+        // daemon finds them: its robot, its dataset, then the server or the
+        // upload. A robot or dataset row the server refused that no recording
+        // uses is reported too, with none.
+        let failed: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
+            "SELECT reason, kind, name, SUM(counted) FROM ( \
+                 SELECT CASE \
+                          WHEN r.recording_id IS NULL AND rb.status = 'failed' THEN rb.reason \
+                          WHEN r.recording_id IS NULL AND ds.status = 'failed' THEN ds.reason \
+                          WHEN r.backend_not_found_at IS NOT NULL THEN ?1 \
+                          ELSE ?2 \
+                        END AS reason, \
+                        CASE \
+                          WHEN r.recording_id IS NULL AND rb.status = 'failed' THEN 'robot' \
+                          WHEN r.recording_id IS NULL AND ds.status = 'failed' THEN 'dataset' \
+                        END AS kind, \
+                        CASE \
+                          WHEN r.recording_id IS NULL AND rb.status = 'failed' THEN rb.name \
+                          WHEN r.recording_id IS NULL AND ds.status = 'failed' THEN ds.name \
+                        END AS name, \
+                        1 AS counted \
+                   FROM recordings r \
+                   LEFT JOIN robots rb ON rb.robot_index = r.robot_index \
+                   LEFT JOIN datasets ds ON ds.dataset_index = r.dataset_index \
+                  WHERE r.cancelled_at IS NULL AND {NEVER_UPLOADS} \
+                 UNION ALL \
+                 SELECT rb.reason, 'robot', rb.name, 0 FROM robots rb \
+                  WHERE rb.status = 'failed' AND rb.reason IS NOT NULL \
+                    AND NOT EXISTS (SELECT 1 FROM recordings r \
+                                     WHERE r.robot_index = rb.robot_index \
+                                       AND r.cancelled_at IS NULL) \
+                 UNION ALL \
+                 SELECT ds.reason, 'dataset', ds.name, 0 FROM datasets ds \
+                  WHERE ds.status = 'failed' AND ds.reason IS NOT NULL \
+                    AND NOT EXISTS (SELECT 1 FROM recordings r \
+                                     WHERE r.dataset_index = ds.dataset_index \
+                                       AND r.cancelled_at IS NULL) \
+             ) GROUP BY reason, kind, name ORDER BY reason, kind, name"
+        ))
+        .bind(resolution_detail::NOT_ON_SERVER)
+        .bind(resolution_detail::UPLOAD_FAILED)
+        .fetch_all(&self.read_pool)
+        .await?;
+
+        let count = |(recordings, bytes): (i64, i64)| RecordingCount {
+            recordings: u64::try_from(recordings).unwrap_or(0),
+            bytes: u64::try_from(bytes).unwrap_or(0),
+        };
+        let reason = |reason: String,
+                      kind: Option<String>,
+                      name: Option<String>,
+                      org_id: Option<String>,
+                      recordings: i64| ReasonCount {
+            reason,
+            recordings: u64::try_from(recordings).unwrap_or(0),
+            subject: kind
+                .as_deref()
+                .and_then(SubjectKind::parse)
+                .zip(name)
+                .map(|(kind, name)| Subject::new(kind, &name)),
+            org_id,
+            // Looked up when a status query is answered, never stored.
+            org_name: None,
+        };
+        Ok(StatusCounts {
+            waiting: count(waiting),
+            uploading: count(uploading),
+            blocked: limit_reasons(
+                blocked
+                    .into_iter()
+                    .map(|(code, kind, name, org_id, recordings)| {
+                        reason(code, kind, name, org_id, recordings)
+                    })
+                    .collect(),
+            ),
+            failed: limit_reasons(
+                failed
+                    .into_iter()
+                    .map(|(code, kind, name, recordings)| {
+                        reason(code, kind, name, None, recordings)
+                    })
+                    .collect(),
+            ),
+        })
     }
 
     async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError> {
@@ -2850,6 +3040,111 @@ mod tests {
             .unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].status, ResolutionStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn status_reports_held_rows_whether_or_not_recordings_wait_on_them() {
+        let (store, _tempdir) = open_store().await;
+        let later = Utc::now().naive_utc() + chrono::Duration::minutes(5);
+        let idle = store
+            .connect_robot(&robot_spec(0, None))
+            .await
+            .unwrap()
+            .robot_index;
+        let dataset_index = store
+            .select_dataset(&dataset_spec("warehouse"))
+            .await
+            .unwrap();
+        store
+            .hold_robot(idle, Some(ResolutionReason::RobotArchived), later)
+            .await
+            .unwrap();
+        store
+            .hold_dataset(dataset_index, Some(ResolutionReason::NameTaken), later)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .create_recording(NewRecording {
+                    dataset_index: Some(dataset_index),
+                    ..NewRecording::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let status = store.status_counts().await.unwrap();
+
+        let held: Vec<(String, u64)> = status
+            .blocked
+            .iter()
+            .map(|reason| (reason.reason.clone(), reason.recordings))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                ("name_taken".to_string(), 2),
+                ("robot_archived".to_string(), 0)
+            ]
+        );
+        assert_eq!(status.waiting.recordings, 2);
+        assert!(status.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_row_fails_the_recordings_not_registered_with_it() {
+        let (store, _tempdir) = open_store().await;
+        let robot_index = store
+            .connect_robot(&robot_spec(0, None))
+            .await
+            .unwrap()
+            .robot_index;
+        let unused = store
+            .connect_robot(&robot_spec(1, None))
+            .await
+            .unwrap()
+            .robot_index;
+        let waiting = store
+            .create_recording(NewRecording {
+                robot_index: Some(robot_index),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+        let registered = store
+            .create_recording(NewRecording {
+                robot_index: Some(robot_index),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+        store
+            .mark_recording_start_notified(registered, "rec-1")
+            .await
+            .unwrap();
+        store
+            .fail_robot(robot_index, ResolutionReason::Rejected)
+            .await
+            .unwrap();
+        store
+            .fail_robot(unused, ResolutionReason::Rejected)
+            .await
+            .unwrap();
+
+        let status = store.status_counts().await.unwrap();
+
+        // The registered recording keeps uploading; only the waiting one fails,
+        // and the robot row no recording uses is reported with none.
+        let failed: Vec<(String, u64)> = status
+            .failed
+            .iter()
+            .map(|reason| (reason.reason.clone(), reason.recordings))
+            .collect();
+        assert_eq!(failed, vec![("rejected".to_string(), 1)]);
+        assert_eq!(status.waiting.recordings, 0);
+        let _ = waiting;
     }
 
     #[tokio::test]

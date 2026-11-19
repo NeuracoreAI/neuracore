@@ -102,6 +102,16 @@ pub struct RobotRegistrationResponse {
     pub has_urdf: bool,
 }
 
+/// An organisation the account is a member of, as `/org-management/my-orgs`
+/// lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OrgSummary {
+    /// The organisation's id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+}
+
 /// The fields of a backend dataset the daemon needs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DatasetSummary {
