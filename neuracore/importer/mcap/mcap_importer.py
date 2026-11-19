@@ -18,6 +18,10 @@ import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
 from neuracore.importer.core.exceptions import ImportError
+from neuracore.importer.mcap.neuracore_attachments import (
+    build_neuracore_attachment_frame_readers,
+    close_neuracore_attachment_frame_readers,
+)
 from neuracore.importer.mcap.utils import (
     H264StreamDecoder,
     build_topic_map,
@@ -267,38 +271,51 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 logger=self.logger,
             )
             total = estimate_total_messages(summary=summary, topics=topics)
+            attachment_frame_readers = build_neuracore_attachment_frame_readers(
+                reader=reader, summary=summary, topics=topics
+            )
 
-            for decoded_message in iter_decoded_mcap_messages(
-                reader=reader,
-                topics=topics,
-            ):
-                if source_start_timestamp_ns is None:
-                    source_start_timestamp_ns = decoded_message.timestamp_ns
+            try:
+                for decoded_message in iter_decoded_mcap_messages(
+                    reader=reader,
+                    topics=topics,
+                ):
+                    if source_start_timestamp_ns is None:
+                        source_start_timestamp_ns = decoded_message.timestamp_ns
 
-                relative_timestamp_ns = max(
-                    0, decoded_message.timestamp_ns - source_start_timestamp_ns
-                )
-                timestamp_us = (
-                    recording_start_us
-                    + relative_timestamp_ns // NANOSECONDS_PER_MICROSECOND
-                )
-                recording_stop_us = max(recording_stop_us, timestamp_us)
-
-                decoded_data = convert_decoded_mcap_data(
-                    decoded_data=decoded_message.data
-                )
-                self._record_step(
-                    step={decoded_message.topic: decoded_data},
-                    timestamp=timestamp_us / MICROSECONDS_PER_SECOND,
-                )
-                message_count += 1
-                if message_count % 100 == 0:
-                    self._emit_progress(
-                        item_index=item.index,
-                        step=message_count,
-                        total_steps=total,
-                        episode_label=label,
+                    relative_timestamp_ns = max(
+                        0, decoded_message.timestamp_ns - source_start_timestamp_ns
                     )
+                    timestamp_us = (
+                        recording_start_us
+                        + relative_timestamp_ns // NANOSECONDS_PER_MICROSECOND
+                    )
+                    recording_stop_us = max(recording_stop_us, timestamp_us)
+
+                    decoded_data = convert_decoded_mcap_data(
+                        decoded_data=decoded_message.data
+                    )
+                    attachment_frame_reader = attachment_frame_readers.get(
+                        decoded_message.topic
+                    )
+                    if attachment_frame_reader is not None:
+                        decoded_data = attachment_frame_reader.fill_message(
+                            decoded_data
+                        )
+                    self._record_step(
+                        step={decoded_message.topic: decoded_data},
+                        timestamp=timestamp_us / MICROSECONDS_PER_SECOND,
+                    )
+                    message_count += 1
+                    if message_count % 100 == 0:
+                        self._emit_progress(
+                            item_index=item.index,
+                            step=message_count,
+                            total_steps=total,
+                            episode_label=label,
+                        )
+            finally:
+                close_neuracore_attachment_frame_readers(attachment_frame_readers)
 
         self._emit_progress(
             item_index=item.index,

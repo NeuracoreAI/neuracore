@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import struct
 import time
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
+import av
 import numpy as np
 import pytest
+import requests
 from google.protobuf import descriptor_pb2
 from mcap.reader import make_reader
 from mcap.writer import Writer
 from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.nc_data.point_cloud_data import (
+    PointCloudData,
+    encode_point_cloud_frame_parts,
+)
 from neuracore_types.timestamps import seconds_to_us
 from PIL import Image
 
+from neuracore.exporter.export import export_recordings
+from neuracore.exporter.mcap import McapExporter
 from neuracore.importer.core.base import ImportItem
 from neuracore.importer.core.exceptions import ImportError
 from neuracore.importer.mcap.mcap_importer import MCAPDatasetImporter
+from neuracore.importer.mcap.neuracore_attachments import VideoAttachmentFrameReader
 from neuracore.importer.mcap.utils import (
     MAX_TRAILING_SCHEMA_BYTES,
     H264StreamDecoder,
@@ -1391,3 +1403,215 @@ def test_stream_episode_file_logs_a_one_microsecond_source_on_consecutive_micros
         recording_start_us + 2,
     ]
     assert recording_stop_us == recording_start_us + 2
+
+
+def _gray_rgb_video_bytes(gray_levels, *, with_b_frames):
+    frame_size = 64
+    output = io.BytesIO()
+    with av.open(output, mode="w", format="mp4") as container:
+        if with_b_frames:
+            stream = container.add_stream(
+                "libx264", rate=10, options={"bf": "2", "b_strategy": "0"}
+            )
+            stream.pix_fmt = "yuv420p"
+            stream.codec_context.max_b_frames = 2
+        else:
+            stream = container.add_stream("libx264rgb", rate=10)
+            stream.pix_fmt = "rgb24"
+            stream.options = {"qp": "0"}
+        stream.width, stream.height = frame_size, frame_size
+        for index, gray_level in enumerate(gray_levels):
+            frame = av.VideoFrame.from_ndarray(
+                np.full((frame_size, frame_size, 3), gray_level, dtype=np.uint8),
+                format="rgb24",
+            )
+            frame.pts = index
+            frame.time_base = Fraction(1, 10)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return output.getvalue()
+
+
+def _point_cloud_frame_bytes(point_cloud):
+    return b"".join(
+        bytes(part)
+        for part in encode_point_cloud_frame_parts(point_cloud)
+        if part is not None
+    )
+
+
+def _export_neuracore_mcap(tmp_path, depth_frames_fn):
+    rgb_gray_levels = [10, 90, 170]
+    depth_frames = np.zeros((2, 4, 6), dtype=np.uint16)
+    depth_frames[0, 1:, 2:] = 26000
+    depth_frames[1, :, :3] = 12000
+    depth_payload, depth_ranges = depth_frames_fn(depth_frames)
+    stored_point_cloud = PointCloudData(
+        timestamp=1.3,
+        points=np.array([[0.5, 1.0, 1.5], [2.0, 2.5, 3.0]], dtype=np.float16),
+        rgb_points=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8),
+    )
+    stored_point_cloud_bytes = _point_cloud_frame_bytes(stored_point_cloud)
+    inline_point_cloud = PointCloudData(
+        timestamp=1.3,
+        points=np.array([[7.0, 8.0, 9.0]], dtype=np.float16),
+    )
+    files = {
+        "RGB_IMAGES/front/trace.json": json.dumps([
+            {"timestamp": 1.3 + 0.1 * index, "frame_idx": index}
+            for index in range(len(rgb_gray_levels))
+        ]).encode(),
+        "RGB_IMAGES/front/lossless.mp4": _gray_rgb_video_bytes(
+            rgb_gray_levels, with_b_frames=False
+        ),
+        "DEPTH_IMAGES/d405/trace.json": json.dumps([
+            {
+                "timestamp": 1.3 + 0.1 * index,
+                "frame_idx": index,
+                "depth_scale_m": 1e-4,
+                "offset": offset,
+                "length": length,
+            }
+            for index, (offset, length) in enumerate(depth_ranges)
+        ]).encode(),
+        "DEPTH_IMAGES/d405/lossless.bin": depth_payload,
+        "POINT_CLOUDS/lidar/trace.json": json.dumps([{
+            "timestamp": 1.3,
+            "frame_idx": 0,
+            "offset": 0,
+            "length": len(stored_point_cloud_bytes),
+        }]).encode(),
+        "POINT_CLOUDS/lidar/trace.bin": stored_point_cloud_bytes,
+        "POINT_CLOUDS/inline_lidar/trace.json": json.dumps(
+            [{**inline_point_cloud.model_dump(mode="json"), "frame_idx": 0}]
+        ).encode(),
+    }
+    not_found_response = requests.Response()
+    not_found_response.status_code = 404
+
+    def download(path):
+        if path not in files:
+            raise requests.HTTPError(response=not_found_response)
+        return files[path]
+
+    class Dataset(list):
+        id = "dataset-1"
+        name = "Demo"
+        org_id = "org-1"
+
+    recording = SimpleNamespace(
+        id="recording-1",
+        name="recording-1",
+        robot_id="robot-1",
+        instance=0,
+        start_time=1.3,
+        end_time=2.0,
+        start_timestamp_us=None,
+        deleted=False,
+        metadata=Mock(model_dump=Mock(return_value={"name": "recording-1"})),
+        data_types={
+            DataType.RGB_IMAGES,
+            DataType.DEPTH_IMAGES,
+            DataType.POINT_CLOUDS,
+        },
+        sensor_manifest={
+            DataType.RGB_IMAGES: ["front"],
+            DataType.DEPTH_IMAGES: ["d405"],
+            DataType.POINT_CLOUDS: ["lidar", "inline_lidar"],
+        },
+        download=Mock(side_effect=download),
+    )
+    manifest_path = export_recordings(
+        Dataset(), [recording], tmp_path / "export", McapExporter()
+    )
+    expected = {
+        "rgb_gray_levels": rgb_gray_levels,
+        "depth_frames": depth_frames,
+        "stored_point_cloud": stored_point_cloud,
+        "inline_point_cloud": inline_point_cloud,
+    }
+    return manifest_path.parent / "nc_recording-1.mcap", expected
+
+
+def test_stream_episode_file_fills_neuracore_export_frames_from_attachments(
+    monkeypatch, tmp_path, depth_frames_fn
+):
+    mcap_path, expected = _export_neuracore_mcap(tmp_path, depth_frames_fn)
+    importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.get_mcap_topics",
+        lambda topic_map: [
+            "/neuracore/RGB_IMAGES/front",
+            "/neuracore/DEPTH_IMAGES/d405",
+            "/neuracore/POINT_CLOUDS/lidar",
+            "/neuracore/POINT_CLOUDS/inline_lidar",
+        ],
+    )
+    messages_by_topic = {}
+    monkeypatch.setattr(
+        importer,
+        "_record_step",
+        lambda step, timestamp: [
+            messages_by_topic.setdefault(topic, []).append(message)
+            for topic, message in step.items()
+        ],
+    )
+
+    importer._stream_episode_file(
+        episode_file_path=mcap_path,
+        item=ImportItem(index=0, description=mcap_path.name, metadata={}),
+        label=mcap_path.name,
+        recording_start_us=100_000_000,
+    )
+
+    rgb_messages = messages_by_topic["/neuracore/RGB_IMAGES/front"]
+    assert [message["frame_idx"] for message in rgb_messages] == [0, 1, 2]
+    for message, gray_level in zip(
+        rgb_messages, expected["rgb_gray_levels"], strict=True
+    ):
+        np.testing.assert_array_equal(
+            message["frame"], np.full((64, 64, 3), gray_level, dtype=np.uint8)
+        )
+    depth_messages = messages_by_topic["/neuracore/DEPTH_IMAGES/d405"]
+    for message, depth_frame in zip(
+        depth_messages, expected["depth_frames"], strict=True
+    ):
+        assert message["depth_scale_m"] == 1e-4
+        np.testing.assert_array_equal(message["frame"], depth_frame)
+    for topic, point_cloud in (
+        ("/neuracore/POINT_CLOUDS/lidar", expected["stored_point_cloud"]),
+        ("/neuracore/POINT_CLOUDS/inline_lidar", expected["inline_point_cloud"]),
+    ):
+        (message,) = messages_by_topic[topic]
+        np.testing.assert_array_equal(message["points"], point_cloud.points)
+        assert message["points"].dtype == np.float16
+        if point_cloud.rgb_points is None:
+            assert message["rgb_points"] is None
+        else:
+            np.testing.assert_array_equal(message["rgb_points"], point_cloud.rgb_points)
+
+
+def test_video_attachment_frame_reader_returns_b_frame_video_in_display_order():
+    gray_levels = [10, 50, 90, 130, 170, 210]
+    video_bytes = _gray_rgb_video_bytes(gray_levels, with_b_frames=True)
+    with av.open(io.BytesIO(video_bytes)) as container:
+        packets = [
+            packet for packet in container.demux(video=0) if packet.pts is not None
+        ]
+    packet_pts_in_decode_order = [packet.pts for packet in packets]
+    assert packet_pts_in_decode_order != sorted(packet_pts_in_decode_order)
+
+    frame_reader = VideoAttachmentFrameReader("RGB_IMAGES/front/lossy.mp4", video_bytes)
+    try:
+        frames = [
+            frame_reader.fill_message({"timestamp": index, "frame_idx": index})["frame"]
+            for index in range(len(gray_levels))
+        ]
+    finally:
+        frame_reader.close()
+
+    np.testing.assert_allclose(
+        [int(frame[0, 0, 0]) for frame in frames], gray_levels, atol=2
+    )
