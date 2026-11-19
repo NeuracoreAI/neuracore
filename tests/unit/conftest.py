@@ -66,6 +66,104 @@ def stub_data_bridge(monkeypatch):
     monkeypatch.setattr(api_core, "ensure_daemon_running", lambda: 0)
 
 
+class FakeRegistry:
+    """Plays the data daemon's robot and dataset registry in unit tests.
+
+    Every row is confirmed at once with a server id: by default
+    ``cloud-dataset-<name>`` / ``cloud-robot-<name>``, or the one set in
+    :attr:`dataset_ids` / :attr:`robot_ids`. A test sets a row's state by name
+    to hold or fail it instead.
+    """
+
+    def __init__(self) -> None:
+        self.dataset_ids: dict[str, str] = {}
+        self.robot_ids: dict[str, str] = {}
+        self.dataset_specs: list[dict] = []
+        self.robot_specs: list[dict] = []
+        self._dataset_rows: dict[tuple, int] = {}
+        self._robot_rows: dict[tuple, int] = {}
+        self._dataset_states: dict[str, bridge.RowState] = {}
+        self._robot_states: dict[str, bridge.RowState] = {}
+        self._names: dict[int, str] = {}
+
+    def set_dataset_state(
+        self, name: str, status: str, reason: str | None = None
+    ) -> None:
+        self._dataset_states[name] = bridge.RowState(status, None, reason)
+
+    def set_robot_state(
+        self, name: str, status: str, reason: str | None = None
+    ) -> None:
+        self._robot_states[name] = bridge.RowState(status, None, reason)
+
+    def select_dataset_row(self, *, org_id, name, shared, description, tags):
+        self.dataset_specs.append(
+            dict(
+                org_id=org_id,
+                name=name,
+                shared=shared,
+                description=description,
+                tags=list(tags),
+            )
+        )
+        key = (org_id, name, shared)
+        index = self._dataset_rows.setdefault(key, 100 + len(self._dataset_rows))
+        self._names[index] = name
+        return index
+
+    def dataset_row_state(self, dataset_index):
+        name = self._names.get(dataset_index)
+        if name is None:
+            return None
+        if name in self._dataset_states:
+            return self._dataset_states[name]
+        return bridge.RowState(
+            "done", self.dataset_ids.get(name, f"cloud-dataset-{name}"), None
+        )
+
+    def connect_robot_row(
+        self, *, org_id, name, shared, instance, overwrite_urdf, package_path
+    ):
+        self.robot_specs.append(
+            dict(
+                org_id=org_id,
+                name=name,
+                shared=shared,
+                instance=instance,
+                overwrite_urdf=overwrite_urdf,
+                package_path=package_path,
+            )
+        )
+        key = (org_id, name, shared, instance)
+        index = self._robot_rows.setdefault(key, 200 + len(self._robot_rows))
+        self._names[index] = name
+        return index
+
+    def robot_row_state(self, robot_index):
+        name = self._names.get(robot_index)
+        if name is None:
+            return None
+        if name in self._robot_states:
+            return self._robot_states[name]
+        return bridge.RowState(
+            "done", self.robot_ids.get(name, f"cloud-robot-{name}"), None
+        )
+
+
+@pytest.fixture(autouse=True)
+def fake_registry(monkeypatch) -> FakeRegistry:
+    """Stand in for the daemon's robot and dataset registry in every unit test."""
+    registry = FakeRegistry()
+    for name in (
+        "select_dataset_row",
+        "dataset_row_state",
+        "connect_robot_row",
+        "robot_row_state",
+    ):
+        monkeypatch.setattr(bridge, name, getattr(registry, name))
+    return registry
+
+
 @pytest.fixture
 def temp_config_dir():
     """Create a temporary config directory for a single test."""

@@ -7,6 +7,17 @@ import pytest
 
 from neuracore.data_daemon import bridge
 
+# The real registry calls, before the unit tests' fake registry replaces them.
+_REAL_CALLS = {
+    name: getattr(bridge, name)
+    for name in (
+        "connect_robot_row",
+        "select_dataset_row",
+        "robot_row_state",
+        "dataset_row_state",
+    )
+}
+
 
 class _NativeUnavailable(RuntimeError):
     pass
@@ -23,6 +34,8 @@ def native(monkeypatch) -> MagicMock:
     native.RegistryRefusedError = _NativeRefused
     monkeypatch.setattr(bridge, "_load_native", lambda: native)
     monkeypatch.setattr(bridge, "ensure_daemon_running", lambda: None)
+    for name, call in _REAL_CALLS.items():
+        monkeypatch.setattr(bridge, name, call)
     return native
 
 
