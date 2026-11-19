@@ -16,11 +16,12 @@
 //! the later `serve_recording_state_queries` borrow is itself held across an
 //! await.)
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use data_daemon_shared::{
-    Envelope, HealthReply, HealthRequest, RecordingStateQuery, RecordingStateReply, VersionReply,
-    VersionRequest,
+    DatasetSpec, Envelope, HealthReply, HealthRequest, RecordingStateQuery, RecordingStateReply,
+    RegistryReply, RegistryRequest, RobotSpec, RowState, RowStatus, VersionReply, VersionRequest,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
@@ -32,7 +33,10 @@ use tokio::time::sleep;
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingState;
-use crate::state::SqliteStateStore;
+use crate::state::{
+    ResolutionReason, ResolutionStatus, SqliteStateStore, StateStore, StateStoreError,
+};
+use crate::storage::paths::is_in_robot_packages;
 
 /// Poll cadence while envelopes are actively flowing.
 ///
@@ -72,11 +76,13 @@ pub async fn run(
     dispatcher_tx: mpsc::Sender<Envelope>,
     recording_state: RecordingState,
     store: SqliteStateStore,
+    packages_root: PathBuf,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
         commands = data_daemon_shared::service_name::COMMANDS,
         recording_state = data_daemon_shared::service_name::RECORDING_STATE,
+        registry = data_daemon_shared::service_name::REGISTRY,
         health = data_daemon_shared::service_name::HEALTH,
         version = data_daemon_shared::service_name::VERSION,
         "ipc listener started"
@@ -131,6 +137,11 @@ pub async fn run(
         // carries the cloud id too, so this is the only state service.
         serve_recording_state_queries(transport.recording_state_server(), &recording_state, &store)
             .await;
+
+        // -- Answer registry requests --------------------------------------------
+        // Connecting a robot or selecting a dataset only writes its row; the
+        // server is asked elsewhere, so no answer here waits on the network.
+        serve_registry_requests(transport.registry_server(), &store, &packages_root).await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -299,6 +310,160 @@ async fn serve_recording_state_queries(
     }
 }
 
+/// Drain every pending registry request, answering each from the state store.
+///
+/// Bounded per tick like [`serve_recording_state_queries`]: each client keeps
+/// one request in flight.
+async fn serve_registry_requests(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    store: &SqliteStateStore,
+    packages_root: &Path,
+) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "registry server receive failed");
+                return;
+            }
+        };
+        let request = match RegistryRequest::decode(active.payload()) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed registry request");
+                continue;
+            }
+        };
+        let reply = answer_registry_request(store, packages_root, request).await;
+        let bytes = match reply.encode() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "failed to encode registry reply");
+                continue;
+            }
+        };
+        let response = match active.loan_slice_uninit(bytes.len()) {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "failed to loan registry reply sample");
+                continue;
+            }
+        };
+        if let Err(error) = response.write_from_slice(&bytes).send() {
+            tracing::warn!(%error, "failed to send registry reply");
+        }
+    }
+}
+
+/// Answer one registry request from the state store.
+async fn answer_registry_request(
+    store: &SqliteStateStore,
+    packages_root: &Path,
+    request: RegistryRequest,
+) -> RegistryReply {
+    let answered = match request {
+        RegistryRequest::ConnectRobot(spec) => {
+            if let Some(refusal) = refuse_robot(&spec) {
+                return RegistryReply::Refused(refusal.into());
+            }
+            store.connect_robot(&spec).await.map(|connected| {
+                if let Some(replaced) = connected
+                    .replaced_package
+                    .filter(|replaced| is_in_robot_packages(packages_root, Path::new(replaced)))
+                {
+                    // The new package supersedes it before it was sent.
+                    if let Err(error) = std::fs::remove_file(&replaced) {
+                        tracing::debug!(%error, path = replaced, "failed to delete a replaced package");
+                    }
+                }
+                tracing::info!(
+                    robot_index = connected.robot_index,
+                    robot = spec.name,
+                    instance = spec.instance,
+                    "robot connected"
+                );
+                RegistryReply::Index(connected.robot_index)
+            })
+        }
+        RegistryRequest::SelectDataset(spec) => {
+            if let Some(refusal) = refuse_dataset(&spec) {
+                return RegistryReply::Refused(refusal.into());
+            }
+            store.select_dataset(&spec).await.map(|dataset_index| {
+                tracing::info!(dataset_index, dataset = spec.name, "dataset selected");
+                RegistryReply::Index(dataset_index)
+            })
+        }
+        RegistryRequest::RobotState { robot_index } => {
+            store.get_robot(robot_index).await.map(|robot| match robot {
+                Some(robot) => RegistryReply::State(row_state(
+                    robot.status,
+                    robot.cloud_robot_id,
+                    robot.reason,
+                )),
+                None => RegistryReply::Unknown,
+            })
+        }
+        RegistryRequest::DatasetState { dataset_index } => store
+            .get_dataset(dataset_index)
+            .await
+            .map(|dataset| match dataset {
+                Some(dataset) => RegistryReply::State(row_state(
+                    dataset.status,
+                    dataset.cloud_dataset_id,
+                    dataset.reason,
+                )),
+                None => RegistryReply::Unknown,
+            }),
+    };
+    answered.unwrap_or_else(|error: StateStoreError| {
+        tracing::warn!(%error, "failed to answer a registry request");
+        RegistryReply::Refused(format!(
+            "the daemon could not read or write its state: {error}"
+        ))
+    })
+}
+
+/// Why a robot connect is refused, if it is.
+fn refuse_robot(spec: &RobotSpec) -> Option<&'static str> {
+    if spec.org_id.is_empty() {
+        Some("no organization is selected")
+    } else if spec.name.is_empty() {
+        Some("the robot has no name")
+    } else {
+        None
+    }
+}
+
+/// Why a dataset select is refused, if it is.
+fn refuse_dataset(spec: &DatasetSpec) -> Option<&'static str> {
+    if spec.org_id.is_empty() {
+        Some("no organization is selected")
+    } else if spec.name.is_empty() {
+        Some("the dataset has no name")
+    } else {
+        None
+    }
+}
+
+/// A row's state as the registry service reports it.
+fn row_state(
+    status: ResolutionStatus,
+    cloud_id: Option<String>,
+    reason: Option<ResolutionReason>,
+) -> RowState {
+    RowState {
+        status: match status {
+            ResolutionStatus::Pending => RowStatus::Pending,
+            ResolutionStatus::Done => RowStatus::Done,
+            ResolutionStatus::Failed => RowStatus::Failed,
+        },
+        cloud_id,
+        reason: reason.map(|reason| reason.as_str().to_string()),
+    }
+}
+
 /// Counters reported in the slow-path warning logs.
 #[derive(Default)]
 struct LoopCounters {
@@ -347,5 +512,199 @@ fn drain_subscriber(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    async fn open_store() -> (SqliteStateStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    fn arm(package_path: Option<String>) -> RobotSpec {
+        RobotSpec {
+            org_id: "org-1".into(),
+            name: "arm".into(),
+            shared: false,
+            instance: 7,
+            overwrite_urdf: false,
+            package_path,
+        }
+    }
+
+    /// A package folder for the tests that save no package.
+    const NO_PACKAGES: &str = "/nonexistent/.robot_packages";
+
+    fn warehouse(name: &str) -> DatasetSpec {
+        DatasetSpec {
+            org_id: "org-1".into(),
+            name: name.into(),
+            shared: false,
+            description: None,
+            tags: Vec::new(),
+        }
+    }
+
+    async fn index(store: &SqliteStateStore, request: RegistryRequest) -> i64 {
+        match answer_registry_request(store, Path::new(NO_PACKAGES), request).await {
+            RegistryReply::Index(index) => index,
+            other => panic!("expected an index, got {other:?}"),
+        }
+    }
+
+    async fn connect_with(store: &SqliteStateStore, packages: &Path, package: &Path) -> i64 {
+        let request = RegistryRequest::ConnectRobot(arm(Some(package.display().to_string())));
+        match answer_registry_request(store, packages, request).await {
+            RegistryReply::Index(index) => index,
+            other => panic!("expected an index, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replaced_package_outside_the_package_folder_is_never_deleted() {
+        let (store, dir) = open_store().await;
+        let packages = dir.path().join(".robot_packages");
+        let outside = dir.path().join("arm.urdf");
+        std::fs::write(&outside, b"urdf").unwrap();
+        connect_with(&store, &packages, &outside).await;
+        let climbing = packages.join("..").join("arm.urdf");
+        connect_with(&store, &packages, &climbing).await;
+        connect_with(&store, &packages, &packages.join("new.zip")).await;
+        assert!(outside.exists(), "a file outside the package folder stays");
+    }
+
+    #[tokio::test]
+    async fn every_process_connecting_a_robot_instance_gets_its_one_row() {
+        let (store, dir) = open_store().await;
+        let packages = dir.path().join(".robot_packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let first_package = packages.join("first.zip");
+        std::fs::write(&first_package, b"zip").unwrap();
+        let first = connect_with(&store, &packages, &first_package).await;
+
+        // Another process, with a newer package for the same instance.
+        let second_package = packages.join("second.zip");
+        std::fs::write(&second_package, b"zip").unwrap();
+        let again = connect_with(&store, &packages, &second_package).await;
+        let other_instance = index(
+            &store,
+            RegistryRequest::ConnectRobot(RobotSpec {
+                instance: 8,
+                ..arm(None)
+            }),
+        )
+        .await;
+
+        assert_eq!(again, first);
+        assert_ne!(other_instance, first);
+        assert!(!first_package.exists(), "the replaced package is deleted");
+        let robot = store.get_robot(first).await.unwrap().unwrap();
+        assert_eq!(
+            robot.package_path.as_deref(),
+            Some(second_package.display().to_string().as_str())
+        );
+        assert_eq!(
+            answer_registry_request(
+                &store,
+                Path::new(NO_PACKAGES),
+                RegistryRequest::RobotState { robot_index: first }
+            )
+            .await,
+            RegistryReply::State(RowState {
+                status: RowStatus::Pending,
+                cloud_id: None,
+                reason: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dataset_selected_twice_has_one_row() {
+        let (store, _dir) = open_store().await;
+        let first = index(
+            &store,
+            RegistryRequest::SelectDataset(warehouse("warehouse")),
+        )
+        .await;
+        let again = index(
+            &store,
+            RegistryRequest::SelectDataset(warehouse("warehouse")),
+        )
+        .await;
+        let other = index(&store, RegistryRequest::SelectDataset(warehouse("yard"))).await;
+
+        assert_eq!(again, first);
+        assert_ne!(other, first);
+        assert!(matches!(
+            answer_registry_request(
+                &store,
+                Path::new(NO_PACKAGES),
+                RegistryRequest::DatasetState {
+                    dataset_index: first
+                }
+            )
+            .await,
+            RegistryReply::State(RowState {
+                status: RowStatus::Pending,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn requests_without_an_organization_are_refused() {
+        let (store, _dir) = open_store().await;
+        let robot = answer_registry_request(
+            &store,
+            Path::new(NO_PACKAGES),
+            RegistryRequest::ConnectRobot(RobotSpec {
+                org_id: String::new(),
+                ..arm(None)
+            }),
+        )
+        .await;
+        let dataset = answer_registry_request(
+            &store,
+            Path::new(NO_PACKAGES),
+            RegistryRequest::SelectDataset(DatasetSpec {
+                org_id: String::new(),
+                ..warehouse("warehouse")
+            }),
+        )
+        .await;
+
+        assert!(matches!(robot, RegistryReply::Refused(_)), "{robot:?}");
+        assert!(matches!(dataset, RegistryReply::Refused(_)), "{dataset:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_index_is_reported_as_unknown() {
+        let (store, _dir) = open_store().await;
+        assert_eq!(
+            answer_registry_request(
+                &store,
+                Path::new(NO_PACKAGES),
+                RegistryRequest::RobotState { robot_index: 42 }
+            )
+            .await,
+            RegistryReply::Unknown
+        );
+        assert_eq!(
+            answer_registry_request(
+                &store,
+                Path::new(NO_PACKAGES),
+                RegistryRequest::DatasetState { dataset_index: 42 }
+            )
+            .await,
+            RegistryReply::Unknown
+        );
     }
 }
