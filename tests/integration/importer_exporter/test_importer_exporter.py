@@ -31,6 +31,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 ORG_NAME = "Service Account's Project"  # Enter your organization name.
 DATASET_NAME = "Data Upload Integrity Check"
+MAXIMUM_EXPORT_TO_STORED_SIZE_RATIO = 1.1
 
 
 def _depth_scale_m(recording) -> float:
@@ -181,6 +182,17 @@ def test_mcap_dataset_roundtrip(
     assert manifest["status"] == "succeeded"
     assert manifest["completed_recording_ids"] == source_ids
     assert {entry["recording_id"] for entry in manifest["files"]} == set(source_ids)
+    exported_mcap_bytes = sum(
+        mcap_path.stat().st_size for mcap_path in export_dir.glob("*.mcap")
+    )
+    stored_recording_bytes = sum(recording.total_bytes for recording in originals)
+    assert (
+        exported_mcap_bytes
+        <= MAXIMUM_EXPORT_TO_STORED_SIZE_RATIO * stored_recording_bytes
+    ), (
+        f"Export holds {exported_mcap_bytes} bytes against "
+        f"{stored_recording_bytes} bytes stored"
+    )
 
     run_id = uuid.uuid4().hex
     dataset_name = f"mcap_integrity_{run_id}"
