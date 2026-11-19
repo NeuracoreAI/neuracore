@@ -195,7 +195,15 @@ async fn submit_batch(
             }
         };
 
-        let Some(org_id) = org_rx.borrow().clone() else {
+        let org_id = match crate::cloud::recording_org_id(store, recording_index, org_rx).await {
+            Ok(org_id) => org_id,
+            Err(error) => {
+                tracing::warn!(%error, recording_index, "failed to read the recording's organisation");
+                rollback_to_pending(store, &traces).await;
+                continue;
+            }
+        };
+        let Some(org_id) = org_id else {
             tracing::warn!(
                 recording_index,
                 "no current org_id configured yet; rolling traces back to pending"
@@ -577,6 +585,8 @@ mod tests {
     ) -> i64 {
         let recording_index = store
             .create_recording(NewRecording {
+                robot_index: None,
+                dataset_index: None,
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
                 dataset_id: Some("ds-1"),
@@ -940,6 +950,8 @@ mod tests {
         let (store, _dir) = open_store().await;
         let recording_index = store
             .create_recording(NewRecording {
+                robot_index: None,
+                dataset_index: None,
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
                 dataset_id: Some("ds-1"),

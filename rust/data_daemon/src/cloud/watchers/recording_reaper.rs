@@ -160,6 +160,8 @@ mod tests {
 
     fn new_recording(instance: i64) -> NewRecording<'static> {
         NewRecording {
+            robot_index: None,
+            dataset_index: None,
             robot_id: Some("robot-1"),
             robot_instance: Some(instance),
             dataset_id: Some("ds-1"),
