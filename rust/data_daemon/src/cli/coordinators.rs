@@ -148,6 +148,7 @@ pub(crate) fn spawn_cloud_coordinators(
         state_store.clone(),
         event_bus.clone(),
         Arc::clone(&client),
+        crate::storage::paths::robot_packages_root(&recordings_root),
         shutdown_tx.subscribe(),
     );
     let dataset_resolver = spawn_dataset_resolver(

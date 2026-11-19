@@ -34,6 +34,9 @@ pub(crate) trait RowResolver: Send + Sync + 'static {
     /// a pass.
     fn wakes_on(&self, event: &DaemonEvent) -> bool;
 
+    /// Work done once, before the startup pass.
+    async fn startup(&self) {}
+
     /// Ask the server about every pending row that may be asked about now.
     async fn resolve_due(&self);
 
@@ -72,6 +75,7 @@ pub(crate) fn spawn_resolver<R: RowResolver>(
         // Assume online until the connection monitor says otherwise, as the
         // recording notifiers do: its first `Down` may predate this task.
         let mut connected = true;
+        resolver.startup().await;
         // The startup pass.
         let mut next_pass = pass(&resolver, connected).await;
         loop {
