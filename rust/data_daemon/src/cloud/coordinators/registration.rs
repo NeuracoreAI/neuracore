@@ -2,7 +2,8 @@
 //!
 //! Claims traces whose row exists (any write_status except `failed`) — not just
 //! fully-written ones — buffers up to `BATCH_SIZE` (or `MAX_WAIT`) and POSTs
-//! them to `/org/{org}/recording/traces/batch-register`. Registration only
+//! them to `/v2/org/{org}/recording/traces/batch-register`, which starts a
+//! multipart upload for each of the trace's files. Registration only
 //! needs the trace's *identity* (recording id, trace id, data type, cloud
 //! files), all known at `/recording/start`, so it runs **while the recording is
 //! still writing** — overlapping the round trip with the recording instead of
@@ -13,7 +14,7 @@
 //! promotion (and its write-behind-lag safety-net role). Registration failures
 //! roll the status back to `Pending` so the next tick re-claims them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::api::models::{CloudFile, RegisterTraceRequest};
+use crate::api::models::{FileUpload, RegisterTraceRequest};
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::{cloud_file_list, is_video_family};
 use crate::cloud::{ConfigRx, OrgIdRx};
@@ -29,7 +30,8 @@ use crate::encoding::video_encoder::LossyVideoCodec;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
-    DaemonEvent, EventBus, SqliteStateStore, StateStore, TraceRecord, TraceRegistrationStatus,
+    DaemonEvent, EventBus, MultipartUpload, MultipartUploads, SqliteStateStore, StateStore,
+    TraceRecord, TraceRegistrationStatus,
 };
 
 /// Maximum traces to register in a single call. Matches the
@@ -254,7 +256,7 @@ async fn submit_batch(
             None,
             serde_json::json!({"trace_count": payload.len()}),
         );
-        match client.batch_register(&org_id, &payload).await {
+        match client.batch_register_v2(&org_id, &payload).await {
             Ok(response) => {
                 crate::perf_events::emit(
                     "trace_registration",
@@ -269,10 +271,10 @@ async fn submit_batch(
                         "outcome": "ok",
                     }),
                 );
-                let mut registered_ids: HashMap<String, _> = response
+                let mut registered_ids: HashMap<String, MultipartUploads> = response
                     .registered_traces
                     .into_iter()
-                    .map(|entry| (entry.trace_id.clone(), entry.upload_session_uris))
+                    .map(|entry| (entry.trace_id, uploads_by_filepath(entry.uploads)))
                     .collect();
                 let failed_ids: HashMap<String, Option<String>> = response
                     .failed_traces
@@ -281,53 +283,37 @@ async fn submit_batch(
                     .collect();
 
                 for (trace, request) in traces.iter().zip(&payload) {
-                    if let Some(mut uris) = registered_ids.remove(&trace.trace_id) {
-                        // The uploader fails a trace with an empty URI map.
-                        if uris.is_empty() {
-                            handle_registration_setback(
-                                store,
-                                registration_attempts,
-                                &trace.trace_id,
-                                Some("backend returned no upload session URIs".to_string()),
-                                "backend registered trace without upload URIs",
-                            )
-                            .await;
-                            continue;
-                        }
-                        if let Err(error) = fetch_missing_upload_links(
-                            client,
-                            &org_id,
-                            &cloud_id,
-                            &request.cloud_files,
-                            &mut uris,
-                        )
-                        .await
+                    if let Some(uploads) = registered_ids.remove(&trace.trace_id) {
+                        // The uploader can only upload files that have an upload.
+                        if let Some(file) = request
+                            .cloud_files
+                            .iter()
+                            .find(|file| !uploads.contains_key(&file.filepath))
                         {
                             handle_registration_setback(
                                 store,
                                 registration_attempts,
                                 &trace.trace_id,
-                                Some(error),
-                                "failed to fetch a missing upload link",
+                                Some(format!("backend returned no upload for {}", file.filepath)),
+                                "backend registered trace without every upload",
                             )
                             .await;
                             continue;
                         }
                         // A serialise failure must NOT mark the trace registered
-                        // with a "{}" placeholder — that records an empty URI map,
-                        // which the uploader then fails. Roll back to pending so
-                        // the next tick re-registers it instead.
-                        let serialised = match serde_json::to_string(&uris) {
+                        // without its uploads. Roll back to pending so the next
+                        // tick re-registers it instead.
+                        let serialised = match serde_json::to_string(&uploads) {
                             Ok(serialised) => serialised,
                             Err(error) => {
-                                tracing::warn!(%error, trace_id = trace.trace_id, "failed to serialise session URIs; rolling back to pending");
+                                tracing::warn!(%error, trace_id = trace.trace_id, "failed to serialise multipart uploads; rolling back to pending");
                                 rollback_single_to_pending(store, &trace.trace_id).await;
                                 continue;
                             }
                         };
                         let update = TraceUpdate {
                             registration_status: Some(TraceRegistrationStatus::Registered),
-                            upload_session_uris: Some(serialised),
+                            multipart_uploads: Some(serialised),
                             ..TraceUpdate::default()
                         };
                         if let Err(error) = store.update_trace(&trace.trace_id, update).await {
@@ -393,32 +379,21 @@ async fn submit_batch(
     }
 }
 
-/// Fetch an upload link for each requested file the backend returned none for.
-async fn fetch_missing_upload_links(
-    client: &ApiClient,
-    org_id: &str,
-    cloud_id: &str,
-    cloud_files: &[CloudFile],
-    uris: &mut BTreeMap<String, String>,
-) -> Result<(), String> {
-    for file in cloud_files {
-        if uris.contains_key(&file.filepath) {
-            continue;
-        }
-        tracing::warn!(
-            recording_id = cloud_id,
-            filepath = file.filepath,
-            "backend returned no upload link; fetching one"
-        );
-        let uri = client
-            .fetch_resumable_upload_url(org_id, cloud_id, &file.filepath, &file.content_type)
-            .await
-            .map_err(|error| {
-                format!("failed to fetch upload link for {}: {error}", file.filepath)
-            })?;
-        uris.insert(file.filepath.clone(), uri);
-    }
-    Ok(())
+/// Key the backend's uploads by filepath, as the uploader stores them.
+fn uploads_by_filepath(uploads: Vec<FileUpload>) -> MultipartUploads {
+    uploads
+        .into_iter()
+        .map(|upload| {
+            (
+                upload.filepath,
+                MultipartUpload {
+                    upload_id: upload.upload_id,
+                    part_size_bytes: upload.part_size_bytes,
+                    crc32c: None,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Promote any traces that are now both registered and written to `queued` and
@@ -533,7 +508,7 @@ mod tests {
     use crate::state::{NewRecording, TraceUploadStatus, TraceWriteStatus};
     use std::time::Duration;
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -620,76 +595,28 @@ mod tests {
         Arc::new(ApiClient::new(options, auth).unwrap())
     }
 
+    /// A trace whose response lacks one of its files' uploads could never upload
+    /// that file, so it goes back to pending with nothing persisted.
     #[tokio::test]
-    async fn empty_session_uris_are_not_persisted_as_registered() {
-        // Persisting "{}" would settle the trace as uploaded with no bytes.
+    async fn a_trace_missing_an_upload_is_a_setback() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [{
                     "trace_id": "trace-1",
-                    "upload_session_uris": {}
+                    "uploads": [{
+                        "filepath": "RGB_IMAGES/cam0/lossy.mp4",
+                        "upload_id": "upload-1",
+                        "part_size_bytes": 16_777_216
+                    }]
                 }],
                 "failed_traces": []
             })))
             .expect(1)
             .mount(&server)
             .await;
-
         let (store, _dir) = open_store().await;
-        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
-        let bus = EventBus::new();
-        let api = client(&server);
-
-        let store_arc = Arc::new(store.clone());
-        let claimed = store
-            .claim_traces_for_registration(BATCH_SIZE, 0.0)
-            .await
-            .unwrap();
-        submit_batch(
-            &store_arc,
-            &bus,
-            &api,
-            &org_rx(Some("org-1")),
-            &config_rx(None),
-            claimed,
-            &mut HashMap::new(),
-        )
-        .await;
-
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
-        assert_ne!(
-            trace.registration_status,
-            TraceRegistrationStatus::Registered,
-            "a trace with no upload URIs must not be recorded as registered"
-        );
-        assert!(
-            trace
-                .upload_session_uris
-                .as_deref()
-                .is_none_or(|uris| uris != "{}"),
-            "an empty URI map must never be persisted"
-        );
-    }
-
-    /// Register a written RGB trace (`lossy.mp4` + `trace.json`) against a
-    /// backend whose response only has the `lossy.mp4` link.
-    async fn register_rgb_trace_without_trace_json_link(
-        server: &MockServer,
-    ) -> (SqliteStateStore, TempDir) {
-        Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "registered_traces": [{
-                    "trace_id": "trace-1",
-                    "upload_session_uris": {"RGB_IMAGES/cam0/lossy.mp4": "https://upload/lossy"}
-                }],
-                "failed_traces": []
-            })))
-            .mount(server)
-            .await;
-        let (store, dir) = open_store().await;
         let recording_index = store
             .create_recording(NewRecording::default())
             .await
@@ -710,83 +637,32 @@ mod tests {
         submit_batch(
             &Arc::new(store.clone()),
             &EventBus::new(),
-            &client(server),
+            &client(&server),
             &org_rx(Some("org-1")),
             &config_rx(None),
             claimed,
             &mut HashMap::new(),
         )
         .await;
-        (store, dir)
-    }
-
-    #[tokio::test]
-    async fn missing_upload_link_is_fetched_before_registering() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(
-                "/org/org-1/recording/cloud-rec-1/resumable_upload_url",
-            ))
-            .and(query_param("filepath", "RGB_IMAGES/cam0/trace.json"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"url": "https://upload/trace-json"})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let (store, _dir) = register_rgb_trace_without_trace_json_link(&server).await;
-
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
-        assert_eq!(
-            trace.registration_status,
-            TraceRegistrationStatus::Registered
-        );
-        let uris: HashMap<String, String> =
-            serde_json::from_str(trace.upload_session_uris.as_deref().unwrap()).unwrap();
-        assert_eq!(
-            uris,
-            HashMap::from([
-                (
-                    "RGB_IMAGES/cam0/lossy.mp4".to_string(),
-                    "https://upload/lossy".to_string()
-                ),
-                (
-                    "RGB_IMAGES/cam0/trace.json".to_string(),
-                    "https://upload/trace-json".to_string()
-                ),
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_upload_link_fetch_is_a_setback() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(
-                "/org/org-1/recording/cloud-rec-1/resumable_upload_url",
-            ))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-
-        let (store, _dir) = register_rgb_trace_without_trace_json_link(&server).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
-        assert_eq!(trace.upload_session_uris, None, "no partial map persisted");
+        assert_eq!(trace.multipart_uploads, None, "no partial map persisted");
     }
 
     #[tokio::test]
     async fn registration_names_the_daemon() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [{
                     "trace_id": "trace-1",
-                    "upload_session_uris": {"JOINT_POSITIONS/arm0/trace.json": "https://upload/abc"}
+                    "uploads": [{
+                        "filepath": "JOINT_POSITIONS/arm0/trace.json",
+                        "upload_id": "upload-1",
+                        "part_size_bytes": 16_777_216
+                    }]
                 }],
                 "failed_traces": []
             })))
@@ -820,14 +696,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_registration_persists_session_uri_and_emits_event() {
+    async fn successful_registration_persists_uploads_and_emits_event() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [{
                     "trace_id": "trace-1",
-                    "upload_session_uris": {"JOINT_POSITIONS/arm0/trace.json": "https://upload/abc"}
+                    "uploads": [{
+                        "filepath": "JOINT_POSITIONS/arm0/trace.json",
+                        "upload_id": "upload-1",
+                        "part_size_bytes": 16_777_216
+                    }]
                 }],
                 "failed_traces": []
             })))
@@ -867,11 +747,17 @@ mod tests {
             TraceRegistrationStatus::Registered
         );
         assert_eq!(trace.upload_status, TraceUploadStatus::Queued);
-        assert!(trace
-            .upload_session_uris
-            .as_ref()
-            .unwrap()
-            .contains("https://upload/abc"));
+        assert_eq!(
+            trace.decode_uploads().unwrap(),
+            Some(MultipartUploads::from([(
+                "JOINT_POSITIONS/arm0/trace.json".to_string(),
+                MultipartUpload {
+                    upload_id: "upload-1".to_string(),
+                    part_size_bytes: 16_777_216,
+                    crc32c: None,
+                },
+            )]))
+        );
 
         // First two events on the bus are TraceRegistered + ReadyForUpload.
         let mut saw_registered = false;
@@ -905,7 +791,7 @@ mod tests {
     async fn failed_request_rolls_back_to_pending() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
@@ -994,7 +880,7 @@ mod tests {
         let server = MockServer::start().await;
         // The recording has no cloud id yet, so registration must not POST.
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200))
             .expect(0)
             .mount(&server)
@@ -1051,7 +937,7 @@ mod tests {
         // wedge the recording (the regression a staging burst-error exposed).
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [],
                 "failed_traces": [{
@@ -1129,7 +1015,7 @@ mod tests {
         // budget, never silently dropped.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [],
                 "failed_traces": []
@@ -1172,11 +1058,15 @@ mod tests {
         // bypass by calling submit_batch directly).
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [{
                     "trace_id": "trace-1",
-                    "upload_session_uris": {"JOINT_POSITIONS/arm0/trace.json": "https://upload/abc"}
+                    "uploads": [{
+                        "filepath": "JOINT_POSITIONS/arm0/trace.json",
+                        "upload_id": "upload-1",
+                        "part_size_bytes": 16_777_216
+                    }]
                 }],
                 "failed_traces": []
             })))
@@ -1226,7 +1116,7 @@ mod tests {
         // return).
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200))
             .expect(0)
             .mount(&server)

@@ -1,4 +1,4 @@
-//! Cloud-side coordinators: batch registration, resumable uploads,
+//! Cloud-side coordinators: batch registration, multipart uploads,
 //! debounced status updates, and the periodic progress reporter.
 //!
 //! Every coordinator is spawned by the daemon launch routine and subscribes
@@ -7,9 +7,10 @@
 //! 1. Per-trace actor finishes writing → emits `TraceWritten`.
 //! 2. Registration coordinator claims up to `registration::BATCH_SIZE` traces
 //!    (or whatever is ready after `registration::MAX_WAIT`), batch-registers,
-//!    persists the resumable session URIs, emits `ReadyForUpload`.
-//! 3. Upload coordinator opens each on-disk artefact and PUTs it resumably,
-//!    emitting `UploadProgress` and `UploadComplete` events as it goes.
+//!    persists each file's multipart upload, emits `ReadyForUpload`.
+//! 3. Upload coordinator opens each on-disk artefact and PUTs its parts to
+//!    presigned URLs, emitting `UploadProgress` and `UploadComplete` events as
+//!    it goes.
 //! 4. Status updater debounces `UploadProgress` / `UploadComplete` into
 //!    batched backend updates.
 //! 5. Progress reporter ticks every `intervals::PROGRESS_TICK` and posts a

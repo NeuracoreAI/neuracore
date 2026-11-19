@@ -103,8 +103,8 @@ impl TraceWriteHandle {
     /// like the write-phase progress so the uploader's per-64-MiB checkpoint
     /// across many concurrent uploads collapses to one batched row write
     /// instead of a synchronous transaction each. Resume correctness comes from
-    /// the server's 308 offset, not this row, so a coalesced/late value is
-    /// harmless; the store skips it once the upload has settled.
+    /// the parts the backend reports uploaded, not this row, so a coalesced or
+    /// late value is harmless; the store skips it once the upload has settled.
     pub fn upload_progress(&self, trace_id: &str, bytes_uploaded: i64) {
         self.enqueue(CoalescedTraceWrite {
             trace_id: trace_id.to_string(),
