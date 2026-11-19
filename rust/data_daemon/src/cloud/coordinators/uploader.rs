@@ -408,6 +408,14 @@ async fn upload_single(
         Some(uris) => uris,
         None => return,
     };
+    // A recording made offline uploads to the organisation it was made in.
+    let org_id = match crate::cloud::recording_org_id(store, trace.recording_index, org_rx).await {
+        Ok(org_id) => org_id,
+        Err(error) => {
+            tracing::warn!(%error, trace_id, "uploader could not read the recording's organisation");
+            return;
+        }
+    };
     if session_uris.is_empty() {
         // Every trace registers at least `trace.json`, so an empty map means
         // the files would never be uploaded.
@@ -519,7 +527,7 @@ async fn upload_single(
             client,
             trace_writer,
             bus,
-            org_rx,
+            org_id.as_deref(),
             status_tx,
             &trace,
             &recording_id,

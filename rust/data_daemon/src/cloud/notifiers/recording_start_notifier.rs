@@ -20,22 +20,35 @@
 //! never heard of it. [`notify_backend`] explains why this notifier, not the
 //! cancel notifier, owns that case.
 //!
+//! A recording with a dataset row is gated on it: it is started only once
+//! the server has confirmed the row, with the server's id. This notifier
+//! knows nothing about how rows are confirmed: every
+//! [`START_RESWEEP`](crate::intervals::START_RESWEEP) it queues again the
+//! recordings whose start was never sent and whose row is confirmed. The
+//! queue sends one start at a time and pauses while offline. A recording's
+//! `start_sent_at` is stamped before its start is sent, so a start that may
+//! have reached the server is never sent again by the re-check.
+//! Every server call about a recording goes to its robot row's organization
+//! ([`crate::cloud::recording_org_id`]).
+//!
 //! Every POST opens a distinct backend recording — the backend never reuses a
 //! pending one for the source — so recordings that follow each other with no
 //! gap stay separate no matter what order their stop and start notifications
 //! land in.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use super::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
+use super::notifier::{spawn_notifier_every, NotifierCtx, NotifierHandle, RecordingNotifier};
 use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::{
-    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
+    DaemonEvent, EventBus, RecordingRow, ResolutionStatus, SqliteStateStore, StateStore,
+    StateStoreError,
 };
 
 /// Notifier that POSTs `/recording/start` and persists the cloud `recording_id`
@@ -64,22 +77,18 @@ impl RecordingNotifier for StartNotifier {
         store.recordings_pending_start_notify().await
     }
 
-    /// Only the cancelled rows, which are settled locally without a POST.
+    /// The cancelled rows, which are settled locally without a POST, and the
+    /// rows whose start was never sent and whose dataset row is confirmed.
     ///
     /// `/recording/start` is not idempotent: a start the backend committed but
     /// the client never saw (a timeout) would become another orphaned backend
-    /// recording on every re-sweep. The full set is still swept at startup and
-    /// after a lag.
+    /// recording on every re-sweep, so a start once sent is left out. The full
+    /// set is still swept at startup and after a lag.
     async fn periodic_pending(
         &self,
         store: &Arc<SqliteStateStore>,
     ) -> Result<Vec<RecordingRow>, StateStoreError> {
-        Ok(store
-            .recordings_pending_start_notify()
-            .await?
-            .into_iter()
-            .filter(|row| row.cancelled_at.is_some())
-            .collect())
+        store.recordings_for_start_resweep().await
     }
 
     async fn notify(&self, ctx: &NotifierCtx, recording_index: i64) {
@@ -102,7 +111,35 @@ pub fn spawn_recording_start_notifier(
     org_rx: OrgIdRx,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> NotifierHandle {
-    spawn_notifier(StartNotifier, store, bus, client, org_rx, shutdown_rx)
+    spawn_start_notifier_every(
+        store,
+        bus,
+        client,
+        org_rx,
+        shutdown_rx,
+        crate::intervals::START_RESWEEP,
+    )
+}
+
+/// [`spawn_recording_start_notifier`] with the re-check interval as a
+/// parameter, for tests.
+fn spawn_start_notifier_every(
+    store: SqliteStateStore,
+    bus: EventBus,
+    client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+    resweep_every: Duration,
+) -> NotifierHandle {
+    spawn_notifier_every(
+        StartNotifier,
+        store,
+        bus,
+        client,
+        org_rx,
+        shutdown_rx,
+        resweep_every,
+    )
 }
 
 async fn notify_backend(
@@ -156,7 +193,37 @@ async fn notify_backend(
         return;
     }
 
-    let Some(org_id) = org_rx.borrow().clone() else {
+    // The gate: a recording with a dataset row waits until the server has
+    // confirmed it. The re-check brings it back here once it is.
+    let dataset_id = match row.dataset_index {
+        Some(dataset_index) => match store.get_dataset(dataset_index).await {
+            Ok(Some(dataset)) if dataset.status == ResolutionStatus::Done => {
+                dataset.cloud_dataset_id
+            }
+            Ok(Some(_)) => {
+                tracing::debug!(
+                    recording_index,
+                    dataset_index,
+                    "dataset not confirmed by the server yet; start waits for it",
+                );
+                return;
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, recording_index, "failed to read the recording's dataset");
+                return;
+            }
+        },
+        None => row.dataset_id,
+    };
+    let org_id = match crate::cloud::recording_org_id(store, recording_index, org_rx).await {
+        Ok(org_id) => org_id,
+        Err(error) => {
+            tracing::warn!(%error, recording_index, "failed to read the recording's organization");
+            return;
+        }
+    };
+    let Some(org_id) = org_id else {
         // No current org configured yet (not logged in / org not selected).
         // Without it we can't address the POST; the next sweep retries once
         // the config watcher picks up a current org.
@@ -173,7 +240,7 @@ async fn notify_backend(
         );
         return;
     };
-    let Some(dataset_id) = row.dataset_id else {
+    let Some(dataset_id) = dataset_id else {
         tracing::warn!(
             recording_index,
             "recording has no dataset_id at start time; skipping backend notify",
@@ -188,6 +255,12 @@ async fn notify_backend(
         );
         return;
     };
+    // Stamped first: from here on the start may reach the server, so the
+    // re-check must not send it again.
+    if let Err(error) = store.mark_start_sent(recording_index).await {
+        tracing::warn!(%error, recording_index, "failed to stamp the start as sent; retrying later");
+        return;
+    }
     // The producer captured this as the recording window's real lower bound;
     // the backend derives the reported duration from it, so a late notify
     // (e.g. after reconnecting) still reports correctly.
@@ -250,13 +323,18 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::api::auth::StaticAuthProvider;
     use crate::api::{ApiClient, ApiClientOptions};
     use crate::lifecycle::shutdown::ShutdownSignal;
-    use crate::state::{DaemonEvent, EventBus, NewRecording, SqliteStateStore, StateStore};
+    use crate::state::{
+        ConnectionState, DaemonEvent, EventBus, NewRecording, SqliteStateStore, StateStore,
+    };
+
+    /// A re-check short enough for the tests to wait for.
+    const RESWEEP: Duration = Duration::from_millis(50);
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
         let dir = TempDir::new().expect("tempdir");
@@ -280,6 +358,8 @@ mod tests {
     async fn seed_recording(store: &SqliteStateStore) -> i64 {
         store
             .create_recording(NewRecording {
+                robot_index: None,
+                dataset_index: None,
                 robot_id: Some("robot-1"),
                 robot_instance: Some(7),
                 dataset_id: Some("ds-1"),
@@ -307,6 +387,260 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": recording_id })),
             )
+    }
+
+    /// A recording into dataset row `dataset_index` with robot row
+    /// `robot_index`, as the dispatcher makes one.
+    async fn seed_recording_with_rows(
+        store: &SqliteStateStore,
+        robot_index: Option<i64>,
+        dataset_index: i64,
+    ) -> i64 {
+        store
+            .create_recording(NewRecording {
+                robot_index,
+                dataset_index: Some(dataset_index),
+                robot_id: Some("robot-1"),
+                robot_instance: Some(7),
+                dataset_id: None,
+                start: RecordingTimestamp {
+                    publish_timestamp_ns: 1_700_000_000_000_000_000,
+                    timestamp_us: Some(1_600_000_000_123_457),
+                },
+            })
+            .await
+            .expect("create recording")
+            .recording_index
+    }
+
+    async fn select_warehouse(store: &SqliteStateStore) -> i64 {
+        store
+            .select_dataset(&data_daemon_shared::DatasetSpec {
+                org_id: "org-1".into(),
+                name: "warehouse".into(),
+                shared: false,
+                description: None,
+                tags: Vec::new(),
+            })
+            .await
+            .expect("select dataset")
+    }
+
+    #[tokio::test]
+    async fn a_recording_waits_for_its_dataset_and_starts_once_it_is_confirmed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/start"))
+            .and(body_partial_json(
+                serde_json::json!({ "dataset_id": "cloud-dataset-1" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "rec-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (store, _dir) = open_store().await;
+        let dataset_index = select_warehouse(&store).await;
+        let index = seed_recording_with_rows(&store, None, dataset_index).await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_start_notifier_every(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+            RESWEEP,
+        );
+
+        bus.publish(DaemonEvent::RecordingStarted {
+            recording_index: index,
+        });
+        sleep(Duration::from_millis(200)).await;
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "nothing is started before the dataset is confirmed"
+        );
+
+        // Confirmed by the resolver; the re-check picks the recording up.
+        store
+            .resolve_dataset(dataset_index, "cloud-dataset-1")
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(3), async {
+            while store
+                .get_recording(index)
+                .await
+                .unwrap()
+                .unwrap()
+                .recording_id
+                .is_none()
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the confirmed dataset lets the recording start");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn recordings_whose_dataset_is_confirmed_offline_start_once_online() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/start"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "rec-1" })),
+            )
+            .mount(&server)
+            .await;
+        let (store, _dir) = open_store().await;
+        let dataset_index = select_warehouse(&store).await;
+        let mut indexes = Vec::new();
+        for _ in 0..3 {
+            indexes.push(seed_recording_with_rows(&store, None, dataset_index).await);
+        }
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_start_notifier_every(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+            RESWEEP,
+        );
+        sleep(Duration::from_millis(200)).await;
+
+        // The link drops, then the dataset is confirmed.
+        bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Down));
+        sleep(Duration::from_millis(50)).await;
+        store
+            .resolve_dataset(dataset_index, "cloud-dataset-1")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "nothing is sent while offline"
+        );
+
+        // Back online: every recording is started.
+        bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Up));
+        timeout(Duration::from_secs(3), async {
+            for index in &indexes {
+                while store
+                    .get_recording(*index)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .recording_id
+                    .is_none()
+                {
+                    sleep(Duration::from_millis(20)).await;
+                }
+            }
+        })
+        .await
+        .expect("the recordings start once online");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn a_start_sent_once_is_never_sent_again_by_the_recheck() {
+        let server = MockServer::start().await;
+        // The start may have reached the server: the reply is an error.
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/start"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store).await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let store = Arc::new(store);
+        assert_eq!(
+            StartNotifier.periodic_pending(&store).await.unwrap().len(),
+            1,
+            "never sent: the re-check may send it"
+        );
+
+        notify_backend(
+            &store,
+            &client,
+            &EventBus::new(),
+            &org_rx(Some("org-1")),
+            index,
+        )
+        .await;
+
+        assert!(!server.received_requests().await.unwrap().is_empty());
+        assert!(
+            StartNotifier
+                .periodic_pending(&store)
+                .await
+                .unwrap()
+                .is_empty(),
+            "sent once: only a restart or a missed event sends it again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recording_starts_in_the_org_its_robot_was_connected_in() {
+        let server = MockServer::start().await;
+        start_ok_mock("rec-1").expect(1).mount(&server).await;
+        let (store, _dir) = open_store().await;
+        let robot_index = store
+            .connect_robot(&data_daemon_shared::RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 7,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .unwrap()
+            .robot_index;
+        let dataset_index = select_warehouse(&store).await;
+        store
+            .resolve_dataset(dataset_index, "cloud-dataset-1")
+            .await
+            .unwrap();
+        let index = seed_recording_with_rows(&store, Some(robot_index), dataset_index).await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+
+        // org-2 is selected now; the recording still starts in org-1.
+        notify_backend(
+            &Arc::new(store.clone()),
+            &client,
+            &EventBus::new(),
+            &org_rx(Some("org-2")),
+            index,
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .get_recording(index)
+                .await
+                .unwrap()
+                .unwrap()
+                .recording_id
+                .as_deref(),
+            Some("rec-1")
+        );
     }
 
     /// A recording cancelled before its start POST goes out is settled without
@@ -384,6 +718,8 @@ mod tests {
 
         let (store, _dir) = open_store().await;
         let live = seed_recording(&store).await;
+        // Its start was sent; the reply may not have come back.
+        store.mark_start_sent(live).await.expect("stamp");
         let cancelled = seed_recording(&store).await;
         store
             .cancel_recording(cancelled, RecordingTimestamp::observed_at(5_000_000_000))

@@ -331,7 +331,14 @@ async fn flush_batch(
             return Some(batch);
         }
     };
-    let (Some(org_id), Some(recording_id)) = (org_rx.borrow().clone(), row.recording_id) else {
+    let org_id = match crate::cloud::recording_org_id(&store, recording_index, &org_rx).await {
+        Ok(org_id) => org_id,
+        Err(error) => {
+            tracing::warn!(%error, recording_index, "status updater could not read the recording's organisation");
+            None
+        }
+    };
+    let (Some(org_id), Some(recording_id)) = (org_id, row.recording_id) else {
         batch.defer(ORG_RESOLVE_RETRY_BACKOFF);
         return Some(batch);
     };

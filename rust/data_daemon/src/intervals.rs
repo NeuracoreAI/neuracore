@@ -60,6 +60,11 @@ pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 /// re-sent on this timer, since they are not idempotent.
 pub const NOTIFY_RESWEEP: Duration = Duration::from_secs(30);
 
+/// How often the start notifier queues again the recordings whose start was
+/// never sent: one waiting for its dataset row to be confirmed starts at most
+/// this long after it is.
+pub const START_RESWEEP: Duration = Duration::from_secs(5);
+
 /// How long a robot or dataset row blocked on something the user must fix (an
 /// archived robot, a rejected API key) waits before the server is asked about
 /// it again. Also the longest a resolver sleeps between passes while a row is
