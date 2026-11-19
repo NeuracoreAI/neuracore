@@ -2,6 +2,7 @@
 
 import os
 
+from neuracore.core.auth import get_auth
 from neuracore.core.cli.input_lock import user_input_lock
 from neuracore.core.cli.select_current_org import select_current_org
 from neuracore.core.config.config_manager import get_config_manager
@@ -56,3 +57,48 @@ def get_current_org() -> str:
             return organization.id
         except (AuthenticationError, OrganizationError, InputError) as e:
             raise ConfigError(f"Failed to select organization: {e}")
+
+
+OFFLINE_WITHOUT_ORG_MESSAGE = (
+    "You are offline and no organization is saved. Connect to the internet "
+    "and run `neuracore select-org` once, then you can record offline."
+)
+
+
+def require_saved_org() -> str:
+    """Get the saved organization, which working offline needs.
+
+    Offline, an organization cannot be selected, as that asks the server. A
+    robot or dataset set up offline is registered in the saved organization
+    once the server can be reached, so one must be saved.
+
+    Returns:
+        The saved organization's id, as :func:`get_saved_org` gives it.
+
+    Raises:
+        OrganizationError: If no organization is saved, or `NEURACORE_ORG_ID`
+            is set but empty.
+        ConfigError: If there is an error trying to get the config
+    """
+    org_id = get_saved_org()
+    if not org_id:
+        raise OrganizationError(OFFLINE_WITHOUT_ORG_MESSAGE)
+    return org_id
+
+
+def get_registry_org() -> str:
+    """Get the organization to connect a robot or select a dataset in.
+
+    Online this is :func:`get_current_org`, which may ask the user to pick
+    one. Offline it is the saved organization, as nothing can be picked.
+
+    Returns:
+        The organization's id.
+
+    Raises:
+        OrganizationError: If offline and no organization is saved.
+        ConfigError: If there is an error trying to get the config
+    """
+    if get_auth().is_offline:
+        return require_saved_org()
+    return get_current_org()

@@ -509,6 +509,7 @@ fn run_daemon(
                 state_store.clone(),
                 crate::storage::paths::robot_packages_root(&recordings_root),
                 event_bus.clone(),
+                config_for_runtime.offline.unwrap_or(false),
                 shutdown_tx.subscribe(),
             )
             .await;

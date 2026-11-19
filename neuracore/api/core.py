@@ -280,10 +280,13 @@ def start_recording(
             has been set.
     """
     robot = _get_robot(robot_name, instance)
+    active_dataset = GlobalSingleton()._active_dataset
+    if active_dataset is not None and active_dataset.dataset_index is not None:
+        # Selected through the daemon: its id is fetched now, if not known.
+        GlobalSingleton()._active_dataset_id = active_dataset.id
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    active_dataset = GlobalSingleton()._active_dataset
     if active_dataset is None or active_dataset.id != active_dataset_id:
         try:
             active_dataset = Dataset.get_by_id(active_dataset_id)
