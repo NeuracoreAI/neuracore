@@ -488,6 +488,18 @@ neuracore data-daemon launch --profile laptop --background
 neuracore data-daemon status
 ```
 
+The first line says whether the daemon is running. A running daemon then says whether it can reach the Neuracore server, how many recordings are waiting to upload, and anything you need to fix for them to upload:
+
+```text
+Daemon running (pid=4321).
+Neuracore server: not reachable.
+Waiting to start on the server: 3 recordings (1.2 GB).
+Uploading: 0 recordings (0 B left).
+1 recording is waiting because the robot "arm" is archived. Unarchive it on the Archived Robots page of the Neuracore dashboard.
+Waiting recordings are kept until the problem is fixed. To discard them instead, run `neuracore data-daemon reset`: it deletes every recording on this machine that has not finished uploading, not only these.
+3 recordings (1.2 GB) are kept on this machine until the Neuracore server can be reached.
+```
+
 ### `neuracore data-daemon stop`
 
 ```bash
@@ -525,6 +537,28 @@ neuracore data-daemon launch --profile my_profile
 neuracore data-daemon profile update my_profile --online
 neuracore data-daemon launch --profile my_profile
 ```
+
+### Starting without a network connection
+
+A script can also start, and record, when the Neuracore server cannot be reached at all, for example on a robot with intermittent internet. Log in, connect the robot and select the dataset as usual:
+
+```python
+nc.login()  # warns that it is continuing offline
+nc.connect_robot("arm", urdf_path="arm.urdf")
+nc.create_dataset("warehouse")
+nc.start_recording()
+# ... log data ...
+nc.stop_recording()
+```
+
+- The API key and organization saved by an earlier `neuracore login` and `neuracore select-org` are used. Without a saved key, run `neuracore login` once you are online so the recordings can upload. Without a saved organization, connecting a robot or selecting a dataset offline raises an error: run `neuracore select-org` once while online first.
+- `nc.connect_robot` and `nc.create_dataset` always go through the data daemon, online or offline, and return straight away. The daemon keeps a record of each robot instance and dataset, and has the server register the robot, upload its description and find or create the dataset in the background, in the organization they were set up in. Every process connecting the same robot instance shares that record, so several processes can record the same robot together.
+- `wait=True` waits for the server to confirm the robot or dataset, and raises its refusal there. Offline it raises `ServerUnreachableError` straight away. Reading `robot.id` or `dataset.id` waits the same way.
+- A recording is started on the server only once its robot and dataset are confirmed. The daemon keeps it on the machine until then, and uploads it once the server can be reached; the script does not need to be running.
+- Online, `nc.get_dataset(name)` asks the server directly, as before, and never creates a dataset. After an offline login the name cannot be checked, so it goes through the daemon, which creates a dataset of that name once online if the server has none, and the recordings upload into it. `nc.get_dataset(id=...)` needs the server.
+- `nc.stop_recording(wait=True)` stops the recording and raises straight away, as there is nothing to wait for until the server can be reached.
+- When the server blocks a robot or dataset (an archived robot, a rejected API key, an account that cannot record in the organization), its recordings wait on the machine and upload once it is fixed. When it refuses one for good (a robot or dataset the server rejects, or a shared dataset the account may not create), its recordings never upload. The first `nc.connect_robot`, `nc.create_dataset`, offline `nc.get_dataset` by name or `nc.start_recording` in each process warns about anything that needs fixing, and about recordings still kept on the machine because the server cannot be reached; `neuracore data-daemon status` shows the same at any time.
+- If the connection drops while a recording's start is being sent, that recording uploads after the daemon next restarts.
 
 ### Multi node
 

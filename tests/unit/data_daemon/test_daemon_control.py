@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.metadata
 import os
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -23,6 +24,12 @@ DEAD_PID = 999999
 # seam fails instead of matching the genuine installed metadata.
 INSTALLED_SDK_VERSION = "99.9.9"
 STALE_DAEMON_VERSION = "13.0.1"
+
+
+@pytest.fixture(autouse=True)
+def _status_not_reported_yet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts as a new process would: no status summary shown yet."""
+    monkeypatch.setattr(daemon_control, "_status_reported", False)
 
 
 @pytest.fixture(autouse=True)
@@ -350,17 +357,20 @@ def _install_fake_bridge(
     monkeypatch: pytest.MonkeyPatch,
     wait_until_ready: object,
     daemon_version: object | None = None,
+    daemon_status: object | None = None,
 ) -> None:
     """Expose a stand-in ``_data_bridge`` module to the health probe.
 
     ``importlib.import_module`` returns an existing ``sys.modules`` entry, so
     seeding one lets these tests drive the probe without a built extension.
-    A ``daemon_version`` of ``None`` leaves that name off the module, which is
-    what an extension built before the version query looks like.
+    A ``daemon_version`` or ``daemon_status`` of ``None`` leaves that name off
+    the module, which is what an extension built before that query looks like.
     """
     fake_bridge = SimpleNamespace(wait_until_ready=wait_until_ready)
     if daemon_version is not None:
         fake_bridge.daemon_version = daemon_version
+    if daemon_status is not None:
+        fake_bridge.daemon_status = daemon_status
     monkeypatch.setitem(sys.modules, "neuracore.data_daemon._data_bridge", fake_bridge)
 
 
@@ -728,3 +738,72 @@ def test_version_check_is_skipped_when_the_extension_import_fails(
         daemon_control._check_daemon_version(0.0)
 
     assert "not importable" in caplog.text
+
+
+def _adopt_daemon_reporting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, daemon_status: object | None
+) -> None:
+    """Point at a live daemon of the installed version answering ``daemon_status``."""
+    _use_live_daemon_paths(monkeypatch, tmp_path)
+    _install_sdk_version(monkeypatch, INSTALLED_SDK_VERSION)
+    _install_fake_bridge(
+        monkeypatch,
+        lambda _timeout_s: os.getpid(),
+        daemon_version=lambda _timeout_s: INSTALLED_SDK_VERSION,
+        daemon_status=daemon_status,
+    )
+
+
+def test_the_first_call_warns_about_what_keeps_recordings_from_uploading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timeouts: list[float] = []
+
+    def daemon_status(timeout_s: float) -> dict[str, object]:
+        timeouts.append(timeout_s)
+        return {"problems": ["No API key is saved.", "2 recordings are waiting."]}
+
+    _adopt_daemon_reporting(monkeypatch, tmp_path, daemon_status)
+
+    with pytest.warns(UserWarning) as warned:
+        daemon_control.ensure_daemon_running(timeout_s=2.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        daemon_control.ensure_daemon_running(timeout_s=2.5)
+
+    assert [str(warning.message) for warning in warned] == [
+        "Neuracore data daemon:\n- No API key is saved.\n- 2 recordings are waiting."
+    ]
+    # Asked once per process, with its own short budget.
+    assert timeouts == [daemon_control.STATUS_QUERY_TIMEOUT_SECONDS]
+
+
+@pytest.mark.parametrize(
+    "daemon_status",
+    [
+        pytest.param(lambda _timeout_s: {"problems": []}, id="nothing-wrong"),
+        pytest.param(lambda _timeout_s: None, id="no-answer"),
+        pytest.param(None, id="extension-without-the-query"),
+    ],
+)
+def test_no_status_is_shown_when_there_is_nothing_to_say(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, daemon_status: object | None
+) -> None:
+    _adopt_daemon_reporting(monkeypatch, tmp_path, daemon_status)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert daemon_control.ensure_daemon_running(timeout_s=2.5) == os.getpid()
+
+
+def test_a_failed_status_query_does_not_fail_the_caller(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def daemon_status(_timeout_s: float) -> dict[str, object]:
+        raise RuntimeError("iceoryx2 port unusable")
+
+    _adopt_daemon_reporting(monkeypatch, tmp_path, daemon_status)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert daemon_control.ensure_daemon_running(timeout_s=2.5) == os.getpid()
