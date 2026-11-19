@@ -519,10 +519,9 @@ class LocalServerPolicy(ServerPolicy):
                 f"{output_embodiment_description_str}",
             ])
         if self.input_preprocessing_config is not None:
-            input_preprocessing_config_serialized = {
-                data_type.value: [m.to_dict() for m in methods]
-                for data_type, methods in self.input_preprocessing_config.items()
-            }
+            input_preprocessing_config_serialized = (
+                self.input_preprocessing_config.to_serializable()
+            )
             cmd.extend([
                 "--input-preprocessing-config",
                 json.dumps(input_preprocessing_config_serialized),

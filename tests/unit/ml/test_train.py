@@ -109,18 +109,8 @@ OUTPUT_CROSS_EMBODIMENT_SPEC = {
 }
 
 MINIMAL_ROLE_PREPROCESSING_CFG = {
-    "input": {
-        "RGB_IMAGES": [{
-            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
-            "size": [224, 224],
-        }]
-    },
-    "output": {
-        "RGB_IMAGES": [{
-            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
-            "size": [224, 224],
-        }]
-    },
+    "input": {"RGB_IMAGES": {"geometric": [{"resize_pad": {"size": [224, 224]}}]}},
+    "output": {"RGB_IMAGES": {"geometric": [{"resize_pad": {"size": [224, 224]}}]}},
 }
 
 

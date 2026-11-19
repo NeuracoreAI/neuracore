@@ -1,11 +1,15 @@
 import json
 import zipfile
+from unittest.mock import MagicMock, patch
 
 from neuracore_types import DataType
 from omegaconf import OmegaConf
 
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.preprocessing.methods import ColorJitter, ResizePad
 from neuracore.ml.utils.json_serialization import to_json_serializable
 from neuracore.ml.utils.nc_archive import (
+    create_nc_archive,
     load_cross_embodiment_descriptions_from_nc_archive,
 )
 
@@ -86,4 +90,59 @@ def test_load_cross_embodiment_descriptions_normalizes_json_index_keys(tmp_path)
     }
     assert output_description == {
         "robot_id": {DataType.JOINT_TARGET_POSITIONS: {0: "target_0"}}
+    }
+
+
+class _ArchiveOnlyModel:
+    model_init_description: dict = {}
+
+    def state_dict(self) -> dict:
+        return {}
+
+
+def test_create_nc_archive_writes_grouped_preprocessing_json(tmp_path):
+    algorithm_loader = MagicMock(algorithm_dir=tmp_path)
+    algorithm_loader.get_all_files.return_value = []
+    algorithm_loader.find_dependency_file.return_value = None
+
+    with patch(
+        "neuracore.ml.utils.nc_archive.AlgorithmLoader", return_value=algorithm_loader
+    ):
+        archive_path = create_nc_archive(
+            model=_ArchiveOnlyModel(),
+            output_dir=tmp_path,
+            input_preprocessing_config=PreprocessingConfiguration(
+                {DataType.RGB_IMAGES: [ResizePad(size=[32, 32]), ColorJitter(hue=0.1)]}
+            ),
+            output_preprocessing_config=PreprocessingConfiguration(
+                {DataType.DEPTH_IMAGES: [ResizePad(size=[16, 16])]}
+            ),
+        )
+
+    with zipfile.ZipFile(archive_path) as archive:
+        input_preprocessing_json = json.loads(
+            archive.read("input_preprocessing_config.json")
+        )
+        output_preprocessing_json = json.loads(
+            archive.read("output_preprocessing_config.json")
+        )
+
+    assert input_preprocessing_json == {
+        "RGB_IMAGES": {
+            "geometric": [{"resize_pad": {"size": [32, 32]}}],
+            "photometric": [{
+                "color_jitter": {
+                    "brightness": 0.3,
+                    "contrast": 0.3,
+                    "saturation": 0.3,
+                    "hue": 0.1,
+                }
+            }],
+        }
+    }
+    assert output_preprocessing_json == {
+        "DEPTH_IMAGES": {
+            "geometric": [{"resize_pad": {"size": [16, 16]}}],
+            "photometric": [],
+        }
     }
