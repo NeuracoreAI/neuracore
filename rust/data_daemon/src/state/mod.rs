@@ -13,13 +13,13 @@ pub mod trace_event_database_writer;
 pub use events::{ConnectionState, DaemonEvent, EventBus};
 #[allow(unused_imports)]
 pub use schema::{
-    ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
-    TraceUploadStatus, TraceWriteStatus,
+    DatasetRow, ProgressReportStatus, RecordingRow, ResolutionReason, ResolutionStatus, RobotRow,
+    TraceErrorCode, TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
 };
 #[allow(unused_imports)]
 pub use store::{
-    CoalescedTraceWrite, NewRecording, RecordingTimestamp, SqliteStateStore, StateStore,
-    StateStoreError, TraceUpdate,
+    CoalescedTraceWrite, ConnectedRobot, NewRecording, RecordingTimestamp, SqliteStateStore,
+    StateStore, StateStoreError, TraceUpdate,
 };
 #[allow(unused_imports)]
 pub use trace_event_database_writer::{TraceEventDatabaseWriter, TraceWriteHandle};
