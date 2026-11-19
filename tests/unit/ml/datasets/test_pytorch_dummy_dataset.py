@@ -64,6 +64,7 @@ class TestPytorchDummyDataset:
             "output_description": {
                 "robot_0": {
                     DataType.JOINT_TARGET_POSITIONS: ["joint_0", "joint_1"],
+                    DataType.END_EFFECTOR_TARGET_POSES: ["ee_0"],
                     DataType.RGB_IMAGES: ["camera_0"],
                 }
             },
@@ -377,6 +378,25 @@ class TestPytorchDummyDataset:
         # Test output end-effector poses
         assert DataType.END_EFFECTOR_POSES in sample.outputs
         assert len(sample.outputs[DataType.END_EFFECTOR_POSES]) == 1
+
+    def test_end_effector_target_pose_data_generation(self):
+        """Test end-effector target pose data generation."""
+        dataset = PytorchDummyDataset(
+            input_cross_embodiment_description={
+                "robot_0": {DataType.END_EFFECTOR_POSES: ["ee_0"]}
+            },
+            output_cross_embodiment_description={
+                "robot_0": {DataType.END_EFFECTOR_TARGET_POSES: ["ee_0"]}
+            },
+            num_samples=3,
+        )
+
+        sample = dataset[0]
+
+        assert DataType.END_EFFECTOR_POSES in sample.inputs
+        assert len(sample.inputs[DataType.END_EFFECTOR_POSES]) == 1
+        assert DataType.END_EFFECTOR_TARGET_POSES in sample.outputs
+        assert len(sample.outputs[DataType.END_EFFECTOR_TARGET_POSES]) == 1
 
     def test_parallel_gripper_open_amount_data_generation(self):
         """Test parallel gripper open amount data generation."""

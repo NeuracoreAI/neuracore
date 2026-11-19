@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DATA_TYPE_ORDER: tuple[DataType, ...] = (
     DataType.JOINT_TARGET_POSITIONS,
     DataType.JOINT_POSITIONS,
+    DataType.END_EFFECTOR_TARGET_POSES,
+    DataType.END_EFFECTOR_POSES,
     DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
     DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
 )
