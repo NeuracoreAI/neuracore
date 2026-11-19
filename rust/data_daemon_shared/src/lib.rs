@@ -411,6 +411,11 @@ pub mod service_name {
     /// counts and at most a handful of short reason codes.
     pub const STATUS_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
+    /// How long the SDK waits for the reply to one status request, in
+    /// milliseconds, before asking again. A reply the daemon sends later is
+    /// lost, so the daemon answers well within it.
+    pub const STATUS_RESPONSE_WAIT_MS: u64 = 250;
+
     /// Request-response service the SDK uses to read a source's *current*
     /// recording state.
     ///

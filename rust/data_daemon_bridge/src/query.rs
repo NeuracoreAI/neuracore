@@ -3,9 +3,9 @@
 //! The thin producer owns no recording identity and no daemon state, so
 //! everything it needs to know it asks for: whether a daemon is up
 //! ([`wait_until_ready`]), which version it was built from ([`daemon_version`]),
-//! which recording a source has open ([`query_recording_state`]), and the
-//! robots and datasets it connects and selects through the daemon
-//! ([`registry`]).
+//! what its recordings are waiting on ([`daemon_status`]), which recording a
+//! source has open ([`query_recording_state`]), and the robots and datasets it
+//! connects and selects through the daemon ([`registry`]).
 //!
 //! Two concerns, kept apart. [`request_reply_once`] and [`poll_until`] know how
 //! to talk to an iceoryx2 request-response port — loan, send, poll for a reply,
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
     HealthReply, HealthRequest, LiveRecording, RecordingStateReply, RegistryReply, RegistryRequest,
-    VersionReply, VersionRequest,
+    StatusReply, StatusRequest, VersionReply, VersionRequest,
 };
 use iceoryx2::port::client::Client;
 use iceoryx2::prelude::ipc;
@@ -42,6 +42,15 @@ const REGISTRY_RESPONSE_WAIT: Duration = Duration::from_millis(250);
 const VERSION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long a single version request waits for the daemon's reply before re-asking.
 const VERSION_RESPONSE_WAIT: Duration = Duration::from_millis(20);
+
+/// Interval between successive status requests to the daemon.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// How long a single status request waits for the daemon's reply before
+/// re-asking. Longer than the version wait: the daemon reads its state store
+/// to answer.
+const STATUS_RESPONSE_WAIT: Duration =
+    Duration::from_millis(data_daemon_shared::service_name::STATUS_RESPONSE_WAIT_MS);
 
 pub(crate) fn bounded_timeout(timeout_s: f64) -> Duration {
     // Clamp before converting: `Duration::from_secs_f64` panics on a non-finite
@@ -165,6 +174,34 @@ pub(crate) fn daemon_version(timeout_s: f64) -> Result<Option<String>, ProducerE
                     |payload| {
                         let reply = VersionReply::decode(payload)?;
                         Ok((reply.nonce == nonce).then_some(reply.version))
+                    },
+                )
+            })
+        },
+    )
+}
+
+/// Block (with the GIL released by the caller) until the daemon reports what
+/// its recordings are waiting on, or `timeout_s` elapses.
+///
+/// `Ok(None)` means nothing answered within `timeout_s`: no daemon, one older
+/// than the status service, or one whose store could not be read.
+pub(crate) fn daemon_status(timeout_s: f64) -> Result<Option<StatusReply>, ProducerError> {
+    let nonce = now_ns() as u64;
+    let request_bytes = StatusRequest { nonce }.encode()?;
+    poll_until(
+        Instant::now() + bounded_timeout(timeout_s),
+        STATUS_POLL_INTERVAL,
+        || {
+            with_producer(|state| {
+                request_reply_once(
+                    &state.status_client,
+                    &request_bytes,
+                    STATUS_RESPONSE_WAIT,
+                    "status",
+                    |payload| {
+                        let reply = StatusReply::decode(payload)?;
+                        Ok((reply.nonce == nonce).then_some(reply))
                     },
                 )
             })
