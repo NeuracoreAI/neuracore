@@ -368,7 +368,7 @@ fn keep_opened_in_snapshot(command: &mut RecordingCommand, opened: &mut HashSet<
 fn open_command(payload: StartPayload) -> RecordingCommand {
     RecordingCommand::Open {
         recording_id: payload.recording_id,
-        robot_id: payload.robot_id,
+        source_key: payload.robot_id,
         robot_instance: payload.instance,
         dataset_id: payload.dataset_ids.into_iter().next(),
         start_timestamp_ns: seconds_to_nanos(payload.start_time),
@@ -429,7 +429,7 @@ mod tests {
             commands,
             vec![RecordingCommand::Open {
                 recording_id: "rec-1".into(),
-                robot_id: "robot-1".into(),
+                source_key: "robot-1".into(),
                 robot_instance: 2,
                 dataset_id: Some("ds-1".into()),
                 start_timestamp_ns: 1_500_000_000,
@@ -481,7 +481,7 @@ mod tests {
             vec![
                 RecordingCommand::Open {
                     recording_id: "rec-1".into(),
-                    robot_id: "robot-1".into(),
+                    source_key: "robot-1".into(),
                     robot_instance: 0,
                     dataset_id: Some("ds-1".into()),
                     start_timestamp_ns: 1_500_000_000,
@@ -489,7 +489,7 @@ mod tests {
                 },
                 RecordingCommand::Open {
                     recording_id: "rec-2".into(),
-                    robot_id: "robot-2".into(),
+                    source_key: "robot-2".into(),
                     robot_instance: 1,
                     dataset_id: None,
                     start_timestamp_ns: 2_000_000_000,

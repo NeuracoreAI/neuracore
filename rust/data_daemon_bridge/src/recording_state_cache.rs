@@ -66,7 +66,7 @@ const REFRESH_REARM: Duration = Duration::from_secs(1);
 /// giving up early just leaves the entry stale for another interval.
 const REFRESH_TIMEOUT_S: f64 = 0.1;
 
-/// State nested `robot_id -> instance` rather than keyed on a
+/// State nested `source_key -> instance` rather than keyed on a
 /// `(String, i64)` tuple. A tuple key cannot be looked up by borrow, so every
 /// read would allocate a `String` purely to build one — on the log path, which
 /// the joint fast path was rewritten to keep allocation-free. Nesting costs a
@@ -131,11 +131,11 @@ static REFRESH: LazyLock<Mutex<RefreshThread>> = LazyLock::new(|| {
 /// refresh. "Nothing has answered yet" reads the same as "not recording", so a
 /// caller gating on this under-enforces for the first refresh rather than
 /// acting on a recording that may not exist.
-pub(crate) fn epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
+pub(crate) fn epoch(source_key: &str, robot_instance: i64) -> Option<i64> {
     let (epoch, stale) = {
         let entries = ENTRIES.read().unwrap_or_else(|p| p.into_inner());
         match entries
-            .get(robot_id)
+            .get(source_key)
             .and_then(|instances| instances.get(&robot_instance))
         {
             Some(entry) => (entry.open.as_ref().map(|_| entry.epoch), is_stale(entry)),
@@ -143,7 +143,7 @@ pub(crate) fn epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
         }
     };
     if stale {
-        schedule_refresh((robot_id.to_string(), robot_instance));
+        schedule_refresh((source_key.to_string(), robot_instance));
     }
     epoch
 }
@@ -171,13 +171,13 @@ pub(crate) fn epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
 /// [`REFRESH_INTERVAL`] is as often as the entry can change: a waiter's own
 /// reads are what schedule the refreshes that bring the id in.
 pub(crate) fn display(
-    robot_id: &str,
+    source_key: &str,
     robot_instance: i64,
     timeout_s: f64,
 ) -> Option<Option<LiveRecording>> {
     let deadline = Instant::now() + bounded_timeout(timeout_s);
     loop {
-        let open = read(robot_id, robot_instance)?;
+        let open = read(source_key, robot_instance)?;
         let awaiting_id = open
             .as_ref()
             .is_some_and(|recording| recording.recording_id.is_none());
@@ -190,11 +190,11 @@ pub(crate) fn display(
 }
 
 /// One read of the cache, blocking only on the first read for a source.
-fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
+fn read(source_key: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
     let (answered, open, stale) = {
         let entries = ENTRIES.read().unwrap_or_else(|p| p.into_inner());
         match entries
-            .get(robot_id)
+            .get(source_key)
             .and_then(|instances| instances.get(&robot_instance))
         {
             Some(entry) => (
@@ -206,7 +206,7 @@ fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
         }
     };
 
-    let source = (robot_id.to_string(), robot_instance);
+    let source = (source_key.to_string(), robot_instance);
     if answered {
         if stale {
             schedule_refresh(source);
@@ -229,9 +229,9 @@ fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
 /// `started_at_us` is `start_recording`'s return value, which is exactly what
 /// the daemon stores as the recording's start — so this entry already agrees
 /// with what a refresh would fetch, bar the ids the daemon has yet to mint.
-pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_us: i64) {
+pub(crate) fn note_local_start(source_key: &str, robot_instance: i64, started_at_us: i64) {
     let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-    let entry = entry_mut(&mut entries, robot_id, robot_instance);
+    let entry = entry_mut(&mut entries, source_key, robot_instance);
     // Unconditional, unlike a refresh: this call *is* a new recording, whatever
     // timestamp it carries, so a caller that reuses one still sees a boundary.
     entry.epoch = entry.epoch.wrapping_add(1);
@@ -245,18 +245,18 @@ pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_u
 }
 
 /// Record that this process just closed `source`'s recording (stop or cancel).
-pub(crate) fn note_local_end(robot_id: &str, robot_instance: i64) {
+pub(crate) fn note_local_end(source_key: &str, robot_instance: i64) {
     let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-    let entry = entry_mut(&mut entries, robot_id, robot_instance);
+    let entry = entry_mut(&mut entries, source_key, robot_instance);
     entry.open = None;
     entry.seq = entry.seq.wrapping_add(1);
     entry.written_at = Some(Instant::now());
 }
 
 /// The entry for a source, created empty if it has none.
-fn entry_mut<'a>(entries: &'a mut Entries, robot_id: &str, robot_instance: i64) -> &'a mut Entry {
+fn entry_mut<'a>(entries: &'a mut Entries, source_key: &str, robot_instance: i64) -> &'a mut Entry {
     entries
-        .entry(robot_id.to_string())
+        .entry(source_key.to_string())
         .or_default()
         .entry(robot_instance)
         .or_insert(Entry {
@@ -342,7 +342,7 @@ fn refresh_once(source: &Source) -> bool {
         lookup(&entries, source).map(|entry| entry.seq).unwrap_or(0)
     };
     let query = RecordingStateQuery {
-        robot_id: source.0.clone(),
+        source_key: source.0.clone(),
         robot_instance: source.1,
     };
     let Ok(bytes) = query.encode() else {
@@ -361,7 +361,7 @@ fn refresh_once(source: &Source) -> bool {
             false
         }
         Err(error) => {
-            tracing::debug!(%error, robot_id = source.0, "recording-state refresh failed");
+            tracing::debug!(%error, source_key = source.0, "recording-state refresh failed");
             clear_scheduled(source);
             false
         }

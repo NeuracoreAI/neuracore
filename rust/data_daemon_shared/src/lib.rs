@@ -28,7 +28,7 @@
 //! # The thin-shipper model
 //!
 //! The producer is a *thin shipper*: it knows nothing about recordings. Every
-//! envelope is tagged only with its **source** (`robot_id`, `robot_instance`)
+//! envelope is tagged only with its **source** (`source_key`, `robot_instance`)
 //! and — for data — its **sensor** (`data_type`, `sensor_name`) and capture
 //! `timestamp_us`. The producer publishes three fire-and-forget lifecycle
 //! events ([`Envelope::StartRecording`] / [`Envelope::StopRecording`] /
@@ -436,7 +436,10 @@ pub mod service_name {
     pub const MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE: usize = 1;
 }
 
-/// Who a message or a recording belongs to: `(robot_id, robot_instance)`.
+/// Who a message or a recording belongs to: `(source_key, robot_instance)`.
+///
+/// The source key labels a robot's logged data on its way to the daemon. It
+/// holds the robot's server id.
 ///
 /// The one identity the producer and the daemon both speak — every [`Envelope`]
 /// is tagged with it and [`RecordingStateQuery`] carries both halves — so it
@@ -452,7 +455,7 @@ pub type Source = (String, i64);
 
 /// A single message exchanged between the producer and the daemon.
 ///
-/// Every variant is tagged with its **source** (`robot_id`, `robot_instance`).
+/// Every variant is tagged with its **source** (`source_key`, `robot_instance`).
 /// Data variants additionally carry their **sensor** (`data_type`,
 /// `sensor_name`) and capture `timestamp_us`. No recording or trace identity
 /// travels on the wire — the daemon owns it (see the crate-level docs).
@@ -460,12 +463,12 @@ pub type Source = (String, i64);
 pub enum Envelope {
     /// Producer announces that a recording has started for a source.
     ///
-    /// The daemon opens an active window for `(robot_id, robot_instance)` at
+    /// The daemon opens an active window for `(source_key, robot_instance)` at
     /// `publish_timestamp_ns`, allocates the local `recording_index`, and
     /// inserts the recording row. Processed immediately on arrival (bypasses
     /// the holdback).
     StartRecording {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Optional robot human-readable name.
         robot_name: Option<String>,
@@ -490,7 +493,7 @@ pub enum Envelope {
     /// The daemon sets the window's exclusive upper bound and begins the
     /// drain/finalise countdown. Processed immediately on arrival.
     StopRecording {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Producer wall-clock publish time (Unix nanoseconds) at which the
         /// recording window closes — the exclusive upper bound of the
@@ -510,7 +513,7 @@ pub enum Envelope {
     /// recording row cancelled, and uploads nothing. Processed immediately on
     /// arrival; the daemon is idempotent.
     CancelRecording {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Caller-supplied capture time (microseconds) for the cancel, or
         /// the publish time when the caller supplied none. A cancel is a
@@ -532,7 +535,7 @@ pub enum Envelope {
     /// disk by the producer and announced via [`Envelope::VideoChunkReady`]
     /// instead.
     Data {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Wire data-type label (e.g. `"JOINT_POSITIONS"`, `"RGB_IMAGES"`).
         data_type: String,
@@ -565,7 +568,7 @@ pub enum Envelope {
     /// `publish_timestamp_ns`, the whole batch belongs to one window, and the
     /// daemon holds and routes it as a single unit.
     BatchedData {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Wire data-type label shared by every item (e.g. `"JOINT_POSITIONS"`).
         /// A batch is one `log_*` call for a single sensor group, so the type
@@ -595,7 +598,7 @@ pub enum Envelope {
     /// times in microseconds are carried inline for the daemon-side
     /// `trace.json` sidecar.
     VideoChunkReady {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Wire data-type label (e.g. `"RGB_IMAGES"`).
         data_type: String,
@@ -657,7 +660,7 @@ pub enum Envelope {
     /// strictly behind every chunk it vouches for and the dispatcher can evict
     /// the closing window with no timing assumption.
     SourceFlushed {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Publish time at the marker's send. Diagnostic only: deliberately
         /// not used for window membership.
@@ -668,7 +671,7 @@ pub enum Envelope {
     /// Producer asserts that it is currently logging video for a source —
     /// published *before* any of that video has been sealed into a chunk.
     VideoProducerActive {
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         /// Publish time of the frame that triggered the claim, stamped on the
         /// logging thread, so it is the window-membership key here too.
@@ -826,7 +829,7 @@ pub enum EnvelopeCodecError {
 /// if any, is currently open for a source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingStateQuery {
-    pub robot_id: String,
+    pub source_key: String,
     pub robot_instance: i64,
 }
 
@@ -1157,7 +1160,7 @@ mod tests {
     #[test]
     fn start_recording_round_trips_through_postcard() {
         let original = Envelope::StartRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 3,
             robot_name: Some("arm".into()),
             dataset_id: Some("ds-1".into()),
@@ -1174,7 +1177,7 @@ mod tests {
     #[test]
     fn data_envelope_preserves_payload_bytes() {
         let original = Envelope::Data {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             sensor_name: Some("waist".into()),
@@ -1192,7 +1195,7 @@ mod tests {
     fn data_timestamp_us_round_trips_over_postcard_wire() {
         let timestamp_us = 1_747_740_000_123_457_i64;
         let original = Envelope::Data {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
@@ -1221,7 +1224,7 @@ mod tests {
         // bytes (variant tag + length prefix + source/sensor + timestamps).
         const PAYLOAD_LEN: usize = 1024 * 1024;
         let original = Envelope::Data {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: None,
@@ -1245,7 +1248,7 @@ mod tests {
     #[test]
     fn batched_data_round_trips() {
         let original = Envelope::BatchedData {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
@@ -1283,7 +1286,7 @@ mod tests {
             })
             .collect();
         let envelope = Envelope::BatchedData {
-            robot_id: "11111111-2222-3333-4444-555555555555".into(),
+            source_key: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_747_740_000_123_456_700,
@@ -1302,7 +1305,7 @@ mod tests {
     #[test]
     fn stop_and_cancel_round_trip() {
         let stop = Envelope::StopRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 2,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_us: 1_700_000_000_000_000,
@@ -1313,7 +1316,7 @@ mod tests {
         assert_eq!(stop.kind(), "stop_recording");
 
         let cancel = Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 2,
             timestamp_us: 1_700_000_000_000_000,
         };
@@ -1333,7 +1336,7 @@ mod tests {
     #[test]
     fn video_producer_active_round_trips() {
         let claim = Envelope::VideoProducerActive {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 3,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             producer_pid: 4242,
@@ -1346,7 +1349,7 @@ mod tests {
     #[test]
     fn video_chunk_ready_round_trips() {
         let original = Envelope::VideoChunkReady {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
@@ -1397,7 +1400,7 @@ mod tests {
             ("DEPTH_IMAGES", FrameDtype::depth_u16(1e-4)),
         ] {
             let original = Envelope::VideoChunkReady {
-                robot_id: "robot-1".into(),
+                source_key: "robot-1".into(),
                 robot_instance: 0,
                 data_type: data_type.into(),
                 sensor_name: Some("depth_camera".into()),
@@ -1470,7 +1473,7 @@ mod tests {
         let frame_timestamps_us: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000).collect();
         let frame_publish_offsets_us: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
-            robot_id: "11111111-2222-3333-4444-555555555555".into(),
+            source_key: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
@@ -1515,7 +1518,7 @@ mod tests {
             .collect();
         let frame_publish_offsets_us: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
-            robot_id: "11111111-2222-3333-4444-555555555555".into(),
+            source_key: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: i64::MAX,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_with_a_deliberately_long_sensor_label".into()),
