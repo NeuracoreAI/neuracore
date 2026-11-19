@@ -162,6 +162,14 @@ def setup_test_config():
             ),
             expected_value=lambda data: {data["name"]: {"pose": data["pose"]}},
         ),
+        DataType.END_EFFECTOR_TARGET_POSES: TestConfigItem(
+            data=DummyData.end_effector_pose,
+            logging_function=lambda data: nc.log_end_effector_target_pose(
+                name=data["name"],
+                pose=data["pose"],
+            ),
+            expected_value=lambda data: {data["name"]: {"pose": data["pose"]}},
+        ),
         DataType.POSES: TestConfigItem(
             data=DummyData.pose,
             logging_function=lambda data: nc.log_pose(

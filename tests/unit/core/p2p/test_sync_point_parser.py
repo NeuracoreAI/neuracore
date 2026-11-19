@@ -169,6 +169,23 @@ class TestParseSyncPointEndEffectorPose:
         assert isinstance(parsed_ee, EndEffectorPoseData)
         np.testing.assert_array_almost_equal(parsed_ee.pose, pose)
 
+    def test_parse_end_effector_target_pose_data(self):
+        """Test parsing end effector target pose data."""
+        pose = np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0])
+        ee_data = EndEffectorPoseData(timestamp_us=4_000_000, pose=pose)
+        message_data = ee_data.model_dump_json()
+        track = _create_track(DataType.END_EFFECTOR_TARGET_POSES, label="left_gripper")
+
+        result = parse_sync_point(message_data, track)
+
+        assert isinstance(result, SynchronizedPoint)
+        assert result.timestamp_us == 4_000_000
+        assert DataType.END_EFFECTOR_TARGET_POSES in result.data
+        assert "left_gripper" in result.data[DataType.END_EFFECTOR_TARGET_POSES]
+        parsed_ee = result.data[DataType.END_EFFECTOR_TARGET_POSES]["left_gripper"]
+        assert isinstance(parsed_ee, EndEffectorPoseData)
+        np.testing.assert_array_almost_equal(parsed_ee.pose, pose)
+
 
 class TestParseSyncPointGripper:
     """Tests for parsing parallel gripper data."""
