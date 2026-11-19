@@ -8,15 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use data_daemon_shared::{DatasetSpec, RobotSpec, NANOSECONDS_PER_MICROSECOND};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
 
 use crate::state::schema::{
-    DatasetRow, ProgressReportStatus, RecordingRow, ResolutionStatus, RobotRow, TraceErrorCode,
-    TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
+    DatasetRow, ProgressReportStatus, RecordingRow, ResolutionReason, ResolutionStatus, RobotRow,
+    TraceErrorCode, TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
 };
 
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
@@ -152,6 +152,93 @@ pub trait StateStore: Send + Sync {
 
     /// Fetch a dataset row by its index.
     async fn get_dataset(&self, dataset_index: i64) -> Result<Option<DatasetRow>, StateStoreError>;
+
+    /// The robot rows the server is due to confirm at `now`: `pending`, with
+    /// no wait running.
+    #[allow(dead_code)] // Used by the robot resolver.
+    async fn robots_to_resolve(&self, now: NaiveDateTime)
+        -> Result<Vec<RobotRow>, StateStoreError>;
+
+    /// The dataset rows the server is due to confirm at `now`, as
+    /// [`Self::robots_to_resolve`].
+    #[allow(dead_code)] // Used by the dataset resolver.
+    async fn datasets_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<DatasetRow>, StateStoreError>;
+
+    /// The earliest time a `pending` robot row may be asked about again:
+    /// `now` for one that may be asked about already, `None` when no row is
+    /// pending.
+    #[allow(dead_code)] // Used by the robot resolver.
+    async fn next_robot_attempt_at(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Option<NaiveDateTime>, StateStoreError>;
+
+    /// As [`Self::next_robot_attempt_at`], for dataset rows.
+    #[allow(dead_code)] // Used by the dataset resolver.
+    async fn next_dataset_attempt_at(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Option<NaiveDateTime>, StateStoreError>;
+
+    /// Record that the server confirmed a robot row as `cloud_robot_id`, and
+    /// dealt with `package`, the saved package the resolver read (sent, or
+    /// not needed). The row is `done` only if no new package was saved for it
+    /// meanwhile; otherwise it stays `pending` with the id, so the new package
+    /// is sent too. Returns whether the row is `done`.
+    #[allow(dead_code)] // Used by the robot resolver.
+    async fn resolve_robot(
+        &self,
+        robot_index: i64,
+        cloud_robot_id: &str,
+        package: Option<&str>,
+    ) -> Result<bool, StateStoreError>;
+
+    /// Record that the server confirmed a dataset row as `cloud_dataset_id`.
+    #[allow(dead_code)] // Used by the dataset resolver.
+    async fn resolve_dataset(
+        &self,
+        dataset_index: i64,
+        cloud_dataset_id: &str,
+    ) -> Result<(), StateStoreError>;
+
+    /// Keep a `pending` robot row waiting until `until`, with `reason` when
+    /// the user must fix something. Without a reason the earlier one stays:
+    /// an outage does not show the user fixed it.
+    #[allow(dead_code)] // Used by the robot resolver.
+    async fn hold_robot(
+        &self,
+        robot_index: i64,
+        reason: Option<ResolutionReason>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError>;
+
+    /// As [`Self::hold_robot`], for a dataset row.
+    #[allow(dead_code)] // Used by the dataset resolver.
+    async fn hold_dataset(
+        &self,
+        dataset_index: i64,
+        reason: Option<ResolutionReason>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError>;
+
+    /// Mark a `pending` robot row refused for good, with `reason`.
+    #[allow(dead_code)] // Used by the robot resolver.
+    async fn fail_robot(
+        &self,
+        robot_index: i64,
+        reason: ResolutionReason,
+    ) -> Result<(), StateStoreError>;
+
+    /// Mark a `pending` dataset row refused for good, with `reason`.
+    #[allow(dead_code)] // Used by the dataset resolver.
+    async fn fail_dataset(
+        &self,
+        dataset_index: i64,
+        reason: ResolutionReason,
+    ) -> Result<(), StateStoreError>;
 
     /// Return the most recently created recordings for a source, ordered by
     /// `recording_index` ascending. Used by the recovery sweep and the
@@ -842,6 +929,101 @@ fn stop_tags_json(tags: &[String]) -> Result<Option<String>, StateStoreError> {
         .map_err(|error| sqlx::Error::Encode(Box::new(error)).into())
 }
 
+/// The two tables of rows the server confirms.
+#[derive(Clone, Copy)]
+enum Table {
+    Robots,
+    Datasets,
+}
+
+impl Table {
+    fn name(self) -> &'static str {
+        match self {
+            Table::Robots => "robots",
+            Table::Datasets => "datasets",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Table::Robots => "robot_index",
+            Table::Datasets => "dataset_index",
+        }
+    }
+}
+
+/// Rows of `table` that are `pending` (`?1`) and due at `?2`.
+fn rows_to_resolve_sql(table: Table) -> String {
+    format!(
+        "SELECT * FROM {table} \
+          WHERE status = ?1 AND (next_attempt_at IS NULL OR next_attempt_at <= ?2) \
+       ORDER BY {key}",
+        table = table.name(),
+        key = table.key(),
+    )
+}
+
+impl SqliteStateStore {
+    async fn next_attempt_at(
+        &self,
+        table: Table,
+        now: NaiveDateTime,
+    ) -> Result<Option<NaiveDateTime>, StateStoreError> {
+        let next = sqlx::query_scalar(&format!(
+            "SELECT MIN(COALESCE(next_attempt_at, ?1)) FROM {} WHERE status = ?2",
+            table.name()
+        ))
+        .bind(now)
+        .bind(ResolutionStatus::Pending.as_str())
+        .fetch_one(&self.read_pool)
+        .await?;
+        Ok(next)
+    }
+
+    async fn hold(
+        &self,
+        table: Table,
+        index: i64,
+        reason: Option<ResolutionReason>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(&format!(
+            "UPDATE {} SET next_attempt_at = ?2, reason = COALESCE(?3, reason) \
+              WHERE {} = ?1 AND status = ?4",
+            table.name(),
+            table.key()
+        ))
+        .bind(index)
+        .bind(until)
+        .bind(reason.map(ResolutionReason::as_str))
+        .bind(ResolutionStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn fail(
+        &self,
+        table: Table,
+        index: i64,
+        reason: ResolutionReason,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(&format!(
+            "UPDATE {} SET status = ?2, reason = ?3, next_attempt_at = NULL \
+              WHERE {} = ?1 AND status = ?4",
+            table.name(),
+            table.key()
+        ))
+        .bind(index)
+        .bind(ResolutionStatus::Failed.as_str())
+        .bind(reason.as_str())
+        .bind(ResolutionStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl StateStore for SqliteStateStore {
     async fn create_recording(
@@ -1018,6 +1200,142 @@ impl StateStore for SqliteStateStore {
             .fetch_optional(&self.read_pool)
             .await?;
         Ok(row.as_ref().map(DatasetRow::from_row).transpose()?)
+    }
+
+    async fn robots_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<RobotRow>, StateStoreError> {
+        let rows = sqlx::query(&rows_to_resolve_sql(Table::Robots))
+            .bind(ResolutionStatus::Pending.as_str())
+            .bind(now)
+            .fetch_all(&self.read_pool)
+            .await?;
+        rows.iter()
+            .map(RobotRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn datasets_to_resolve(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Vec<DatasetRow>, StateStoreError> {
+        let rows = sqlx::query(&rows_to_resolve_sql(Table::Datasets))
+            .bind(ResolutionStatus::Pending.as_str())
+            .bind(now)
+            .fetch_all(&self.read_pool)
+            .await?;
+        rows.iter()
+            .map(DatasetRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn next_robot_attempt_at(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Option<NaiveDateTime>, StateStoreError> {
+        self.next_attempt_at(Table::Robots, now).await
+    }
+
+    async fn next_dataset_attempt_at(
+        &self,
+        now: NaiveDateTime,
+    ) -> Result<Option<NaiveDateTime>, StateStoreError> {
+        self.next_attempt_at(Table::Datasets, now).await
+    }
+
+    async fn resolve_robot(
+        &self,
+        robot_index: i64,
+        cloud_robot_id: &str,
+        package: Option<&str>,
+    ) -> Result<bool, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        let done = sqlx::query(
+            "UPDATE robots \
+                SET cloud_robot_id = ?2, status = ?3, reason = NULL, next_attempt_at = NULL, \
+                    package_path = NULL \
+              WHERE robot_index = ?1 AND status = ?4 AND package_path IS ?5",
+        )
+        .bind(robot_index)
+        .bind(cloud_robot_id)
+        .bind(ResolutionStatus::Done.as_str())
+        .bind(ResolutionStatus::Pending.as_str())
+        .bind(package)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if !done {
+            // A new package was saved meanwhile: keep the id, send it next.
+            sqlx::query(
+                "UPDATE robots SET cloud_robot_id = ?2, next_attempt_at = NULL \
+                  WHERE robot_index = ?1 AND status = ?3",
+            )
+            .bind(robot_index)
+            .bind(cloud_robot_id)
+            .bind(ResolutionStatus::Pending.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(done)
+    }
+
+    async fn resolve_dataset(
+        &self,
+        dataset_index: i64,
+        cloud_dataset_id: &str,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE datasets \
+                SET cloud_dataset_id = ?2, status = ?3, reason = NULL, next_attempt_at = NULL \
+              WHERE dataset_index = ?1 AND status = ?4",
+        )
+        .bind(dataset_index)
+        .bind(cloud_dataset_id)
+        .bind(ResolutionStatus::Done.as_str())
+        .bind(ResolutionStatus::Pending.as_str())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn hold_robot(
+        &self,
+        robot_index: i64,
+        reason: Option<ResolutionReason>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError> {
+        self.hold(Table::Robots, robot_index, reason, until).await
+    }
+
+    async fn hold_dataset(
+        &self,
+        dataset_index: i64,
+        reason: Option<ResolutionReason>,
+        until: NaiveDateTime,
+    ) -> Result<(), StateStoreError> {
+        self.hold(Table::Datasets, dataset_index, reason, until)
+            .await
+    }
+
+    async fn fail_robot(
+        &self,
+        robot_index: i64,
+        reason: ResolutionReason,
+    ) -> Result<(), StateStoreError> {
+        self.fail(Table::Robots, robot_index, reason).await
+    }
+
+    async fn fail_dataset(
+        &self,
+        dataset_index: i64,
+        reason: ResolutionReason,
+    ) -> Result<(), StateStoreError> {
+        self.fail(Table::Datasets, dataset_index, reason).await
     }
 
     async fn recordings_for_source(
@@ -2172,6 +2490,170 @@ mod tests {
         let dataset = store.get_dataset(dataset_index).await.unwrap().unwrap();
         assert_eq!(dataset.description.as_deref(), Some("pick and place"));
         assert_eq!(dataset.tags, vec!["shelf-a".to_string()]);
+    }
+
+    fn robot_spec(instance: i64, package_path: Option<&str>) -> RobotSpec {
+        RobotSpec {
+            org_id: "org-1".into(),
+            name: "arm".into(),
+            shared: false,
+            instance,
+            overwrite_urdf: false,
+            package_path: package_path.map(str::to_string),
+        }
+    }
+
+    fn dataset_spec(name: &str) -> DatasetSpec {
+        DatasetSpec {
+            org_id: "org-1".into(),
+            name: name.into(),
+            shared: false,
+            description: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_pending_rows_whose_wait_ran_out_are_due() {
+        let (store, _tempdir) = open_store().await;
+        let now = Utc::now().naive_utc();
+        let later = now + chrono::Duration::minutes(5);
+        let due = store.connect_robot(&robot_spec(0, None)).await.unwrap();
+        let held = store.connect_robot(&robot_spec(1, None)).await.unwrap();
+        let done = store.connect_robot(&robot_spec(2, None)).await.unwrap();
+        store
+            .hold_robot(
+                held.robot_index,
+                Some(ResolutionReason::RobotArchived),
+                later,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .resolve_robot(done.robot_index, "cloud-robot-2", None)
+            .await
+            .unwrap());
+
+        let indexes =
+            |rows: Vec<RobotRow>| rows.iter().map(|row| row.robot_index).collect::<Vec<_>>();
+        assert_eq!(
+            indexes(store.robots_to_resolve(now).await.unwrap()),
+            vec![due.robot_index]
+        );
+        assert_eq!(
+            indexes(store.robots_to_resolve(later).await.unwrap()),
+            vec![due.robot_index, held.robot_index]
+        );
+        assert_eq!(store.next_robot_attempt_at(now).await.unwrap(), Some(now));
+
+        store
+            .hold_robot(due.robot_index, None, later)
+            .await
+            .unwrap();
+        assert_eq!(store.next_robot_attempt_at(now).await.unwrap(), Some(later));
+        store
+            .fail_robot(due.robot_index, ResolutionReason::Rejected)
+            .await
+            .unwrap();
+        assert!(store
+            .resolve_robot(held.robot_index, "cloud-robot-1", None)
+            .await
+            .unwrap());
+        assert_eq!(store.next_robot_attempt_at(now).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_hold_without_a_reason_keeps_the_earlier_one() {
+        let (store, _tempdir) = open_store().await;
+        let later = Utc::now().naive_utc() + chrono::Duration::minutes(5);
+        let dataset_index = store
+            .select_dataset(&dataset_spec("warehouse"))
+            .await
+            .unwrap();
+        store
+            .hold_dataset(dataset_index, Some(ResolutionReason::NotInOrg), later)
+            .await
+            .unwrap();
+
+        // An outage after it does not show the user fixed it.
+        store
+            .hold_dataset(dataset_index, None, later)
+            .await
+            .unwrap();
+
+        let dataset = store.get_dataset(dataset_index).await.unwrap().unwrap();
+        assert_eq!(dataset.reason, Some(ResolutionReason::NotInOrg));
+        assert_eq!(dataset.status, ResolutionStatus::Pending);
+
+        store
+            .resolve_dataset(dataset_index, "cloud-dataset-1")
+            .await
+            .unwrap();
+        let dataset = store.get_dataset(dataset_index).await.unwrap().unwrap();
+        assert_eq!(
+            (dataset.status, dataset.reason, dataset.next_attempt_at),
+            (ResolutionStatus::Done, None, None)
+        );
+        assert_eq!(dataset.cloud_dataset_id.as_deref(), Some("cloud-dataset-1"));
+    }
+
+    #[tokio::test]
+    async fn a_package_saved_while_the_server_confirms_the_robot_is_sent_too() {
+        let (store, _tempdir) = open_store().await;
+        let robot_index = store
+            .connect_robot(&robot_spec(0, Some("/saved/first.zip")))
+            .await
+            .unwrap()
+            .robot_index;
+        // Connected again, with a new package, while the first is being sent.
+        store
+            .connect_robot(&robot_spec(0, Some("/saved/second.zip")))
+            .await
+            .unwrap();
+
+        let done = store
+            .resolve_robot(robot_index, "cloud-robot-1", Some("/saved/first.zip"))
+            .await
+            .unwrap();
+
+        assert!(!done);
+        let robot = store.get_robot(robot_index).await.unwrap().unwrap();
+        assert_eq!(robot.status, ResolutionStatus::Pending);
+        assert_eq!(robot.cloud_robot_id.as_deref(), Some("cloud-robot-1"));
+        assert_eq!(robot.package_path.as_deref(), Some("/saved/second.zip"));
+
+        assert!(store
+            .resolve_robot(robot_index, "cloud-robot-1", Some("/saved/second.zip"))
+            .await
+            .unwrap());
+        let robot = store.get_robot(robot_index).await.unwrap().unwrap();
+        assert_eq!(robot.status, ResolutionStatus::Done);
+        assert_eq!(robot.package_path, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_row_connected_again_is_asked_about_again() {
+        let (store, _tempdir) = open_store().await;
+        let dataset_index = store
+            .select_dataset(&dataset_spec("warehouse"))
+            .await
+            .unwrap();
+        store
+            .fail_dataset(dataset_index, ResolutionReason::SharedNotAllowed)
+            .await
+            .unwrap();
+
+        store
+            .select_dataset(&dataset_spec("warehouse"))
+            .await
+            .unwrap();
+
+        let due = store
+            .datasets_to_resolve(Utc::now().naive_utc())
+            .await
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].status, ResolutionStatus::Pending);
     }
 
     #[tokio::test]
