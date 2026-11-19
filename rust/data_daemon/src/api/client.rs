@@ -108,7 +108,6 @@ impl ApiClientError {
 
     /// True when the robot upsert was refused because the robot is archived
     /// (409 `ROBOT_ARCHIVED`). Unarchiving it on the dashboard lifts this.
-    #[allow(dead_code)] // Used by the robot resolver.
     pub fn is_robot_archived(&self) -> bool {
         self.error_type(StatusCode::CONFLICT).as_deref() == Some("ROBOT_ARCHIVED")
     }
@@ -464,7 +463,6 @@ impl ApiClient {
     /// An upsert by name: it returns the robot of that name, creating it if
     /// there is none, and registers `instance` on it. The same call
     /// `nc.connect_robot` makes online.
-    #[allow(dead_code)] // Used by the robot resolver.
     pub async fn robot_upsert(
         &self,
         org_id: &str,

@@ -103,6 +103,17 @@ pub enum DaemonEvent {
         /// Local recording index the event applies to.
         recording_index: i64,
     },
+    /// A process connected a robot instance: its row is new, or due to be
+    /// checked again with the server.
+    RobotConnected {
+        /// The robot row's index.
+        robot_index: i64,
+    },
+    /// The server confirmed a robot row; its server id is set.
+    RobotResolved {
+        /// The robot row's index.
+        robot_index: i64,
+    },
     /// A process selected a dataset: its row is new, or due to be checked
     /// again with the server.
     DatasetSelected {

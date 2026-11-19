@@ -20,8 +20,8 @@
 //! never heard of it. [`notify_backend`] explains why this notifier, not the
 //! cancel notifier, owns that case.
 //!
-//! A recording with a dataset row is gated on it: it is started only once
-//! the server has confirmed the row, with the server's id. This notifier
+//! A recording with a robot or dataset row is gated on it: it is started only
+//! once the server has confirmed the row, with the server's id. This notifier
 //! knows nothing about how rows are confirmed: every
 //! [`START_RESWEEP`](crate::intervals::START_RESWEEP) it queues again the
 //! recordings whose start was never sent and whose row is confirmed. The
@@ -193,8 +193,27 @@ async fn notify_backend(
         return;
     }
 
-    // The gate: a recording with a dataset row waits until the server has
-    // confirmed it. The re-check brings it back here once it is.
+    // The gate: a recording with a robot or dataset row waits until the
+    // server has confirmed it. The re-check brings it back here once it is.
+    let robot_id = match row.robot_index {
+        Some(robot_index) => match store.get_robot(robot_index).await {
+            Ok(Some(robot)) if robot.status == ResolutionStatus::Done => robot.cloud_robot_id,
+            Ok(Some(_)) => {
+                tracing::debug!(
+                    recording_index,
+                    robot_index,
+                    "robot not confirmed by the server yet; start waits for it",
+                );
+                return;
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, recording_index, "failed to read the recording's robot");
+                return;
+            }
+        },
+        None => row.robot_id,
+    };
     let dataset_id = match row.dataset_index {
         Some(dataset_index) => match store.get_dataset(dataset_index).await {
             Ok(Some(dataset)) if dataset.status == ResolutionStatus::Done => {
@@ -233,7 +252,7 @@ async fn notify_backend(
         );
         return;
     };
-    let Some(robot_id) = row.robot_id else {
+    let Some(robot_id) = robot_id else {
         tracing::warn!(
             recording_index,
             "recording has no robot_id at start time; skipping backend notify",
@@ -490,6 +509,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recording_waits_for_its_robot_and_starts_with_its_server_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/start"))
+            .and(body_partial_json(
+                serde_json::json!({ "robot_id": "cloud-robot-1", "dataset_id": "cloud-dataset-1" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "rec-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (store, _dir) = open_store().await;
+        let robot_index = store
+            .connect_robot(&data_daemon_shared::RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 7,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .unwrap()
+            .robot_index;
+        let dataset_index = select_warehouse(&store).await;
+        store
+            .resolve_dataset(dataset_index, "cloud-dataset-1")
+            .await
+            .unwrap();
+        let index = seed_recording_with_rows(&store, Some(robot_index), dataset_index).await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_start_notifier_every(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+            RESWEEP,
+        );
+        sleep(Duration::from_millis(200)).await;
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "nothing is started before the robot is confirmed"
+        );
+
+        assert!(store
+            .resolve_robot(robot_index, "cloud-robot-1", None)
+            .await
+            .unwrap());
+        timeout(Duration::from_secs(3), async {
+            while store
+                .get_recording(index)
+                .await
+                .unwrap()
+                .unwrap()
+                .recording_id
+                .is_none()
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the confirmed robot lets the recording start");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
     async fn recordings_whose_dataset_is_confirmed_offline_start_once_online() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -612,6 +705,10 @@ mod tests {
             .await
             .unwrap()
             .robot_index;
+        assert!(store
+            .resolve_robot(robot_index, "cloud-robot-1", None)
+            .await
+            .unwrap());
         let dataset_index = select_warehouse(&store).await;
         store
             .resolve_dataset(dataset_index, "cloud-dataset-1")

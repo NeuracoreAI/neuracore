@@ -179,12 +179,15 @@ pub(crate) enum Failure {
 /// A 403 is final only when the server says the account may not create
 /// shared datasets (`SHARED_UPLOAD_NOT_ALLOWED`); any other 403 is the
 /// organization and role check, which logging in with an account that can
-/// record there fixes. A rejected or missing API key can be fixed by logging
-/// in again; any other failure to exchange the key is the server's and
-/// passes.
+/// record there fixes. An archived robot (409 `ROBOT_ARCHIVED`) can be
+/// unarchived. A rejected or missing API key can be fixed by logging in
+/// again; any other failure to exchange the key is the server's and passes.
 pub(crate) fn classify(error: &ApiClientError) -> Failure {
     if error.is_shared_upload_refused() {
         return Failure::Refused(ResolutionReason::SharedNotAllowed);
+    }
+    if error.is_robot_archived() {
+        return Failure::Blocked(ResolutionReason::RobotArchived);
     }
     match error {
         ApiClientError::Status { status, .. } => match *status {
@@ -274,6 +277,14 @@ mod tests {
         assert_eq!(
             classify(&shared_refused),
             Failure::Refused(ResolutionReason::SharedNotAllowed)
+        );
+        let archived = ApiClientError::Status {
+            status: StatusCode::CONFLICT,
+            body: serde_json::json!({ "detail": { "error_type": "ROBOT_ARCHIVED" } }).to_string(),
+        };
+        assert_eq!(
+            classify(&archived),
+            Failure::Blocked(ResolutionReason::RobotArchived)
         );
         for code in [400, 409, 422] {
             assert_eq!(
