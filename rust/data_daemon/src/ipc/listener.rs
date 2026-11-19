@@ -95,6 +95,9 @@ pub struct StatusSources {
     /// The backend client, to name the organisations a reply is about.
     /// `None` in the offline profile or when it could not be built.
     pub client: Option<Arc<ApiClient>>,
+    /// How long the reaper keeps a recording that can never upload, or
+    /// `None` when the reaper is off.
+    pub failed_retention: Option<Duration>,
 }
 
 /// How long a status query waits for the backend to name organisations. A
@@ -681,7 +684,7 @@ async fn status_reply(
     store: &SqliteStateStore,
     sources: &StatusSources,
 ) -> Result<StatusReply, StateStoreError> {
-    let counts = store.status_counts().await?;
+    let counts = store.status_counts(sources.failed_retention).await?;
     let org_id = read_org_id_from_config_async(&sources.config_path).await;
     Ok(StatusReply {
         nonce: request.nonce,
@@ -1101,6 +1104,7 @@ mod tests {
             fallback_org_id: fallback_org_id.map(str::to_string),
             reachable,
             client: None,
+            failed_retention: None,
         };
 
         status_reply(StatusRequest { nonce: 9 }, &store, &sources)
@@ -1146,6 +1150,7 @@ mod tests {
                 fallback_org_id: None,
                 reachable,
                 client: Some(Arc::new(client.unwrap())),
+                failed_retention: None,
             }
         }
 
@@ -1153,6 +1158,7 @@ mod tests {
             ReasonCount {
                 reason: resolution_detail::NOT_IN_ORG.into(),
                 recordings: 1,
+                deleted_within_seconds: None,
                 subject: None,
                 org_id: Some(org_id.into()),
                 org_name: None,
@@ -1372,6 +1378,7 @@ mod tests {
             fallback_org_id: Some("org-1".into()),
             reachable,
             client: None,
+            failed_retention: None,
         };
         let service = format!(
             "neuracore/data_daemon/test/status-{}-{}",

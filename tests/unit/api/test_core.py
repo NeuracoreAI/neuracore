@@ -865,6 +865,8 @@ def recording_robot(monkeypatch):
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
     monkeypatch.setattr(recording_context, "ensure_daemon_running", lambda: None)
     monkeypatch.setattr(api_core, "_get_robot", lambda *_args: robot)
+    # Its rows are made up, not kept by the (fake) daemon.
+    monkeypatch.setattr(api_core, "_require_daemon_rows", lambda *_args: None)
     monkeypatch.setattr(robot, "is_recording", lambda: True)
     monkeypatch.setattr(
         GlobalSingleton(),
