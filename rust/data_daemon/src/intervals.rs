@@ -60,5 +60,15 @@ pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 /// re-sent on this timer, since they are not idempotent.
 pub const NOTIFY_RESWEEP: Duration = Duration::from_secs(30);
 
+/// How long a robot or dataset row blocked on something the user must fix (an
+/// archived robot, a rejected API key) waits before the server is asked about
+/// it again. Also the longest a resolver sleeps between passes while a row is
+/// pending.
+pub const BLOCKED_ID_RETRY: Duration = Duration::from_secs(5 * 60);
+
+/// How long a robot or dataset row waits after an outage or a 5xx before the
+/// server is asked about it again.
+pub const PASSING_ID_RETRY: Duration = Duration::from_secs(20);
+
 /// Connection health probe cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);

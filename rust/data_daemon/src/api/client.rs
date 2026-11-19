@@ -116,7 +116,6 @@ impl ApiClientError {
     /// True when creating a shared dataset was refused because the account
     /// may not upload shared data (403 `SHARED_UPLOAD_NOT_ALLOWED`). Any other
     /// 403 is the organisation and role check.
-    #[allow(dead_code)] // Used by the dataset resolver.
     pub fn is_shared_upload_refused(&self) -> bool {
         self.error_type(StatusCode::FORBIDDEN).as_deref() == Some("SHARED_UPLOAD_NOT_ALLOWED")
     }
@@ -491,7 +490,6 @@ impl ApiClient {
 
     /// `GET /org/{org}/datasets/search/by-name?name=`: the dataset of that
     /// name in the org, or `None` when there is none.
-    #[allow(dead_code)] // Used by the dataset resolver.
     pub async fn dataset_by_name(
         &self,
         org_id: &str,
@@ -516,7 +514,6 @@ impl ApiClient {
 
     /// `POST /org/{org}/datasets`: create a dataset, or `None` when one of
     /// that name already exists (409).
-    #[allow(dead_code)] // Used by the dataset resolver.
     pub async fn dataset_create(
         &self,
         org_id: &str,
