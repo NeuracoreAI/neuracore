@@ -129,6 +129,10 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         patch(
             "neuracore.importer.lerobot_importer.nc.stop_recording"
         ) as stop_recording,
+        patch(
+            "neuracore.importer.lerobot_importer.nc.get_cloud_recording_id",
+            return_value="recording-1",
+        ),
     ):
         importer.import_item(ImportItem(index=0))
 
