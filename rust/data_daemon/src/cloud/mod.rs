@@ -30,6 +30,7 @@ pub use coordinators::dataset_resolver::spawn_dataset_resolver;
 pub use coordinators::progress::{spawn_progress_reporter, ProgressReporterHandle};
 pub use coordinators::registration::{spawn_registration, RegistrationHandle};
 pub use coordinators::resolution::ResolverHandle;
+pub use coordinators::robot_resolver::spawn_robot_resolver;
 pub use coordinators::status::{spawn_status_updater, StatusUpdate, StatusUpdaterHandle};
 pub use coordinators::uploader::{spawn_uploader, UploaderHandle};
 pub use notifiers::notifier::NotifierHandle;

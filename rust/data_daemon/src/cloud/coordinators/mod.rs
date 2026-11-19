@@ -12,6 +12,7 @@ pub mod dataset_resolver;
 pub mod progress;
 pub mod registration;
 pub mod resolution;
+pub mod robot_resolver;
 pub mod status;
 mod upload_transfer;
 pub mod uploader;
