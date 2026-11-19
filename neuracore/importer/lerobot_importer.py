@@ -82,7 +82,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             storage_limit: If set, pause when disk usage reaches this (bytes).
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
-                to log target joint actions as end-effector poses for debugging.
+                to log target joint actions as end-effector target poses
+                for debugging.
             robot_id: Neuracore robot ID used for instance allocation/cleanup.
         """
         super().__init__(

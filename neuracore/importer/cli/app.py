@@ -112,8 +112,8 @@ def import_dataset(
         None,
         "--debug-target-ee-frame",
         help=(
-            "If provided, log JOINT_TARGET_POSITIONS as END_EFFECTOR_POSES "
-            "using this end-effector frame name."
+            "If provided, log JOINT_TARGET_POSITIONS as "
+            "END_EFFECTOR_TARGET_POSES using this end-effector frame name."
         ),
     ),
 ) -> None:

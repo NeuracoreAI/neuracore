@@ -62,6 +62,7 @@ def _import_config(recording, dataset_name: str, robot_name: str):
         DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: "open_amount",
         DataType.POSES: "pose",
         DataType.END_EFFECTOR_POSES: "pose",
+        DataType.END_EFFECTOR_TARGET_POSES: "pose",
         DataType.CUSTOM_1D: "data",
         DataType.LANGUAGE: "text",
         # The importer fills frame and points from the export attachments.
@@ -85,7 +86,11 @@ def _import_config(recording, dataset_name: str, robot_name: str):
         }
         if DataType(kind) == DataType.DEPTH_IMAGES:
             mappings[kind.value]["format"] = {"depth_scale_m": depth_scale_m}
-    for kind in (DataType.POSES, DataType.END_EFFECTOR_POSES):
+    for kind in (
+        DataType.POSES,
+        DataType.END_EFFECTOR_POSES,
+        DataType.END_EFFECTOR_TARGET_POSES,
+    ):
         if kind.value in mappings:
             mappings[kind.value]["format"] = {
                 "pose_type": "POSITION_ORIENTATION",

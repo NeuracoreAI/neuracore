@@ -191,6 +191,20 @@ data_import_config:
           start: 0
           end: 6
 
+  END_EFFECTOR_TARGET_POSES:
+    source: action # path to the commanded end-effector pose in the input dataset
+    format:
+      pose_type: POSITION_ORIENTATION  # MATRIX | POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION # QUATERNION | EULER | MATRIX | AXIS_ANGLE
+        quaternion_order: XYZW # XYZW | WXYZ
+        angle_units: RADIANS
+    mapping:
+      - name: end_effector_target_pose
+        index_range:
+          start: 0
+          end: 7
+
   LANGUAGE:
     format:
       language_type: BYTES # STRING | BYTES
