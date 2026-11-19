@@ -235,11 +235,11 @@ def http_time_snapshot() -> tuple[int, float]:
     )
 
 
-_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 _TRANSIENT_RETRY = _RETRY.new(
     status=2,  # retry transient backend statuses twice, so three attempts
-    status_forcelist=_RETRYABLE_STATUS_CODES,
+    status_forcelist=RETRYABLE_STATUS_CODES,
     raise_on_status=False,  # return the final response rather than raising
 )
 

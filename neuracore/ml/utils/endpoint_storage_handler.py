@@ -32,21 +32,10 @@ class EndpointStorageHandler(UploadStorageMixin):
                     f"Endpoint {self.endpoint_id} not found or access denied."
                 )
 
-    def _get_upload_url(self, filepath: str, content_type: str) -> str:
-        """Get a signed upload URL for endpoint logs."""
+    def _upload_start_url(self) -> str:
+        """Return the endpoint's v2 upload start route."""
         assert self.endpoint_id is not None, "Endpoint ID not provided"
-        session = thread_local_session(retry_transient=True)
-        url = (
-            f"{API_URL}/org/{self.org_id}/models/endpoints/{self.endpoint_id}"
-            "/upload-url"
-        )
-        params = {"filepath": filepath, "content_type": content_type}
-        response = session.get(url, headers=get_auth().get_headers(), params=params)
-        if response.status_code != 200:
-            raise ValueError(
-                f"Failed to get upload URL for {filepath}: {response.text}"
-            )
-        return response.json()["url"]
+        return f"{self._upload_base_url()}/models/endpoints/{self.endpoint_id}/uploads"
 
     def report_endpoint_error(self, error: str) -> None:
         """Report endpoint startup/runtime failures to cloud metadata."""

@@ -10,13 +10,16 @@ import torch
 from neuracore_types import TrainingProgress
 
 from neuracore.core.const import API_URL
-from neuracore.ml.utils import upload_storage_mixin
+from neuracore.core.utils import multipart_upload
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 ORG_ID = "test-org-id"
 JOB_ID = "test-job-id"
 BASE_JOB_URL = f"{API_URL}/org/{ORG_ID}/training/jobs/{JOB_ID}"
 SIGNED_URL = "https://storage.example.com/signed-url"
+START_URL = f"{API_URL}/v2/org/{ORG_ID}/training/jobs/{JOB_ID}/uploads"
+COMPLETE_URL = f"{API_URL}/v2/org/{ORG_ID}/uploads/complete"
+PART_URL = "https://storage.example.com/part-url"
 INPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"joints": {"0": {"name": "j0"}}}}
 OUTPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"actions": {"0": {"name": "a0"}}}}
 
@@ -24,7 +27,7 @@ OUTPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"actions": {"0": {"name": "a0"}
 @pytest.fixture(autouse=True)
 def _no_real_sleeps(monkeypatch):
     """Skip real backoff sleeps so retry-triggering tests run fast."""
-    monkeypatch.setattr(upload_storage_mixin.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(multipart_upload.time, "sleep", lambda *_: None)
 
 
 @pytest.fixture
@@ -34,6 +37,20 @@ def mock_auth(monkeypatch):
     mock.get_headers.return_value = {"Authorization": "Bearer test-token"}
     monkeypatch.setattr(
         "neuracore.ml.utils.training_storage_handler.get_auth", lambda: mock
+    )
+    monkeypatch.setattr(multipart_upload, "get_auth", lambda: mock)
+
+
+def register_upload_routes(requests_mock):
+    """Register the v2 start and complete routes for one-part uploads."""
+    requests_mock.post(COMPLETE_URL, status_code=204)
+    return requests_mock.post(
+        START_URL,
+        json={
+            "upload_id": "upload-1",
+            "part_size_bytes": 16 * 1024 * 1024,
+            "part_urls": {"1": PART_URL},
+        },
     )
 
 
@@ -115,43 +132,6 @@ class TestInit:
         assert handler_with_default_dir.local_dir == Path("./output")
 
 
-class TestGetUploadUrl:
-    def test_get_upload_url_returns_signed_url_from_response(
-        self, handler, requests_mock
-    ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url",
-            json={"url": SIGNED_URL},
-            status_code=200,
-        )
-        url = handler._get_upload_url("checkpoints/ckpt.pt", "application/octet-stream")
-        assert url == SIGNED_URL
-
-    def test_get_upload_url_raises_value_error_when_response_is_not_200(
-        self, handler, requests_mock
-    ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url",
-            json={"detail": "Forbidden"},
-            status_code=403,
-        )
-        with pytest.raises(ValueError, match="checkpoints/ckpt.pt"):
-            handler._get_upload_url("checkpoints/ckpt.pt", "application/octet-stream")
-
-    def test_get_upload_url_sends_filepath_and_content_type_as_query_params(
-        self, handler, requests_mock
-    ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url",
-            json={"url": SIGNED_URL},
-            status_code=200,
-        )
-        handler._get_upload_url("logs/train.log", "text/plain")
-        qs = requests_mock.last_request.qs
-        assert qs["filepath"] == ["logs/train.log"]
-        assert qs["content_type"] == ["text/plain"]
-
-
 class TestGetCheckpointDownloadUrl:
     def test_get_checkpoint_download_url_calls_correct_endpoint_and_returns_signed_url(
         self, handler, requests_mock
@@ -192,10 +172,8 @@ class TestSaveCheckpoint:
     def test_save_checkpoint_removes_local_file_after_successful_cloud_upload(
         self, handler, requests_mock, tmp_path
     ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
-        requests_mock.put(SIGNED_URL, status_code=200)
+        register_upload_routes(requests_mock)
+        requests_mock.put(PART_URL, status_code=200)
 
         handler.save_checkpoint({"epoch": 2}, Path("checkpoint_2.pt"))
         handler.wait_for_pending_uploads()
@@ -207,10 +185,8 @@ class TestSaveCheckpoint:
     def test_save_checkpoint_keeps_local_file_when_cloud_upload_fails(
         self, handler, requests_mock, tmp_path
     ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
-        requests_mock.put(SIGNED_URL, status_code=500, text="Server Error")
+        register_upload_routes(requests_mock)
+        requests_mock.put(PART_URL, status_code=500, text="Server Error")
 
         handler.save_checkpoint({"epoch": 3}, Path("checkpoint_3.pt"))
         handler.wait_for_pending_uploads()
@@ -249,9 +225,7 @@ class TestSaveCheckpointConcurrencyGuard:
     def test_second_save_to_same_path_waits_for_first_upload_to_finish(
         self, handler, requests_mock, tmp_path
     ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
+        register_upload_routes(requests_mock)
         first_upload_started = threading.Event()
         release_first_upload = threading.Event()
         call_count = {"n": 0}
@@ -264,7 +238,7 @@ class TestSaveCheckpointConcurrencyGuard:
             context.status_code = 200
             return ""
 
-        requests_mock.put(SIGNED_URL, text=slow_put)
+        requests_mock.put(PART_URL, text=slow_put)
 
         path = Path("checkpoint_latest.pt")
         handler.save_checkpoint({"epoch": 1}, path)
@@ -300,9 +274,7 @@ class TestSaveCheckpointConcurrencyGuard:
     def test_saves_to_different_paths_do_not_block_each_other(
         self, handler, requests_mock
     ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
+        register_upload_routes(requests_mock)
         release_upload = threading.Event()
 
         def slow_put(request, context):
@@ -310,7 +282,7 @@ class TestSaveCheckpointConcurrencyGuard:
             context.status_code = 200
             return ""
 
-        requests_mock.put(SIGNED_URL, text=slow_put)
+        requests_mock.put(PART_URL, text=slow_put)
 
         # First save's upload blocks on the background worker until released.
         handler.save_checkpoint({"epoch": 1}, Path("checkpoint_1.pt"))
@@ -336,9 +308,7 @@ class TestSaveCheckpointConcurrencyGuard:
     def test_delete_waits_for_pending_upload_of_same_path_before_deleting(
         self, handler, requests_mock, tmp_path
     ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
+        register_upload_routes(requests_mock)
         requests_mock.delete(
             f"{BASE_JOB_URL}/checkpoints/checkpoint_1.pt", status_code=200
         )
@@ -351,7 +321,7 @@ class TestSaveCheckpointConcurrencyGuard:
             context.status_code = 200
             return ""
 
-        requests_mock.put(SIGNED_URL, text=slow_put)
+        requests_mock.put(PART_URL, text=slow_put)
 
         path = Path("checkpoint_1.pt")
         handler.save_checkpoint({"epoch": 1}, path)
@@ -375,10 +345,8 @@ class TestSaveCheckpointConcurrencyGuard:
     def test_wait_for_pending_uploads_drains_and_does_not_raise_on_failure(
         self, handler, requests_mock, tmp_path
     ):
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
-        requests_mock.put(SIGNED_URL, status_code=500, text="Server Error")
+        register_upload_routes(requests_mock)
+        requests_mock.put(PART_URL, status_code=500, text="Server Error")
 
         handler.save_checkpoint({"epoch": 1}, Path("checkpoint_1.pt"))
 
@@ -517,10 +485,8 @@ class TestSaveModelArtifacts:
         mock_model = MagicMock()
         output_dir = Path("run_1")
 
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
-        requests_mock.put(SIGNED_URL, status_code=200)
+        start = register_upload_routes(requests_mock)
+        requests_mock.put(PART_URL, status_code=200)
         promote_mock = requests_mock.post(
             f"{BASE_JOB_URL}/promote-upload", json={}, status_code=200
         )
@@ -548,9 +514,7 @@ class TestSaveModelArtifacts:
         assert len(put_requests) == 2
         assert promote_mock.call_count == 2
         upload_filepaths = sorted(
-            r.qs["filepath"][0]
-            for r in requests_mock.request_history
-            if r.method == "GET" and "/upload-url" in r.url
+            request.json()["filepath"] for request in start.request_history
         )
         assert upload_filepaths == ["config.json.publishing", "model.pt.publishing"]
 
@@ -560,10 +524,8 @@ class TestSaveModelArtifacts:
         mock_model = MagicMock()
         output_dir = Path("run_1")
 
-        requests_mock.get(
-            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
-        )
-        requests_mock.put(SIGNED_URL, status_code=200)
+        start = register_upload_routes(requests_mock)
+        requests_mock.put(PART_URL, status_code=200)
         promote_mock = requests_mock.post(
             f"{BASE_JOB_URL}/promote-upload", json={}, status_code=200
         )
@@ -586,13 +548,8 @@ class TestSaveModelArtifacts:
             handler.save_model_artifacts(mock_model, output_dir)
         handler.wait_for_pending_uploads()
 
-        upload_gets = [
-            r
-            for r in requests_mock.request_history
-            if r.method == "GET" and "/upload-url" in r.url
-        ]
-        assert len(upload_gets) == 1
-        assert upload_gets[0].qs["filepath"] == ["model.nc.zip.publishing"]
+        assert start.call_count == 1
+        assert start.last_request.json()["filepath"] == "model.nc.zip.publishing"
         assert promote_mock.call_count == 1
         assert promote_mock.last_request.qs["filepath"] == ["model.nc.zip"]
 

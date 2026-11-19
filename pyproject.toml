@@ -55,6 +55,7 @@ dependencies = [
     "aiohttp>=3.12.0",
     "pyee==13.0.0",
     "filelock>=3.0.0",
+    "google-crc32c>=1.5.0",
     "omegaconf",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
