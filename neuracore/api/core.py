@@ -26,7 +26,7 @@ from neuracore.data_daemon import bridge
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 from ..core.auth import get_auth
-from ..core.exceptions import RobotError, ServerUnreachableError
+from ..core.exceptions import DatasetError, RobotError, ServerUnreachableError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
@@ -333,8 +333,9 @@ def start_recording(
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided,
-            if a recording is already in progress, or if no active dataset
-            has been set.
+            if a recording is already in progress, if no active dataset
+            has been set, or if the data daemon no longer keeps the robot.
+        DatasetError: If the data daemon no longer keeps the dataset.
     """
     robot = _get_robot(robot_name, instance)
     active_dataset = GlobalSingleton()._active_dataset
@@ -370,7 +371,42 @@ def start_recording(
                 f"Active dataset: '{active_dataset.name}'."
             )
     assert active_dataset.dataset_index is not None
+    _require_daemon_rows(robot, active_dataset.dataset_index, active_dataset.name)
     robot.start_recording(active_dataset.dataset_index, timestamp=timestamp)
+
+
+def _require_daemon_rows(robot: Robot, dataset_index: int, dataset_name: str) -> None:
+    """Raise if the data daemon no longer keeps the robot's or dataset's row.
+
+    The daemon deletes a robot or dataset nothing has used for 7 days, and
+    ``neuracore data-daemon reset`` deletes them all; a script that held on to
+    one meanwhile must connect or select it again.
+    """
+    # The recording needs the daemon anyway; one that stopped is started
+    # again first, so the check below is answered at once.
+    ensure_daemon_running()
+    try:
+        robot_gone = (
+            robot._robot_index is not None
+            and bridge.robot_row_state(robot._robot_index) is None
+        )
+        dataset_gone = bridge.dataset_row_state(dataset_index) is None
+    except (bridge.RegistryUnavailableError, bridge.RegistryRefusedError):
+        # Only a missing row stops the recording: one the daemon could not
+        # read is left to the recording itself.
+        return
+    if robot_gone:
+        raise RobotError(
+            f"The data daemon no longer keeps robot '{robot.name}' instance "
+            f"{robot.instance}: it was not used for 7 days, or the daemon was "
+            "reset. Connect it again with nc.connect_robot."
+        )
+    if dataset_gone:
+        raise DatasetError(
+            f"The data daemon no longer keeps dataset '{dataset_name}': it was "
+            "not used for 7 days, or the daemon was reset. Select it again with "
+            "nc.get_dataset or nc.create_dataset."
+        )
 
 
 def _normalize_stop_tags(tags: list[str] | None) -> list[str]:

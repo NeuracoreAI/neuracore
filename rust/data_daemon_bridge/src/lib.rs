@@ -631,7 +631,9 @@ fn daemon_version(py: Python<'_>, timeout_s: f64) -> PyResult<Option<String>> {
 /// `"offline_profile"`),
 /// `"api_key_saved"`, `"org_selected"`, `"waiting"` and `"uploading"` (each a
 /// dict of `"recordings"` and `"bytes"` left to upload), `"blocked"` and
-/// `"failed"` (lists of dicts of `"reason"`, `"recordings"`, `"subject"`: a
+/// `"failed"` (lists of dicts of `"reason"`, `"recordings"`,
+/// `"deleted_within_seconds"`: the daemon deletes all of those recordings
+/// within that many seconds, or `None` when it will not, `"subject"`: a
 /// dict of `"kind"` (`"robot"` or `"dataset"`) and `"name"` for the robot or
 /// dataset the reason is about, or `None`, `"org_id"`: the organization a
 /// `"not_in_org"` reason is about, or `None`, and `"org_name"`: its name when
@@ -659,6 +661,7 @@ fn daemon_status<'py>(py: Python<'py>, timeout_s: f64) -> PyResult<Option<Bound<
                     let dict = PyDict::new(py);
                     dict.set_item("reason", reason.reason)?;
                     dict.set_item("recordings", reason.recordings)?;
+                    dict.set_item("deleted_within_seconds", reason.deleted_within_seconds)?;
                     let subject = match reason.subject {
                         Some(subject) => {
                             let named = PyDict::new(py);

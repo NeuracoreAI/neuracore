@@ -12,6 +12,7 @@ from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth
 from neuracore.core.exceptions import RobotError, ServerUnreachableError
 from neuracore.core.robot import get_robot
+from neuracore.data_daemon import bridge
 
 
 @pytest.fixture
@@ -154,3 +155,35 @@ def test_a_dataset_read_from_the_server_is_selected_through_the_daemon(
         org_id="test-org-id", cloud_dataset_id="cloud-dataset-9"
     )
     start_recording.assert_called_once_with(dataset.dataset_index, timestamp=None)
+
+
+def test_recording_raises_once_the_daemon_has_deleted_the_robot_or_dataset(
+    temp_config_dir, mock_auth_requests, reset_neuracore, fake_registry
+):
+    nc.login("test_api_key")
+    robot = nc.connect_robot("arm")
+    nc.create_dataset("warehouse")
+    # Unused for 7 days: the reaper deletes the robot's row.
+    fake_registry._names.pop(robot._robot_index)
+
+    with pytest.raises(RobotError, match="Connect it again"):
+        nc.start_recording()
+
+
+def test_recording_starts_when_the_daemon_cannot_read_a_row(
+    temp_config_dir, mock_auth_requests, reset_neuracore, fake_registry, monkeypatch
+):
+    nc.login("test_api_key")
+    robot = nc.connect_robot("arm")
+    nc.create_dataset("warehouse")
+    start_recording = Mock()
+    monkeypatch.setattr(robot, "start_recording", start_recording)
+
+    def unreadable(robot_index):
+        raise bridge.RegistryRefusedError("the daemon could not read its state")
+
+    monkeypatch.setattr(bridge, "robot_row_state", unreadable)
+
+    nc.start_recording()
+
+    start_recording.assert_called_once()
