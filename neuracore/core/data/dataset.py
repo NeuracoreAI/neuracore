@@ -20,10 +20,12 @@ from neuracore_types import (
 from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
-from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.config.get_current_org import get_current_org, get_registry_org
+from neuracore.core.daemon_rows import wait_for_dataset_id
 from neuracore.core.data.prefetch import DEFAULT_CONCURRENT_PREFETCH_REQUESTS
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.data_daemon import bridge
 
 from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
@@ -49,10 +51,12 @@ class Dataset:
     """Class representing a dataset in Neuracore."""
 
     deleted = False
+    _id: str | None
+    _dataset_index: int | None
 
     def __init__(
         self,
-        id: str,
+        id: str | None,
         org_id: str,
         name: str,
         size_bytes: int,
@@ -61,6 +65,7 @@ class Dataset:
         is_shared: bool,
         description: str | None = None,
         recordings: list[dict] | list[Recording] | None = None,
+        dataset_index: int | None = None,
     ):
         """Initialize a Dataset instance.
 
@@ -75,6 +80,9 @@ class Dataset:
             description: Description of the dataset.
             recordings: List of recording dictionaries.
             If not provided, the dataset will be fetched from the Neuracore API.
+            dataset_index: The data daemon's row for the dataset, when it was
+                selected through the daemon. ``id`` is then ``None`` until the
+                server confirms it, and is fetched when first needed.
 
         Attributes:
             cache_dir: Directory path for caching dataset recordings.
@@ -84,6 +92,7 @@ class Dataset:
             _start_after: Internal dictionary for tracking
             the start of the next page of recordings.
         """
+        self._dataset_index = dataset_index
         self.id = id
         self.org_id = org_id
         self.name = name
@@ -110,6 +119,37 @@ class Dataset:
         self._page_lock = threading.Lock()
         self._robot_ids: list[str] | None = None
         self._robot_names: dict[str, str] | None = None
+
+    @property
+    def id(self) -> str:
+        """The server's id for the dataset.
+
+        A dataset selected through the data daemon gets it once the server
+        confirms it; reading it before then waits for that, as ``wait=True``
+        does.
+
+        Raises:
+            ServerUnreachableError: If the last login could not reach the
+                server and the id is not known yet.
+            DatasetError: If the server refused the dataset, or did not confirm
+                it in time.
+        """
+        if self._id is None and self._dataset_index is not None:
+            self._id = wait_for_dataset_id(self._dataset_index, self.name)
+            # The details the server holds, now that it can be asked.
+            self._refresh_dataset_metadata()
+        if self._id is None:
+            raise DatasetError(f"Dataset '{self.name}' has no id.")
+        return self._id
+
+    @id.setter
+    def id(self, value: str | None) -> None:
+        self._id = value
+
+    @property
+    def dataset_index(self) -> int | None:
+        """The data daemon's row for the dataset, if it was selected through it."""
+        return self._dataset_index
 
     def __getstate__(self) -> dict:
         """Return picklable state, dropping the unpicklable page lock.
@@ -541,6 +581,61 @@ class Dataset:
         else:
             logger.info(f"Dataset '{name}' already exist.")
         return ds
+
+    @staticmethod
+    def select(
+        name: str,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        shared: bool = False,
+        wait: bool = False,
+    ) -> "Dataset":
+        """Select a dataset to record into through the data daemon.
+
+        The daemon keeps a row for the dataset and has the server find it, or
+        create it if it has none of that name, in the background, online or
+        offline. The returned dataset's ``id`` is ``None`` until the server
+        confirms it, unless ``wait``.
+
+        Args:
+            name: The dataset's name.
+            description: The description to create the dataset with.
+            tags: The tags to create the dataset with.
+            shared: Whether the dataset is shared.
+            wait: Wait for the server to confirm the dataset before returning.
+
+        Returns:
+            The dataset.
+
+        Raises:
+            ServerUnreachableError: If ``wait`` and the last login could not
+                reach the server.
+            DatasetError: If ``wait`` and the server refused the dataset, or did
+                not confirm it in time.
+            OrganizationError: If offline and no organization is saved.
+        """
+        org_id = get_registry_org()
+        dataset_index = bridge.select_dataset_row(
+            org_id=org_id,
+            name=name,
+            shared=shared,
+            description=description,
+            tags=list(tags or []),
+        )
+        dataset = Dataset(
+            id=None,
+            org_id=org_id,
+            name=name,
+            size_bytes=0,
+            tags=list(tags or []),
+            data_types=[],
+            is_shared=shared,
+            description=description,
+            dataset_index=dataset_index,
+        )
+        if wait:
+            dataset.id  # noqa: B018 - reading it waits for the server
+        return dataset
 
     @staticmethod
     def _create_dataset(
@@ -996,7 +1091,7 @@ class Dataset:
         Ideally we should implement If-Match & Etag header.
         """
         auth = get_auth()
-        org_id = get_current_org()
+        org_id = self.org_id
         try:
             session = thread_local_session()
             req = session.get(

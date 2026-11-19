@@ -24,15 +24,30 @@ CLONE_PROGRESS_POLL_INTERVAL_S = 1.0
 logger = logging.getLogger(__name__)
 
 
-def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
+def get_dataset(
+    name: str | None = None, id: str | None = None, wait: bool = False
+) -> Dataset:
     """Get a dataset by name or ID.
+
+    Online, the server is asked for it directly. After an offline login the
+    name cannot be checked, so the dataset is selected through the data
+    daemon: once the server can be reached, the daemon creates a dataset of
+    that name if the server has none, so recordings made offline are not
+    lost. Reading that dataset's ``id`` waits for the server.
 
     Args:
         name: Dataset name
         id: Dataset ID
+        wait: After an offline login, wait for the server before returning,
+            which raises ``ServerUnreachableError``. Online the server is
+            asked anyway.
+
     Raises:
         ValueError: If neither name nor ID is provided, or if the dataset is not found
-    s
+        DatasetError: If online and the server has no dataset of that name.
+        ServerUnreachableError: If ``wait`` and the last login could not reach
+            the server.
+
     Returns:
         Dataset: The requested dataset instance
     """
@@ -43,11 +58,17 @@ def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
     _active_dataset = None
     if id is not None:
         _active_dataset = Dataset.get_by_id(id)
-    elif name is not None:
-        _active_dataset = Dataset.get_by_name(name)
+    else:
+        assert name is not None
+        if get_auth().is_offline:
+            # The name cannot be checked, so the recordings made against it go
+            # to a dataset of that name, created if need be.
+            _active_dataset = Dataset.select(name, wait=wait)
+        else:
+            _active_dataset = Dataset.get_by_name(name)
     if _active_dataset is None:
         raise ValueError(f"No Dataset found with the given name: {name} or ID: {id}")
-    GlobalSingleton()._active_dataset_id = _active_dataset.id
+    GlobalSingleton()._active_dataset_id = _active_dataset._id
     GlobalSingleton()._active_dataset = _active_dataset
     return _active_dataset
 
@@ -242,8 +263,14 @@ def create_dataset(
     description: str | None = None,
     tags: list[str] | None = None,
     shared: bool = False,
+    wait: bool = False,
 ) -> Dataset:
     """Create a new dataset for robot demonstrations.
+
+    The dataset is selected through the data daemon, online or offline: the
+    daemon has the server find it, or create it, in the background. The
+    returned dataset's ``id`` is ``None`` until the server confirms it, and
+    reading it waits for that.
 
     Args:
         name: Dataset name
@@ -252,14 +279,21 @@ def create_dataset(
         shared: Whether the dataset should be shared/open-source.
             Note that setting shared=True is only available to specific
             members allocated by the Neuracore team.
+        wait: Wait for the server to find or create the dataset before
+            returning, so a refusal raises here.
 
     Returns:
         Dataset: The newly created dataset instance
 
     Raises:
-        DatasetError: If dataset creation fails
+        DatasetError: If ``wait`` and dataset creation fails
+        ServerUnreachableError: If ``wait`` and the last login could not reach
+            the server.
+        OrganizationError: If offline and no organization is saved.
     """
-    _active_dataset = Dataset.create(name, description, tags, shared)
-    GlobalSingleton()._active_dataset_id = _active_dataset.id
+    _active_dataset = Dataset.select(
+        name, description=description, tags=tags, shared=shared, wait=wait
+    )
+    GlobalSingleton()._active_dataset_id = _active_dataset._id
     GlobalSingleton()._active_dataset = _active_dataset
     return _active_dataset

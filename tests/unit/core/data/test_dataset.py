@@ -17,6 +17,7 @@ from neuracore_types import RecordingMetadata
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
+from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL, DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.data.dataset import PAGE_SIZE, Dataset
 from neuracore.core.data.recording import Recording
@@ -48,36 +49,40 @@ def dataset_response() -> Dataset:
     )
 
 
+def _serve_dataset(mock_data_requests, org_id: str, dataset: DatasetModel) -> None:
+    """Answer the read of the dataset's details by id."""
+    mock_data_requests.get(
+        f"{API_URL}/org/{org_id}/datasets/{dataset.id}",
+        json=dataset.model_dump(mode="json"),
+        status_code=200,
+    )
+
+
 def test_nc_create_dataset_basic(
     temp_config_dir,
     mock_data_requests,
     reset_neuracore,
     dataset_response,
     mocked_org_id,
+    fake_registry,
 ):
-    """Test dataset creation via the public nc.create_dataset API."""
-    # Ensure login
+    """nc.create_dataset selects the dataset through the daemon."""
     nc.login("test_api_key")
+    fake_registry.dataset_ids["test_dataset"] = "dataset_123"
+    _serve_dataset(mock_data_requests, mocked_org_id, dataset_response)
 
-    # Mock dataset creation endpoint
-    mock_data_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-
-    # Mock search-by-name (if nc.create_dataset internally checks for existence)
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json={},
-        status_code=404,
-    )
-
-    # Create dataset via nc
     dataset = nc.create_dataset("test_dataset")
 
-    # Verify dataset was created and mapped correctly
-    assert dataset is not None
+    assert fake_registry.dataset_specs == [
+        dict(
+            org_id=mocked_org_id,
+            name="test_dataset",
+            shared=False,
+            description=None,
+            tags=[],
+        )
+    ]
+    # Read when needed: confirmed by the server, with its details.
     assert dataset.id == "dataset_123"
     assert dataset.name == "test_dataset"
     assert dataset.size_bytes == 1024
@@ -91,36 +96,29 @@ def test_nc_create_dataset_with_params(
     reset_neuracore,
     dataset_response,
     mocked_org_id,
+    fake_registry,
 ):
-    """Test dataset creation with additional parameters via nc.create_dataset."""
+    """The description, tags and kind go to the daemon to create it with."""
     nc.login("test_api_key")
-
-    # Assume nc.create_dataset first checks if the dataset exists
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json={},
-        status_code=404,
-    )
-
-    # Mock dataset creation endpoint
-    mock_data_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
+    fake_registry.dataset_ids["test_dataset"] = "dataset_123"
+    _serve_dataset(mock_data_requests, mocked_org_id, dataset_response)
 
     dataset = nc.create_dataset(
         name="test_dataset",
         description="Test dataset description",
         tags=["test", "robotics"],
         shared=True,
+        wait=True,
     )
 
-    assert dataset is not None
+    assert fake_registry.dataset_specs[-1] == dict(
+        org_id=mocked_org_id,
+        name="test_dataset",
+        shared=True,
+        description="Test dataset description",
+        tags=["test", "robotics"],
+    )
     assert dataset.id == "dataset_123"
-    assert dataset.name == "test_dataset"
-    # We can't easily assert that description/tags/shared were sent,
-    # but this ensures the path doesn’t break when parameters are passed.
 
 
 def test_nc_get_dataset_existing(
@@ -129,11 +127,10 @@ def test_nc_get_dataset_existing(
     reset_neuracore,
     dataset_response,
     mocked_org_id,
+    fake_registry,
 ):
-    """Test getting an existing dataset via nc.get_dataset."""
+    """Online, nc.get_dataset by name asks the server, not the daemon."""
     nc.login("test_api_key")
-
-    # Mock search-by-name endpoint
     mock_data_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response.model_dump(mode="json"),
@@ -142,28 +139,17 @@ def test_nc_get_dataset_existing(
 
     dataset = nc.get_dataset("test_dataset")
 
-    assert dataset is not None
     assert dataset.id == "dataset_123"
     assert dataset.name == "test_dataset"
+    assert dataset.dataset_index is None
+    assert fake_registry.dataset_specs == []
 
 
 def test_nc_get_dataset_nonexistent_raises(
     temp_config_dir, mock_data_requests, reset_neuracore, mocked_org_id
 ):
-    """Test getting a non-existent dataset via nc.get_dataset raises DatasetError."""
+    """Online, a dataset the server does not have raises at once."""
     nc.login("test_api_key")
-
-    # Mock endpoints returning no datasets
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[],
-        status_code=200,
-    )
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
     mock_data_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json={},
@@ -180,29 +166,18 @@ def test_nc_create_shared_dataset_sets_is_shared(
     reset_neuracore,
     mocked_org_id,
     dataset_response,
+    fake_registry,
 ):
-    """Test creating a shared dataset via nc.create_dataset sets is_shared=True."""
+    """A shared dataset is shared before and after the server confirms it."""
     nc.login("test_api_key")
-
     dataset_response.is_shared = True
-
-    # Existence check
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json={},
-        status_code=404,
-    )
-
-    # Creation endpoint
-    mock_data_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
+    fake_registry.dataset_ids["shared_dataset"] = "dataset_123"
+    _serve_dataset(mock_data_requests, mocked_org_id, dataset_response)
 
     dataset = nc.create_dataset(name="shared_dataset", shared=True)
 
-    assert dataset is not None
+    assert dataset.is_shared is True
+    assert dataset.id == "dataset_123"
     assert dataset.is_shared is True
 
 
@@ -212,26 +187,53 @@ def test_nc_create_dataset_sets_global_state(
     reset_neuracore,
     dataset_response,
     mocked_org_id,
+    fake_registry,
 ):
-    """Test that nc.create_dataset stores the dataset ID in global state."""
+    """nc.create_dataset makes the dataset the active one."""
     nc.login("test_api_key")
+    fake_registry.dataset_ids["test_dataset"] = "dataset_123"
+    _serve_dataset(mock_data_requests, mocked_org_id, dataset_response)
 
-    mock_data_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
+    dataset = nc.create_dataset("test_dataset", wait=True)
 
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json={},
-        status_code=404,
-    )
-
-    dataset = nc.create_dataset("test_dataset")
-
-    # Verify global state has dataset ID
+    assert GlobalSingleton()._active_dataset is dataset
     assert GlobalSingleton()._active_dataset_id == dataset.id
+
+
+def test_a_dataset_the_user_must_fix_raises_when_waited_for(
+    temp_config_dir, mock_data_requests, reset_neuracore, fake_registry
+):
+    """A held dataset's reason is raised, with what to do."""
+    nc.login("test_api_key")
+    fake_registry.set_dataset_state("warehouse", "pending", "not_in_org")
+
+    with pytest.raises(DatasetError, match="cannot record in the organization"):
+        nc.create_dataset("warehouse", wait=True)
+
+
+def test_waiting_offline_raises_but_the_dataset_is_kept(
+    temp_config_dir, mock_data_requests, reset_neuracore, fake_registry, monkeypatch
+):
+    """Offline, the daemon keeps the dataset; only waiting for the server raises."""
+    nc.login("test_api_key")
+    monkeypatch.setattr(type(get_auth()), "is_offline", property(lambda self: True))
+
+    dataset = nc.create_dataset("warehouse")
+    assert dataset.dataset_index is not None
+    with pytest.raises(nc.ServerUnreachableError):
+        nc.create_dataset("warehouse", wait=True)
+
+
+def test_get_dataset_after_an_offline_login_creates_it_if_missing(
+    temp_config_dir, mock_data_requests, reset_neuracore, fake_registry, monkeypatch
+):
+    """Offline, get_dataset asks the daemon to create a missing dataset."""
+    nc.login("test_api_key")
+    monkeypatch.setattr(type(get_auth()), "is_offline", property(lambda self: True))
+    dataset = nc.get_dataset("warehouse")
+
+    assert fake_registry.dataset_specs[-1]["name"] == "warehouse"
+    assert dataset.dataset_index is not None
 
 
 def test_nc_clone_dataset_from_dataset_object(
