@@ -9,7 +9,6 @@ import requests_mock
 import neuracore as nc
 from neuracore.api import core as api_core
 from neuracore.api.globals import GlobalSingleton
-from neuracore.core import robot as core_robot
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.const import API_URL
@@ -391,28 +390,22 @@ def test_connect_robot(
     reset_neuracore,
     mock_urdf,
     mocked_org_id,
-    monkeypatch,
+    fake_registry,
 ):
-    """Test robot connection."""
-    session_factory = Mock(wraps=core_robot.thread_local_session)
-    monkeypatch.setattr(core_robot, "thread_local_session", session_factory)
-    # Ensure login first
+    """connect_robot connects the robot through the daemon, with its package."""
     nc.login("test_api_key")
 
-    # Mock robot creation endpoint with a full response
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-
-    # Connect robot
     robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Verify robot connection
-    assert robot is not None
     assert robot.name == "test_robot"
-    session_factory.assert_called_once_with(retry_transient=True)
+    [spec] = fake_registry.robot_specs
+    assert (spec["org_id"], spec["name"], spec["instance"]) == (
+        mocked_org_id,
+        "test_robot",
+        0,
+    )
+    assert spec["package_path"] is not None
+    assert robot.id == "cloud-robot-test_robot"
 
 
 def test_connect_robot_starts_the_data_daemon(
@@ -468,49 +461,40 @@ def test_connect_robot_refuses_an_archived_robot(
     mock_auth_requests,
     reset_neuracore,
     mocked_org_id,
-    monkeypatch,
+    fake_registry,
 ):
-    """An archived robot gets an actionable error and no session."""
-    ensure_daemon_running = Mock(return_value=1)
-    orchestrator = Mock()
-    monkeypatch.setattr(api_core, "ensure_daemon_running", ensure_daemon_running)
-    monkeypatch.setattr(api_core, "StreamManagerOrchestrator", orchestrator)
+    """Waiting for an archived robot gives the actionable error."""
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={
-            "detail": {
-                "error": "Server text that the SDK does not show",
-                "status": 409,
-                "error_type": "ROBOT_ARCHIVED",
-            }
-        },
-        status_code=409,
-    )
+    fake_registry.set_robot_state("test_robot", "pending", "robot_archived")
 
     with pytest.raises(RobotArchivedError) as raised:
-        nc.connect_robot("test_robot")
+        nc.connect_robot("test_robot", wait=True)
 
     assert str(raised.value) == ARCHIVED_ROBOT_ERROR
-    ensure_daemon_running.assert_not_called()
-    orchestrator.assert_not_called()
-    assert api_core.GlobalSingleton()._active_robot is None
-    assert core_robot._robots == {}
 
 
-def test_connect_robot_conflict_without_archived_code_is_a_generic_error(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+def test_a_refused_robot_raises_when_waited_for(
+    temp_config_dir, mock_auth_requests, reset_neuracore, fake_registry
 ):
-    """A 409 without the archived error type gives the generic connect error."""
+    """A robot the server rejected raises its reason when waited for."""
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"detail": {"error": "Robot already exists", "status": 409}},
-        status_code=409,
-    )
+    fake_registry.set_robot_state("test_robot", "failed", "rejected")
 
-    with pytest.raises(RobotError, match="Failed to initialize robot"):
-        nc.connect_robot("test_robot")
+    with pytest.raises(RobotError, match="the server rejected it"):
+        nc.connect_robot("test_robot", wait=True)
+
+
+def test_connect_robot_returns_before_the_server_registers_it(
+    temp_config_dir, mock_auth_requests, reset_neuracore, fake_registry
+):
+    """Without wait, a robot still pending is connected and records by its row."""
+    nc.login("test_api_key")
+    fake_registry.set_robot_state("test_robot", "pending")
+
+    robot = nc.connect_robot("test_robot")
+
+    assert robot.known_id is None
+    assert robot.source_key == str(robot._robot_index)
 
 
 def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):
@@ -642,6 +626,8 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
     completion_checks: list[str] = []
 
     class _FakeRobot:
+        id = "robot-1"
+
         def is_recording(self) -> bool:
             return True
 
@@ -676,12 +662,60 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
     assert completion_checks == ["rec-123"]
 
 
+def test_stop_recording_wait_waits_for_the_robot_and_dataset_first(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class _FakeRobot:
+        @property
+        def id(self) -> str:
+            calls.append("robot id")
+            return "robot-1"
+
+        def is_recording(self) -> bool:
+            return True
+
+        def get_cloud_recording_id(self) -> str:
+            calls.append("recording id")
+            return "rec-123"
+
+        def stop_recording(
+            self, timestamp: float | None = None, tags: list[str] | None = None
+        ) -> None:
+            calls.append(f"stop at {timestamp}")
+
+    class _FakeDataset:
+        dataset_index = 4
+
+        @property
+        def id(self) -> str:
+            calls.append("dataset id")
+            return "dataset-1"
+
+    clock = iter((100.0, 200.0))
+    monkeypatch.setattr(
+        api_core, "_get_robot", lambda robot_name, instance: _FakeRobot()
+    )
+    monkeypatch.setattr(GlobalSingleton(), "_active_dataset", _FakeDataset())
+    monkeypatch.setattr(api_core.time, "time", lambda: next(clock))
+    monkeypatch.setattr(
+        api_core.backend_utils, "is_recording_upload_complete", lambda _id: True
+    )
+
+    nc.stop_recording(wait=True)
+
+    assert calls == ["robot id", "dataset id", "recording id", "stop at 100.0"]
+
+
 def test_stop_recording_wait_times_out_when_upload_never_completes(
     monkeypatch,
 ) -> None:
     poll_count = 0
 
     class _FakeRobot:
+        id = "robot-1"
+
         def is_recording(self) -> bool:
             return True
 
@@ -788,7 +822,7 @@ PATCHED_NOW_US = 42_000_000
 def recording_robot(monkeypatch):
     """A recording robot whose daemon bridge is a mock."""
     robot = Robot("test_robot", instance=0, org_id="org-1")
-    robot.id = "robot-1"
+    robot._robot_index = 1
     native = MagicMock()
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
     monkeypatch.setattr(recording_context, "ensure_daemon_running", lambda: None)

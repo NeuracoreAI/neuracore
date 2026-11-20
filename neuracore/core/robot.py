@@ -20,21 +20,18 @@ from typing import TYPE_CHECKING
 import requests
 from neuracore_types import DataType, RobotInstanceIdentifier
 
-from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.config.get_current_org import get_current_org, get_registry_org
+from neuracore.core.daemon_rows import wait_for_robot_id
 from neuracore.core.streaming.data_stream import DataStream
-from neuracore.core.utils.http_errors import extract_error_detail, extract_error_type
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.timestamp_utils import resolve_timestamp_us
 from neuracore.data_daemon import bridge as recording_context
+from neuracore.data_daemon.robot_packages import save_robot_package
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
-from .exceptions import (
-    AuthenticationError,
-    RobotArchivedError,
-    RobotError,
-    ValidationError,
-)
+from .exceptions import AuthenticationError, RobotError, ValidationError
 
 if TYPE_CHECKING:
     from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
@@ -43,11 +40,6 @@ logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
 
 _ROBOTS_LIST_PAGE_SIZE = 30
-_ROBOT_ARCHIVED_ERROR_TYPE = "ROBOT_ARCHIVED"
-_ROBOT_ARCHIVED_MESSAGE = (
-    "Robot '{robot_name}' is archived. Unarchive it on the Archived Robots "
-    "page of the Neuracore dashboard, then connect again."
-)
 _SUPPORTED_MESH_EXTENSIONS = (".stl", ".dae")
 
 
@@ -120,7 +112,8 @@ class Robot:
         self.mjcf_path = mjcf_path
         self.overwrite = overwrite
         self.shared = shared
-        self.id: str | None = None
+        self._id: str | None = None
+        self._robot_index: int | None = None
         self.archived: bool | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
@@ -132,7 +125,7 @@ class Robot:
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
 
-        self.org_id = org_id or get_current_org()
+        self.org_id = org_id or get_registry_org()
 
         if urdf_path and mjcf_path:
             raise ValidationError(
@@ -176,68 +169,98 @@ class Robot:
         if self.urdf_path:
             self.joint_info = self._get_joint_info()
 
-    def init(self) -> None:
-        """Initialize the robot on the Neuracore server.
+    def init(self, wait: bool = False) -> None:
+        """Connect the robot through the data daemon.
 
-        Creates the robot instance on the server and uploads the kinematic model
-        if provided. This must be called before using the robot for data streaming
-        or recording.
+        The daemon keeps a row for the robot instance and has the server
+        register it, and upload its kinematic model if the server needs it, in
+        the background, online or offline. Until then :attr:`id` is not known;
+        reading it waits for the server.
+
+        Args:
+            wait: Wait for the server to register the robot before returning,
+                so a refusal raises here.
 
         Raises:
-            RobotError: If not authenticated, if the robot is archived or if
-                server communication fails.
-            ConfigError: If there is an error trying to get the current org
+            RobotArchivedError: If ``wait`` and the robot is archived.
+            RobotError: If ``wait`` and the server refused the robot, or the
+                package could not be built.
+            ServerUnreachableError: If ``wait`` and the last login could not
+                reach the server.
         """
-        if not self._auth.is_authenticated:
-            raise RobotError("Not authenticated. Please call nc.login() first.")
-
-        if not self.org_id:
-            raise RobotError(
-                "Unauthorised: no organisation selected. "
-                "Run `neuracore select-org` and try again."
-            )
-
-        try:
-            session = thread_local_session(retry_transient=True)
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
-                json={
-                    "name": self.name,
-                    "instance": self.instance,
-                },  # TODO: Add camera support
-                headers=self._auth.get_headers(),
-            )
-            response.raise_for_status()
-            response_body = response.json()
-            self.id = response_body["robot_id"]
-            self.archived = response_body.get("archived")
-            has_urdf = response_body["has_urdf"]
-            # Upload URDF and meshes if provided
-            if self.urdf_path and (not has_urdf or self.overwrite):
-                self._upload_urdf_and_meshes()
-                if self._temp_dir:
-                    self._temp_dir.cleanup()
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 403:
-                raise RobotError(
-                    "Unauthorised: no organisation selected. "
-                    "Run `neuracore select-org` and try again."
+        package_path = None
+        if self.urdf_path:
+            try:
+                package = self._package_urdf()["robot_package"][1]
+            except RobotError as error:
+                # The package is sent only if the server has no URDF for the
+                # robot, which cannot be known yet; one asked to overwrite it
+                # must be sent.
+                if self.overwrite:
+                    raise
+                logger.warning(
+                    "Robot '%s' is connected without its URDF package: %s. If "
+                    "the server has no URDF for it yet, it is registered without "
+                    "one.",
+                    self.name,
+                    error,
                 )
-            if (
-                e.response is not None
-                and extract_error_type(e.response) == _ROBOT_ARCHIVED_ERROR_TYPE
-            ):
-                raise RobotArchivedError(
-                    _ROBOT_ARCHIVED_MESSAGE.format(robot_name=self.name)
-                )
-            raise RobotError(f"Failed to initialize robot: {str(e)}")
-        except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to initialize robot: {str(e)}")
+            else:
+                # An MJCF robot's converted URDF stays until close(): urdf_path
+                # names it, and the importer loads it.
+                package_path = str(save_robot_package(package))
+        self._robot_index = recording_context.connect_robot_row(
+            org_id=self.org_id,
+            name=self.name,
+            shared=self.shared,
+            instance=self.instance,
+            overwrite_urdf=self.overwrite,
+            package_path=package_path,
+        )
+        if wait:
+            self.id  # noqa: B018 - reading it waits for the server
+
+    @property
+    def id(self) -> str:
+        """The server's id for the robot.
+
+        Known once the server registers the robot instance; reading it before
+        then waits for that, as ``connect_robot(wait=True)`` does.
+
+        Raises:
+            RobotError: If the robot is not connected, the server refused it,
+                or it was not registered in time.
+            RobotArchivedError: If the robot is archived.
+            ServerUnreachableError: If the last login could not reach the
+                server and the id is not known yet.
+        """
+        if self._id is None and self._robot_index is not None:
+            self._id = wait_for_robot_id(self._robot_index, self.name, self.instance)
+            self.archived = False
+            _register_robot_id(self)
+        if self._id is None:
+            raise RobotError("Robot not initialized. Call init() first.")
+        return self._id
+
+    @id.setter
+    def id(self, value: str | None) -> None:
+        self._id = value
+
+    @property
+    def known_id(self) -> str | None:
+        """The server's id if it is known already, without waiting for it."""
+        return self._id
+
+    @property
+    def source_key(self) -> str:
+        """The key the robot's logged data is labelled with: its daemon row.
+
+        Raises:
+            RobotError: If the robot is not connected.
+        """
+        if self._robot_index is None:
+            raise RobotError("Robot not initialized. Call init() first.")
+        return str(self._robot_index)
 
     def add_data_stream(self, stream_id: str, stream: DataStream) -> None:
         """Add a data stream to the robot for sensor data collection.
@@ -298,11 +321,8 @@ class Robot:
                 supported microsecond range.
         """
         timestamp_us = resolve_timestamp_us(timestamp)
-        if not self.id:
-            raise RobotError("Robot not initialized. Call init() first.")
-
         self._get_daemon_recording_context().start_recording(
-            source_key=self.id,
+            source_key=self.source_key,
             robot_instance=self.instance,
             robot_name=self.name,
             dataset_index=dataset_index,
@@ -337,9 +357,6 @@ class Robot:
                 supported microsecond range.
         """
         timestamp_us = resolve_timestamp_us(timestamp)
-        if not self.id:
-            raise RobotError("Robot not initialized. Call init() first.")
-
         # The gate closes inside the notify, not here.
         self._notify_daemon_of_stop(recording_id, timestamp_us=timestamp_us, tags=tags)
 
@@ -383,10 +400,9 @@ class Robot:
                 source. Silence is not "not recording" — what this process
                 started says nothing about a recording opened elsewhere.
         """
-        if not self.id:
-            raise RobotError("Robot not initialized. Call init() first.")
         return (
-            recording_context.query_recording_state(self.id, self.instance) is not None
+            recording_context.query_recording_state(self.source_key, self.instance)
+            is not None
         )
 
     def _recording_epoch(self) -> int | None:
@@ -398,7 +414,7 @@ class Robot:
         recording, so unlike :meth:`is_recording` it must never block, not even
         on a source's first read.
         """
-        if not self.id:
+        if self._robot_index is None:
             return None
         return self._get_daemon_recording_context().recording_epoch()
 
@@ -419,10 +435,8 @@ class Robot:
             a recording made offline. Use :meth:`is_recording` to ask whether a
             recording is open.
         """
-        if not self.id:
-            raise RobotError("Robot not initialized. Call init() first.")
         recording = recording_context.query_recording_state(
-            self.id, self.instance, timeout_s=timeout_s
+            self.source_key, self.instance, timeout_s=timeout_s
         )
         return recording.cloud_recording_id if recording is not None else None
 
@@ -652,47 +666,6 @@ class Robot:
             raise RobotError("Invalid URDF package received from server.") from e
         return output_path / "robot.urdf"
 
-    def _upload_urdf_and_meshes(self) -> None:
-        """Upload URDF and associated mesh files as a ZIP package to the server.
-
-        Packages the robot's kinematic model and visual assets into a ZIP archive
-        and uploads it to the Neuracore platform for use in visualization and
-        simulation.
-
-        Raises:
-            RobotError: If packaging or upload fails.
-            ConfigError: If there is an error trying to get the current org
-        """
-        try:
-            # Create the files dict with the ZIP data
-            files = self._package_urdf()
-
-            # Upload the package
-            session = thread_local_session()
-            response = session.put(
-                f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
-                headers=self._auth.get_headers(),
-                files=files,
-            )
-
-            # Log response for debugging
-            logger.info(f"Upload response status: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"Upload error response: {response.text}", exc_info=True)
-
-            response.raise_for_status()
-
-            logger.info(f"Successfully uploaded URDF package for robot {self.id}")
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to upload URDF package: {str(e)}")
-        except Exception as e:
-            raise RobotError(f"Error preparing URDF package: {str(e)}")
-
     def _get_joint_info(self) -> dict[str, JointInfo]:
         """Return metadata for all joints defined in the robot URDF.
 
@@ -763,18 +736,13 @@ class Robot:
                 supported microsecond range.
         """
         timestamp_us = resolve_timestamp_us(timestamp)
-        if not self.id:
-            raise RobotError("Robot not initialized. Call init() first.")
-
         self._get_daemon_recording_context().cancel_recording(timestamp_us=timestamp_us)
 
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:
         """Return a reusable daemon recording context, creating it lazily."""
         if self._daemon_recording_context is None:
-            if self.id is None:
-                raise RobotError("Robot not initialized. Call init() first.")
             context = DaemonRecordingContext()
-            context.bind_source(self.id, self.instance)
+            context.bind_source(self.source_key, self.instance)
             self._daemon_recording_context = context
         return self._daemon_recording_context
 
@@ -833,6 +801,9 @@ class Robot:
         for robot_name, mapped_id in list(_robot_name_id_mapping.items()):
             if mapped_id == robot_id:
                 del _robot_name_id_mapping[robot_name]
+        for key, connected in list(_connected_robots.items()):
+            if connected is self:
+                del _connected_robots[key]
 
         self.close()
         self.__dict__.clear()
@@ -856,12 +827,15 @@ class Robot:
                 no archived robot has this name, or if the server rejects the
                 update.
         """
-        if self.id is not None:
-            robot_id = self.id
-        elif archived:
-            raise RobotError("Robot not initialized. Call init() first.")
-        else:
+        if self.known_id is not None:
+            robot_id = self.known_id
+        elif not archived:
             robot_id = self._archived_robot_id()
+        elif self._robot_index is not None:
+            # Connected, but not registered yet: wait for the server's id.
+            robot_id = self.id
+        else:
+            raise RobotError("Robot not initialized. Call init() first.")
         try:
             session = thread_local_session()
             response = session.put(
@@ -1011,6 +985,19 @@ class _DeletedRobot(Robot):
 # Global robot registry
 _robots: dict[RobotInstanceIdentifier, Robot] = {}
 _robot_name_id_mapping: dict[str, str] = {}
+# Robots connected by this process, by name and instance, from the moment they
+# are connected: their server id may not be known yet.
+_connected_robots: dict[tuple[str, int], Robot] = {}
+
+
+def _register_robot_id(robot: Robot) -> None:
+    """Index a connected robot by its server id, once that is known."""
+    if robot.known_id is None:
+        return
+    _robot_name_id_mapping[robot.name] = robot.known_id
+    _robots[
+        RobotInstanceIdentifier(robot_id=robot.known_id, robot_instance=robot.instance)
+    ] = robot
 
 
 def init(
@@ -1020,11 +1007,12 @@ def init(
     mjcf_path: str | None = None,
     overwrite: bool = False,
     shared: bool = False,
+    wait: bool = False,
 ) -> Robot:
     """Initialize a robot and register it globally.
 
-    Creates a new Robot instance, initializes it on the server, and registers
-    it in the global robot registry for future access.
+    Creates a new Robot instance, connects it through the data daemon, and
+    registers it in the global robot registry for future access.
 
     Args:
         robot_name: Unique identifier for the robot type.
@@ -1035,6 +1023,7 @@ def init(
         shared: Whether the robot is shared/open-source.
             Note that setting shared=True is only available to specific
             members allocated by the Neuracore team.
+        wait: Wait for the server to register the robot before returning.
 
     Returns:
         The initialized Robot instance.
@@ -1042,11 +1031,9 @@ def init(
     if not robot_name:
         raise ValueError("Robot name cannot be empty")
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
-    robot.init()
-    if not robot.id:
-        raise RobotError("Robot not initialized. Call init() first.")
-    _robot_name_id_mapping[robot_name] = robot.id
-    _robots[RobotInstanceIdentifier(robot_id=robot.id, robot_instance=instance)] = robot
+    robot.init(wait=wait)
+    _connected_robots[(robot_name, instance)] = robot
+    _register_robot_id(robot)
     return robot
 
 
@@ -1063,6 +1050,9 @@ def get_robot(robot_name: str, instance: int) -> Robot:
     Raises:
         RobotError: If the robot is not found in the registry.
     """
+    connected = _connected_robots.get((robot_name, instance))
+    if connected is not None:
+        return connected
     robot_id = _robot_name_id_mapping.get(robot_name, robot_name)
     key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
     if key not in _robots:
@@ -1079,8 +1069,13 @@ def _update_local_robot_name_cache(robot_id: str, new_robot_name: str) -> None:
             _robot_name_id_mapping.pop(name, None)
     _robot_name_id_mapping[new_robot_name] = robot_id
     for robot in _robots.values():
-        if robot.id == robot_id:
+        if robot.known_id == robot_id:
             robot.name = new_robot_name
+    for (name, instance), robot in list(_connected_robots.items()):
+        if robot.known_id == robot_id and name != new_robot_name:
+            _connected_robots[(new_robot_name, instance)] = _connected_robots.pop(
+                (name, instance)
+            )
 
 
 def update_robot_name(
@@ -1113,7 +1108,19 @@ def update_robot_name(
     resolved_org_id = get_current_org()
     if not resolved_org_id:
         raise RobotError("No organization selected. Please call nc.select_org() first.")
-    robot_id = _robot_name_id_mapping.get(robot_key, robot_key)
+    robot_id = _robot_name_id_mapping.get(robot_key)
+    if robot_id is None:
+        # A robot connected by this process whose id is not known yet: wait
+        # for the server to register it.
+        connected = next(
+            (
+                robot
+                for (name, _), robot in _connected_robots.items()
+                if name == robot_key
+            ),
+            None,
+        )
+        robot_id = connected.id if connected is not None else robot_key
     try:
         session = thread_local_session()
         response = session.put(
