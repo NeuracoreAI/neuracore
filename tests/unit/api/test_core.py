@@ -92,7 +92,6 @@ def test_logout_resets_global_state_when_listener_raises(temp_config_dir):
     """A failing teardown listener must not leave stale public API state."""
     global_state = api_core.GlobalSingleton()
     global_state._active_robot = Mock()
-    global_state._active_dataset_id = "dataset-id"
     global_state._active_dataset = Mock()
     global_state._has_validated_version = True
 
@@ -107,7 +106,6 @@ def test_logout_resets_global_state_when_listener_raises(temp_config_dir):
         auth.remove_listener(Auth.LOGOUT_EVENT, failing_listener)
 
     assert global_state._active_robot is None
-    assert global_state._active_dataset_id is None
     assert global_state._active_dataset is None
     assert global_state._has_validated_version is False
 
@@ -796,12 +794,14 @@ def recording_robot(monkeypatch):
     monkeypatch.setattr(recording_context, "ensure_daemon_running", lambda: None)
     monkeypatch.setattr(api_core, "_get_robot", lambda *_args: robot)
     monkeypatch.setattr(robot, "is_recording", lambda: True)
-    monkeypatch.setattr(GlobalSingleton(), "_active_dataset_id", "dataset-1")
     monkeypatch.setattr(
         GlobalSingleton(),
         "_active_dataset",
         SimpleNamespace(
-            id="dataset-1", name="dataset", is_shared=False, dataset_index=None
+            name="dataset",
+            is_shared=False,
+            org_id="org-1",
+            dataset_index=4,
         ),
     )
     monkeypatch.setattr(
@@ -854,5 +854,55 @@ def test_start_recording_rejects_a_timestamp_outside_the_microsecond_range(
 ) -> None:
     with pytest.raises(ValueError):
         nc.start_recording(timestamp=-1.0)
+
+    recording_robot.start_recording.assert_not_called()
+
+
+def test_start_recording_records_into_the_selected_dataset_row(
+    recording_robot,
+) -> None:
+    nc.start_recording()
+
+    assert recording_robot.start_recording.call_args.args[3] == 4
+
+
+def test_start_recording_gives_a_dataset_read_from_the_server_a_row(
+    recording_robot, fake_registry, monkeypatch
+) -> None:
+    """A dataset read from the server records into the row for its server id."""
+    dataset = SimpleNamespace(
+        id="cloud-dataset-1",
+        name="dataset",
+        is_shared=False,
+        org_id="org-1",
+        dataset_index=None,
+    )
+    monkeypatch.setattr(GlobalSingleton(), "_active_dataset", dataset)
+
+    nc.start_recording()
+
+    assert dataset.dataset_index is not None
+    assert fake_registry.dataset_row_state(dataset.dataset_index).cloud_id == (
+        "cloud-dataset-1"
+    )
+    assert recording_robot.start_recording.call_args.args[3] == dataset.dataset_index
+
+
+def test_start_recording_refuses_a_dataset_in_another_organization(
+    recording_robot, monkeypatch
+) -> None:
+    monkeypatch.setattr(GlobalSingleton()._active_dataset, "org_id", "org-2")
+
+    with pytest.raises(RobotError, match="different organizations"):
+        nc.start_recording()
+
+    recording_robot.start_recording.assert_not_called()
+
+
+def test_start_recording_without_a_dataset_raises(recording_robot, monkeypatch) -> None:
+    monkeypatch.setattr(GlobalSingleton(), "_active_dataset", None)
+
+    with pytest.raises(RobotError, match="No active dataset"):
+        nc.start_recording()
 
     recording_robot.start_recording.assert_not_called()

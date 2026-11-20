@@ -232,6 +232,9 @@ async fn stored_recording_id(store: &SqliteStateStore, recording_index: i64) -> 
 struct AnnouncedRecording {
     /// The backend's id, when the announcement carried one.
     recording_id: Option<String>,
+    /// The recording's row in `datasets`, when the SDK started it.
+    dataset_index: Option<i64>,
+    /// The server's dataset id, when the web app started it.
     dataset_id: Option<String>,
     /// The window's lower bound on the publish clock.
     open_at_ns: i64,
@@ -578,7 +581,7 @@ impl Dispatcher {
             Envelope::StartRecording {
                 robot_id,
                 robot_instance,
-                dataset_id,
+                dataset_index,
                 publish_timestamp_ns,
                 timestamp_us,
                 ..
@@ -586,7 +589,8 @@ impl Dispatcher {
                 let source = (robot_id, robot_instance);
                 self.announce_recording(
                     source.clone(),
-                    dataset_id,
+                    dataset_index,
+                    None,
                     None,
                     publish_timestamp_ns,
                     timestamp_us,
@@ -782,6 +786,7 @@ impl Dispatcher {
     async fn announce_recording(
         &mut self,
         source: Source,
+        dataset_index: Option<i64>,
         dataset_id: Option<String>,
         recording_id: Option<String>,
         publish_timestamp_ns: i64,
@@ -803,6 +808,7 @@ impl Dispatcher {
 
         let announced = AnnouncedRecording {
             recording_id,
+            dataset_index,
             dataset_id,
             open_at_ns: publish_timestamp_ns,
             start_timestamp_us: timestamp_us,
@@ -900,9 +906,11 @@ impl Dispatcher {
         // The row's start is the caller's *capture* time, which the backend
         // gets as `start_time`, stored beside the start's publish time; the
         // window opens on the *publish* clock below.
+        // A robot connected through the daemon labels its data with its row in
+        // `robots`, which the recording points at; a server robot id is no row.
         let new = NewRecording {
-            robot_index: None,
-            dataset_index: None,
+            robot_index: source.0.parse().ok(),
+            dataset_index: announced.dataset_index,
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),
@@ -1028,6 +1036,7 @@ impl Dispatcher {
             } => {
                 self.announce_recording(
                     (robot_id, robot_instance),
+                    None,
                     dataset_id,
                     Some(recording_id),
                     start_timestamp_ns,
@@ -2238,7 +2247,7 @@ mod tests {
             robot_id: robot.into(),
             robot_instance: 0,
             robot_name: None,
-            dataset_id: None,
+            dataset_index: None,
             dataset_name: None,
             publish_timestamp_ns,
             timestamp_us,
@@ -2367,6 +2376,68 @@ mod tests {
         timeout(Duration::from_secs(5), handle.shutdown())
             .await
             .expect("dispatcher shut down in time");
+    }
+
+    #[tokio::test]
+    async fn a_recording_points_at_the_robot_and_dataset_rows_it_was_started_with() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let robot_index = store
+            .connect_robot(&data_daemon_shared::RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 0,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .unwrap()
+            .robot_index;
+        let dataset_index = store
+            .select_dataset(&data_daemon_shared::DatasetSpec {
+                org_id: "org-1".into(),
+                name: "warehouse".into(),
+                shared: false,
+                description: None,
+                tags: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let dispatcher_context = DispatcherContext {
+            event_bus: None,
+            config_refresh_tx: None,
+            notifications_rx: None,
+            recording_state: RecordingState::default(),
+        };
+        let (tx, handle) =
+            spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
+        // The SDK labels its data with the robot's row.
+        let robot_id = robot_index.to_string();
+
+        tx.send(Envelope::StartRecording {
+            robot_id: robot_id.clone(),
+            robot_instance: 0,
+            robot_name: None,
+            dataset_index: Some(dataset_index),
+            dataset_name: None,
+            publish_timestamp_ns: 100,
+            timestamp_us: 0,
+        })
+        .await
+        .unwrap();
+        tx.send(stop(&robot_id, 200)).await.unwrap();
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source(&robot_id, 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(recordings[0].robot_index, Some(robot_index));
+        assert_eq!(recordings[0].dataset_index, Some(dataset_index));
     }
 
     #[tokio::test]

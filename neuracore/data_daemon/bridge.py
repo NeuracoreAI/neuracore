@@ -194,6 +194,10 @@ class _NativeRegistry(Protocol):
         timeout_s: float,
     ) -> int: ...
 
+    def dataset_for_cloud_id(
+        self, *, org_id: str, cloud_dataset_id: str, timeout_s: float
+    ) -> int: ...
+
     def robot_state(
         self, *, robot_index: int, timeout_s: float
     ) -> _NativeRowState | None: ...
@@ -316,6 +320,34 @@ def select_dataset_row(
         )
 
 
+def dataset_row_for_cloud_id(*, org_id: str, cloud_dataset_id: str) -> int:
+    """The daemon's row for a dataset read from the server, by its server id.
+
+    Starts the daemon if it is not running. The daemon finds the row that has
+    this id, or makes one the server has confirmed already, so a recording
+    into the dataset points at a row like any other.
+
+    Args:
+        org_id: The organization the dataset is recorded in.
+        cloud_dataset_id: The server's id for the dataset.
+
+    Returns:
+        The dataset row's index.
+
+    Raises:
+        RegistryUnavailableError: the daemon did not answer.
+        RegistryRefusedError: the daemon refused the request.
+    """
+    ensure_daemon_running()
+    native = _registry()
+    with _registry_errors(native):
+        return native.dataset_for_cloud_id(
+            org_id=org_id,
+            cloud_dataset_id=cloud_dataset_id,
+            timeout_s=REGISTRY_TIMEOUT_S,
+        )
+
+
 def robot_row_state(robot_index: int) -> RowState | None:
     """The state of a robot row, or ``None`` when the daemon has no such row.
 
@@ -401,7 +433,7 @@ class RecordingContext:
         robot_id: str,
         robot_instance: int = 0,
         robot_name: str | None = None,
-        dataset_id: str | None = None,
+        dataset_index: int | None = None,
         dataset_name: str | None = None,
         *,
         timestamp_us: int,
@@ -428,7 +460,7 @@ class RecordingContext:
             robot_id,
             robot_instance,
             robot_name,
-            dataset_id,
+            dataset_index,
             dataset_name,
             timestamp_us,
         )

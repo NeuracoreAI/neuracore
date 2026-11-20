@@ -151,6 +151,10 @@ class Dataset:
         """The data daemon's row for the dataset, if it was selected through it."""
         return self._dataset_index
 
+    @dataset_index.setter
+    def dataset_index(self, value: int) -> None:
+        self._dataset_index = value
+
     def __getstate__(self) -> dict:
         """Return picklable state, dropping the unpicklable page lock.
 

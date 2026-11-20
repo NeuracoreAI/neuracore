@@ -13,6 +13,7 @@ _REAL_CALLS = {
     for name in (
         "connect_robot_row",
         "select_dataset_row",
+        "dataset_row_for_cloud_id",
         "robot_row_state",
         "dataset_row_state",
     )
@@ -133,3 +134,18 @@ def test_reading_a_row_state_never_starts_the_daemon(native, monkeypatch) -> Non
     bridge.dataset_row_state(1)
 
     assert started == []
+
+
+def test_a_dataset_read_from_the_server_gets_a_row_by_its_server_id(native) -> None:
+    native.dataset_for_cloud_id.return_value = 9
+
+    index = bridge.dataset_row_for_cloud_id(
+        org_id="org-1", cloud_dataset_id="cloud-dataset-1"
+    )
+
+    assert index == 9
+    native.dataset_for_cloud_id.assert_called_once_with(
+        org_id="org-1",
+        cloud_dataset_id="cloud-dataset-1",
+        timeout_s=bridge.REGISTRY_TIMEOUT_S,
+    )

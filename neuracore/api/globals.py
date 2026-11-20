@@ -27,14 +27,10 @@ class GlobalSingleton(metaclass=SingletonMetaclass):
             with the Neuracore server.
         _active_robot: Currently active robot instance, used as the default
             for operations when no specific robot is specified.
-        _active_dataset_id: ID of the currently active dataset that new
-            recordings will be associated with.
-        _active_dataset: The active dataset object cached alongside its id, so
-            hot-path callers (e.g. ``start_recording``) can read its metadata
-            without a synchronous backend fetch.
+        _active_dataset: The dataset new recordings go into, as the last
+            ``nc.create_dataset``, ``nc.get_dataset``, merge or clone set it.
     """
 
     _has_validated_version = False
     _active_robot: Robot | None = None
-    _active_dataset_id: str | None = None
     _active_dataset: "Dataset | None" = None

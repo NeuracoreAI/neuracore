@@ -62,7 +62,6 @@ def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
         _active_dataset = Dataset.get_by_name(name)
     if _active_dataset is None:
         raise ValueError(f"No Dataset found with the given name: {name} or ID: {id}")
-    GlobalSingleton()._active_dataset_id = _active_dataset._id
     GlobalSingleton()._active_dataset = _active_dataset
     return _active_dataset
 
@@ -118,7 +117,6 @@ def merge_datasets(
             "Dataset merging is running in the background; recordings may not be "
             "available immediately."
         )
-        GlobalSingleton()._active_dataset_id = merged.id
         GlobalSingleton()._active_dataset = merged
         return merged
 
@@ -129,7 +127,6 @@ def merge_datasets(
         merged, len(source_recording_ids), desc="Merging datasets"
     )
 
-    GlobalSingleton()._active_dataset_id = merged.id
     GlobalSingleton()._active_dataset = merged
     return merged
 
@@ -237,7 +234,6 @@ def clone_dataset(
             "Dataset cloning is running in the background; recordings may not be "
             "available immediately."
         )
-        GlobalSingleton()._active_dataset_id = cloned.id
         GlobalSingleton()._active_dataset = cloned
         return cloned
 
@@ -247,7 +243,6 @@ def clone_dataset(
     total_recordings = len(source_dataset)
     _wait_for_dataset_recordings(cloned, total_recordings, desc="Cloning dataset")
 
-    GlobalSingleton()._active_dataset_id = cloned.id
     GlobalSingleton()._active_dataset = cloned
     return cloned
 
@@ -295,6 +290,5 @@ def create_dataset(
         shared=shared,
         wait=wait,
     )
-    GlobalSingleton()._active_dataset_id = _active_dataset._id
     GlobalSingleton()._active_dataset = _active_dataset
     return _active_dataset
