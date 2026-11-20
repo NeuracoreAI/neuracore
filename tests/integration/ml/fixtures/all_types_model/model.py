@@ -14,7 +14,7 @@ from neuracore.ml import (
 
 
 class AllTypesModel(NeuracoreModel):
-    """Minimal identity model (y = x) covering all 14 DataTypes.
+    """Minimal identity model (y = x) covering all 15 DataTypes.
 
     Exists solely to exercise the validation pipeline. Both inference and
     training treat every input as its own prediction.
@@ -27,6 +27,7 @@ class AllTypesModel(NeuracoreModel):
         DataType.JOINT_TORQUES,
         DataType.VISUAL_JOINT_POSITIONS,
         DataType.END_EFFECTOR_POSES,
+        DataType.END_EFFECTOR_TARGET_POSES,
         DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         DataType.RGB_IMAGES,
@@ -52,6 +53,7 @@ class AllTypesModel(NeuracoreModel):
             DataType.JOINT_TARGET_POSITIONS,
             DataType.VISUAL_JOINT_POSITIONS,
             DataType.END_EFFECTOR_POSES,
+            DataType.END_EFFECTOR_TARGET_POSES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
             DataType.RGB_IMAGES,
@@ -71,6 +73,7 @@ class AllTypesModel(NeuracoreModel):
             DataType.JOINT_TARGET_POSITIONS,
             DataType.VISUAL_JOINT_POSITIONS,
             DataType.END_EFFECTOR_POSES,
+            DataType.END_EFFECTOR_TARGET_POSES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
             DataType.RGB_IMAGES,
