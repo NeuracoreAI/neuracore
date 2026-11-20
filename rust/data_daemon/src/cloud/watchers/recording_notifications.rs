@@ -49,22 +49,16 @@ impl RecordingNotificationsHandle {
     }
 }
 
-/// Spawn the notification-stream consumer.
-///
-/// Returns the receiver the dispatcher selects on alongside its IPC inbox, and
-/// the task handle. The channel is bounded so a busy dispatcher slows this task
-/// rather than letting notifications queue without limit.
+/// Spawn the notification-stream consumer, sending what it reads to the
+/// dispatcher's command inbox `tx`.
 pub fn spawn_recording_notifications(
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    tx: mpsc::Sender<RecordingCommand>,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
-) -> (
-    mpsc::Receiver<RecordingCommand>,
-    RecordingNotificationsHandle,
-) {
-    let (tx, rx) = mpsc::channel::<RecordingCommand>(64);
+) -> RecordingNotificationsHandle {
     let join = tokio::spawn(run(client, org_rx, tx, shutdown_rx));
-    (rx, RecordingNotificationsHandle { join })
+    RecordingNotificationsHandle { join }
 }
 
 async fn run(
@@ -286,7 +280,9 @@ struct Notification {
 struct StartPayload {
     recording_id: String,
     robot_id: String,
-    instance: i64,
+    /// Absent for a recording with no robot instance, such as an import.
+    #[serde(default)]
+    instance: Option<i64>,
     #[serde(default)]
     dataset_ids: Vec<String>,
     start_time: f64,
@@ -313,22 +309,12 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
 
     match notification.kind.as_str() {
         "START" => serde_json::from_value::<StartPayload>(notification.payload)
-            .map(|payload| vec![open_command(payload)])
-            .unwrap_or_default(),
-        "INIT" => serde_json::from_value::<Vec<StartPayload>>(notification.payload)
-            .map(|payloads| {
-                let open_recording_ids = payloads
-                    .iter()
-                    .map(|payload| payload.recording_id.clone())
-                    .collect();
-                let mut commands: Vec<RecordingCommand> =
-                    payloads.into_iter().map(open_command).collect();
-                commands.push(RecordingCommand::Snapshot {
-                    open_recording_ids,
-                    observed_at_ns: wall_clock_ns(),
-                });
-                commands
-            })
+            .ok()
+            .and_then(open_command)
+            .into_iter()
+            .collect(),
+        "INIT" => serde_json::from_value::<Vec<serde_json::Value>>(notification.payload)
+            .map(parse_init)
             .unwrap_or_default(),
         "STOP" | "EXPIRED" => serde_json::from_value::<StopPayload>(notification.payload)
             .map(|payload| {
@@ -365,15 +351,36 @@ fn keep_opened_in_snapshot(command: &mut RecordingCommand, opened: &mut HashSet<
     }
 }
 
-fn open_command(payload: StartPayload) -> RecordingCommand {
-    RecordingCommand::Open {
+/// Every entry's id still goes into the snapshot when the entry cannot be
+/// opened, so an entry this daemon does not understand never closes a live
+/// recording.
+fn parse_init(entries: Vec<serde_json::Value>) -> Vec<RecordingCommand> {
+    let open_recording_ids = entries
+        .iter()
+        .filter_map(|entry| entry.get("recording_id")?.as_str().map(str::to_string))
+        .collect();
+    let mut commands: Vec<RecordingCommand> = entries
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<StartPayload>(entry).ok())
+        .filter_map(open_command)
+        .collect();
+    commands.push(RecordingCommand::Snapshot {
+        open_recording_ids,
+        observed_at_ns: wall_clock_ns(),
+    });
+    commands
+}
+
+/// Only a robot instance's recording has a window to open here.
+fn open_command(payload: StartPayload) -> Option<RecordingCommand> {
+    Some(RecordingCommand::Open {
+        robot_instance: payload.instance?,
         recording_id: payload.recording_id,
         robot_id: payload.robot_id,
-        robot_instance: payload.instance,
         dataset_id: payload.dataset_ids.into_iter().next(),
         start_timestamp_ns: seconds_to_nanos(payload.start_time),
         start_timestamp_us: seconds_to_microseconds(payload.start_time),
-    }
+    })
 }
 
 fn seconds_to_nanos(seconds: f64) -> i64 {
@@ -521,6 +528,42 @@ mod tests {
 
         let (_, snapshot) = split_init(commands);
         assert_eq!(snapshot, vec!["rec-new".to_string()]);
+    }
+
+    #[test]
+    fn a_start_without_an_instance_opens_nothing() {
+        for payload in [r#""instance":null,"#, ""] {
+            let commands = parse_notification(&format!(
+                r#"{{"type":"START","payload":{{"recording_id":"rec-1","robot_id":"robot-1",
+                   {payload}"created_by":"someone","dataset_ids":[],"start_time":1.5}}}}"#
+            ));
+            assert!(commands.is_empty(), "{payload}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn init_keeps_entries_it_cannot_open_in_the_snapshot() {
+        let (opens, snapshot) = split_init(parse_notification(
+            r#"{"type":"INIT","payload":[
+               {"recording_id":"rec-1","robot_id":"robot-1","instance":0,
+                "created_by":"someone","dataset_ids":[],"start_time":1.5},
+               {"recording_id":"rec-import","robot_id":"robot-1","instance":null,
+                "created_by":"someone","dataset_ids":[],"start_time":1.5},
+               {"recording_id":"rec-odd","shape":"unknown"},
+               {"no_id":true}]}"#,
+        ));
+        assert!(matches!(
+            opens.as_slice(),
+            [RecordingCommand::Open { recording_id, .. }] if recording_id == "rec-1"
+        ));
+        assert_eq!(
+            snapshot,
+            vec![
+                "rec-1".to_string(),
+                "rec-import".to_string(),
+                "rec-odd".to_string()
+            ]
+        );
     }
 
     #[test]

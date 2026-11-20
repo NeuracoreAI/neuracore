@@ -125,11 +125,15 @@ pub(crate) fn spawn_cloud_coordinators(
         org_rx.clone(),
         shutdown_tx.subscribe(),
     );
+    // The dispatcher's command inbox. Bounded so a busy dispatcher slows its
+    // senders rather than letting commands queue without limit.
+    let (commands_tx, commands_rx) = tokio::sync::mpsc::channel::<RecordingCommand>(64);
     let recording_start = spawn_recording_start_notifier(
         state_store.clone(),
         event_bus.clone(),
         Arc::clone(&client),
         org_rx.clone(),
+        commands_tx.clone(),
         shutdown_tx.subscribe(),
     );
     let recording_stop = spawn_recording_stop_notifier(
@@ -146,8 +150,8 @@ pub(crate) fn spawn_cloud_coordinators(
         org_rx.clone(),
         shutdown_tx.subscribe(),
     );
-    let (notifications_rx, recording_notifications) =
-        spawn_recording_notifications(client, org_rx, shutdown_tx.subscribe());
+    let recording_notifications =
+        spawn_recording_notifications(client, org_rx, commands_tx, shutdown_tx.subscribe());
 
     (
         CloudHandles {
@@ -162,6 +166,6 @@ pub(crate) fn spawn_cloud_coordinators(
             recording_cancel,
             recording_notifications,
         },
-        notifications_rx,
+        commands_rx,
     )
 }

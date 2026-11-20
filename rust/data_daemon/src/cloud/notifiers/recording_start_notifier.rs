@@ -24,25 +24,44 @@
 //! pending one for the source — so recordings that follow each other with no
 //! gap stay separate no matter what order their stop and start notifications
 //! land in.
+//!
+//! An import recording the backend refuses to start (its item is already
+//! saved, or its session is gone) can never start, so it is handed to the
+//! dispatcher to discard rather than re-posted on every daemon start.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::broadcast;
+use chrono::Utc;
+use reqwest::StatusCode;
+use tokio::sync::{broadcast, mpsc};
 
 use super::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ApiClientError, RecordingStartSource};
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
+use crate::pipeline::dispatcher::RecordingCommand;
 use crate::state::{
     DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
 };
+
+/// Statuses with which the backend refuses an import recording for good.
+const IMPORT_REFUSAL_STATUSES: &[StatusCode] = &[
+    StatusCode::BAD_REQUEST,
+    StatusCode::FORBIDDEN,
+    StatusCode::NOT_FOUND,
+    StatusCode::CONFLICT,
+    StatusCode::UNPROCESSABLE_ENTITY,
+];
 
 /// Notifier that POSTs `/recording/start` and persists the cloud `recording_id`
 /// the backend mints. The cloud id is always minted here — every downstream
 /// coordinator waits on it — so an offline recording stays pending until the
 /// daemon is online and the start POST lands.
-struct StartNotifier;
+struct StartNotifier {
+    /// The dispatcher's command inbox, to discard refused imports.
+    commands: mpsc::Sender<RecordingCommand>,
+}
 
 #[async_trait]
 impl RecordingNotifier for StartNotifier {
@@ -88,6 +107,7 @@ impl RecordingNotifier for StartNotifier {
             &ctx.client,
             &ctx.bus,
             &ctx.org_rx,
+            &self.commands,
             recording_index,
         )
         .await;
@@ -100,9 +120,24 @@ pub fn spawn_recording_start_notifier(
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    commands: mpsc::Sender<RecordingCommand>,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> NotifierHandle {
-    spawn_notifier(StartNotifier, store, bus, client, org_rx, shutdown_rx)
+    spawn_notifier(
+        StartNotifier { commands },
+        store,
+        bus,
+        client,
+        org_rx,
+        shutdown_rx,
+    )
+}
+
+fn is_import_refusal(error: &ApiClientError) -> bool {
+    matches!(
+        error,
+        ApiClientError::Status { status, .. } if IMPORT_REFUSAL_STATUSES.contains(status)
+    )
 }
 
 async fn notify_backend(
@@ -110,6 +145,7 @@ async fn notify_backend(
     client: &Arc<ApiClient>,
     bus: &EventBus,
     org_rx: &OrgIdRx,
+    commands: &mpsc::Sender<RecordingCommand>,
     recording_index: i64,
 ) {
     let row = match store.get_recording(recording_index).await {
@@ -180,7 +216,20 @@ async fn notify_backend(
         );
         return;
     };
-    let instance = row.robot_instance.unwrap_or(0);
+    let source = match (row.import_item.as_ref(), row.robot_instance) {
+        (Some(item), _) => RecordingStartSource::ImportItem {
+            import_session_id: &item.import_session_id,
+            item_key: &item.item_key,
+        },
+        (None, Some(instance)) => RecordingStartSource::RobotInstance(instance),
+        (None, None) => {
+            tracing::warn!(
+                recording_index,
+                "recording has neither a robot instance nor an import item; skipping backend notify",
+            );
+            return;
+        }
+    };
     let Some(start_timestamp_us) = row.start_timestamp_us else {
         tracing::warn!(
             recording_index,
@@ -192,13 +241,7 @@ async fn notify_backend(
     // the backend derives the reported duration from it, so a late notify
     // (e.g. after reconnecting) still reports correctly.
     match client
-        .recording_start(
-            &org_id,
-            &robot_id,
-            instance,
-            &dataset_id,
-            start_timestamp_us,
-        )
+        .recording_start(&org_id, &robot_id, source, &dataset_id, start_timestamp_us)
         .await
     {
         Ok(recording_id) => {
@@ -225,6 +268,23 @@ async fn notify_backend(
                 // waiting on it — notably the stop notifier, for a recording
                 // that was stopped while offline before its start was notified.
                 bus.publish(DaemonEvent::RecordingCloudIdAssigned { recording_index });
+            }
+        }
+        Err(error) if row.import_item.is_some() && is_import_refusal(&error) => {
+            tracing::warn!(
+                %error,
+                recording_index,
+                "backend refused to start the import recording; discarding it",
+            );
+            let reject = RecordingCommand::Reject {
+                recording_index,
+                observed_at_ns: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            };
+            if commands.send(reject).await.is_err() {
+                tracing::warn!(
+                    recording_index,
+                    "dispatcher gone; the refused import recording is left for the next start",
+                );
             }
         }
         Err(error) => {
@@ -301,6 +361,14 @@ mod tests {
         org_rx
     }
 
+    /// A dispatcher inbox nobody reads, for tests that never refuse an import.
+    /// The receiver is leaked so sends never fail.
+    fn commands_tx() -> mpsc::Sender<RecordingCommand> {
+        let (commands_tx, commands_rx) = mpsc::channel(8);
+        Box::leak(Box::new(commands_rx));
+        commands_tx
+    }
+
     fn start_ok_mock(recording_id: &'static str) -> wiremock::Mock {
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/start"))
@@ -332,6 +400,7 @@ mod tests {
             bus.clone(),
             client,
             org_rx(Some("org-1")),
+            commands_tx(),
             shutdown_tx.subscribe(),
         );
 
@@ -392,15 +461,19 @@ mod tests {
 
         // Both rows are pending a start POST; only the cancelled one is safe
         // to re-drive on a timer.
-        let full = StartNotifier
-            .pending(&Arc::new(store.clone()))
-            .await
-            .unwrap();
+        let full = StartNotifier {
+            commands: commands_tx(),
+        }
+        .pending(&Arc::new(store.clone()))
+        .await
+        .unwrap();
         assert_eq!(full.len(), 2, "the full sweep still sees both");
-        let periodic = StartNotifier
-            .periodic_pending(&Arc::new(store.clone()))
-            .await
-            .unwrap();
+        let periodic = StartNotifier {
+            commands: commands_tx(),
+        }
+        .periodic_pending(&Arc::new(store.clone()))
+        .await
+        .unwrap();
         let indices: Vec<i64> = periodic.iter().map(|row| row.recording_index).collect();
         assert_eq!(
             indices,
@@ -428,6 +501,7 @@ mod tests {
             bus.clone(),
             client,
             org_rx(Some("org-1")),
+            commands_tx(),
             shutdown_tx.subscribe(),
         );
 
@@ -460,10 +534,10 @@ mod tests {
             body,
             serde_json::json!({
                 "robot_id": "robot-1",
-                "instance": 7,
                 "dataset_id": "ds-1",
                 "start_time": 1_600_000_000.123_457,
                 "start_timestamp_us": 1_600_000_000_123_457_i64,
+                "instance": 7,
             }),
             "the start carries the caller's start in microseconds and in seconds"
         );
@@ -495,6 +569,7 @@ mod tests {
             bus.clone(),
             client,
             org_rx(Some("org-1")),
+            commands_tx(),
             shutdown_tx.subscribe(),
         );
 
@@ -540,6 +615,7 @@ mod tests {
             bus.clone(),
             client,
             org_rx(Some("org-1")),
+            commands_tx(),
             shutdown_tx.subscribe(),
         );
 
@@ -595,6 +671,7 @@ mod tests {
             bus,
             client,
             org_rx(Some("org-1")),
+            commands_tx(),
             shutdown_tx.subscribe(),
         );
 
@@ -613,6 +690,178 @@ mod tests {
         })
         .await
         .expect("sweep must persist the minted cloud id within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    async fn seed_import_recording(store: &SqliteStateStore) -> i64 {
+        store
+            .create_recording(NewRecording {
+                source: Some(&Source::import_item("robot-1", "session-1", "episode_3")),
+                dataset_id: Some("ds-1"),
+                start: RecordingTimestamp {
+                    publish_timestamp_ns: 1_700_000_000_000_000_000,
+                    timestamp_us: Some(1_600_000_000_123_457),
+                },
+            })
+            .await
+            .expect("create recording")
+            .recording_index
+    }
+
+    fn start_refused_mock(status: u16) -> wiremock::Mock {
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/start"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(
+                serde_json::json!({ "detail": "IMPORT_SESSION_ITEM_ALREADY_SAVED" }),
+            ))
+    }
+
+    #[tokio::test]
+    async fn posts_an_import_start_by_its_session_item_without_an_instance() {
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-import-1").mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_import_recording(&store).await;
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            commands_tx(),
+            shutdown_tx.subscribe(),
+        );
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let row = store
+                    .get_recording(index)
+                    .await
+                    .expect("get")
+                    .expect("exists");
+                if row.recording_id.as_deref() == Some("cloud-import-1") {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the import's cloud id must be persisted within 3s");
+
+        let received = server.received_requests().await.expect("recorded requests");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "robot_id": "robot-1",
+                "dataset_id": "ds-1",
+                "start_time": 1_600_000_000.123_457,
+                "start_timestamp_us": 1_600_000_000_123_457_i64,
+                "source": {
+                    "type": "import_session",
+                    "import_session_id": "session-1",
+                    "item_key": "episode_3",
+                },
+            }),
+            "an import starts by its session item, with no robot instance"
+        );
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_import_start_is_handed_to_the_dispatcher_to_discard() {
+        let server = MockServer::start().await;
+        start_refused_mock(409).mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_import_recording(&store).await;
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let (commands, mut commands_rx) = mpsc::channel(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            commands,
+            shutdown_tx.subscribe(),
+        );
+
+        let command = timeout(Duration::from_secs(3), commands_rx.recv())
+            .await
+            .expect("the refusal must reach the dispatcher within 3s")
+            .expect("command");
+        assert!(
+            matches!(command, RecordingCommand::Reject { recording_index, .. } if recording_index == index),
+            "unexpected command {command:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "a refusal is final and is not retried"
+        );
+        assert!(store
+            .get_recording(index)
+            .await
+            .expect("get")
+            .expect("exists")
+            .recording_id
+            .is_none());
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_robot_start_is_kept_for_the_next_sweep() {
+        let server = MockServer::start().await;
+        start_refused_mock(409).mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        seed_recording(&store).await;
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let (commands, mut commands_rx) = mpsc::channel(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            commands,
+            shutdown_tx.subscribe(),
+        );
+
+        timeout(Duration::from_secs(3), async {
+            while server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the start must be posted within 3s");
+        sleep(Duration::from_millis(100)).await;
+        assert!(
+            commands_rx.try_recv().is_err(),
+            "a robot recording is never discarded on a refused start"
+        );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;

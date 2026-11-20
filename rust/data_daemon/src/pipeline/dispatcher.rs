@@ -274,6 +274,13 @@ pub enum RecordingCommand {
         open_recording_ids: HashSet<String>,
         observed_at_ns: i64,
     },
+    /// The backend refused to start the recording and never will, so all
+    /// local work on it must stop.
+    Reject {
+        recording_index: i64,
+        /// When the daemon learned of the refusal (Unix nanoseconds).
+        observed_at_ns: i64,
+    },
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -1053,6 +1060,20 @@ impl Dispatcher {
                 self.close_missing_from_snapshot(&open_recording_ids, observed_at_ns, recv_at)
                     .await;
             }
+            RecordingCommand::Reject {
+                recording_index,
+                observed_at_ns,
+            } => {
+                tracing::info!(
+                    recording_index,
+                    "discarding a recording the backend refused to start"
+                );
+                self.discard_recording(
+                    recording_index,
+                    observed_at_ns / NANOSECONDS_PER_MICROSECOND,
+                )
+                .await;
+            }
         }
     }
 
@@ -1323,6 +1344,11 @@ impl Dispatcher {
                 }
             },
         };
+        self.discard_recording(recording_index, timestamp_us).await;
+    }
+
+    /// Stop all local work on `recording_index`, which the backend ended.
+    async fn discard_recording(&mut self, recording_index: i64, timestamp_us: i64) {
         match self.take_window(recording_index) {
             // Still open: tear it down or its trace actors keep writing.
             Some((source, window)) => {
@@ -3392,6 +3418,101 @@ mod tests {
             !matches!(sub.try_recv(), Ok(DaemonEvent::RecordingCancelled { .. })),
             "an unknown recording id must not cancel anything"
         );
+    }
+
+    /// An import the backend refused is torn down like a discard: nothing it
+    /// captured may upload, and its lane is free for the next item.
+    #[tokio::test]
+    async fn a_rejected_import_recording_is_discarded() {
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let bus = crate::state::EventBus::new();
+        let mut sub = bus.subscribe();
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let dispatcher_context = DispatcherContext {
+            event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
+            notifications_rx: Some(command_rx),
+            recording_state: RecordingState::default(),
+        };
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            dispatcher_context,
+            shutdown_rx,
+        );
+
+        tx.send(Envelope::StartRecording {
+            source: Source::import_item("robot-1", "session-1", "episode_0"),
+            robot_name: None,
+            dataset_id: Some("ds-1".into()),
+            dataset_name: None,
+            publish_timestamp_ns: 1_000,
+            timestamp_us: 1,
+        })
+        .await
+        .unwrap();
+        let recording_index = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(DaemonEvent::RecordingStarted { recording_index }) = sub.recv().await {
+                    break recording_index;
+                }
+            }
+        })
+        .await
+        .expect("the import recording must start");
+        let row = store
+            .get_recording(recording_index)
+            .await
+            .unwrap()
+            .expect("recording exists");
+        assert_eq!(
+            row.import_item,
+            Some(ImportItem {
+                import_session_id: "session-1".into(),
+                item_key: "episode_0".into(),
+            })
+        );
+        assert_eq!(row.robot_instance, None);
+
+        send_command_and_wait(
+            &command_tx,
+            RecordingCommand::Reject {
+                recording_index,
+                observed_at_ns: 2_000,
+            },
+        )
+        .await;
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let row = store
+            .get_recording(recording_index)
+            .await
+            .unwrap()
+            .expect("recording exists");
+        assert!(
+            row.cancelled_at.is_some(),
+            "a rejected import must be burned"
+        );
+        assert!(
+            row.backend_cancel_notified_at.is_some(),
+            "the backend never opened it, so there is no cancel to send"
+        );
+        let mut saw_cancel = false;
+        while let Ok(event) = sub.try_recv() {
+            if matches!(
+                event,
+                DaemonEvent::RecordingCancelled { recording_index: index } if index == recording_index
+            ) {
+                saw_cancel = true;
+            }
+        }
+        assert!(saw_cancel, "RecordingCancelled must be published");
     }
 
     #[tokio::test]
