@@ -157,15 +157,21 @@ pub(crate) fn spawn_cloud_coordinators(
         Arc::clone(&client),
         shutdown_tx.subscribe(),
     );
+    let notifications_store = state_store.clone();
     let recording_cancel = spawn_recording_cancel_notifier(
         state_store,
-        event_bus,
+        event_bus.clone(),
         Arc::clone(&client),
         org_rx.clone(),
         shutdown_tx.subscribe(),
     );
-    let (notifications_rx, recording_notifications) =
-        spawn_recording_notifications(client, org_rx, shutdown_tx.subscribe());
+    let (notifications_rx, recording_notifications) = spawn_recording_notifications(
+        client,
+        org_rx,
+        notifications_store,
+        event_bus,
+        shutdown_tx.subscribe(),
+    );
 
     (
         CloudHandles {

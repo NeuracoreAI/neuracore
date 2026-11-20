@@ -9,6 +9,17 @@
 //! stream here keeps the recording's identity attached all the way to the
 //! dispatcher, which acts on the named recording or not at all.
 //!
+//! A recording started from the web app names its robot and dataset by their
+//! server ids, while this daemon labels a robot's logged data with its robot
+//! row. Each start is matched to the robot row that holds the server id, and
+//! its dataset to the dataset row that does (made, already confirmed, when
+//! there is none). A start that no robot row matches yet is held until its
+//! stop, as the robot may connect on this machine, or be registered, after
+//! the recording started. It is matched again each time a robot is
+//! registered, and dropped when its stop or discard arrives first, or when the
+//! snapshot after a reconnect no longer lists it. A start for a robot on
+//! another machine is held the same way and never matches.
+//!
 //! Availability, not correctness: producer-bracketed recordings work whether or
 //! not this task is connected. A dropped connection is retried with capped
 //! backoff, and every subscribe opens with the backend's `INIT` snapshot, so
@@ -27,11 +38,15 @@ use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingCommand;
+use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore, StateStoreError};
 
 /// Backoff floor after a failed or dropped connection.
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 /// Backoff ceiling.
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// How often a held start is matched again when no robot is registered, in
+/// case a registration was missed.
+const HOLD_RECHECK: Duration = Duration::from_secs(30);
 /// Cap on a single SSE frame; anything larger is a malformed stream.
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 
@@ -57,22 +72,29 @@ impl RecordingNotificationsHandle {
 pub fn spawn_recording_notifications(
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    store: SqliteStateStore,
+    bus: EventBus,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (
     mpsc::Receiver<RecordingCommand>,
     RecordingNotificationsHandle,
 ) {
     let (tx, rx) = mpsc::channel::<RecordingCommand>(64);
-    let join = tokio::spawn(run(client, org_rx, tx, shutdown_rx));
+    let join = tokio::spawn(run(client, org_rx, Arc::new(store), bus, tx, shutdown_rx));
     (rx, RecordingNotificationsHandle { join })
 }
 
 async fn run(
     client: Arc<ApiClient>,
     mut org_rx: OrgIdRx,
+    store: Arc<SqliteStateStore>,
+    bus: EventBus,
     tx: mpsc::Sender<RecordingCommand>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
+    // Kept across reconnects: a start held on one subscription is ended by a
+    // stop that arrives on the next.
+    let held: Held = Arc::default();
     let stream_client = match reqwest::Client::builder().build() {
         Ok(stream_client) => stream_client,
         Err(error) => {
@@ -106,7 +128,13 @@ async fn run(
                 backoff = RECONNECT_MIN;
                 continue;
             }
-            outcome = consume(&stream_client, &client, &org_id, &tx) => outcome,
+            outcome = consume(&stream_client, &client, Matcher {
+                store: Arc::clone(&store),
+                org_id: org_id.clone(),
+                tx: tx.clone(),
+                held: Arc::clone(&held),
+                bus: bus.clone(),
+            }) => outcome,
         };
 
         match outcome {
@@ -139,6 +167,7 @@ async fn run(
 }
 
 /// Why a subscription stopped.
+#[derive(Debug)]
 enum StreamEnded {
     /// The dispatcher's receiver is gone — nothing left to feed.
     Closed,
@@ -152,9 +181,9 @@ enum StreamEnded {
 async fn consume(
     stream_client: &reqwest::Client,
     client: &ApiClient,
-    org_id: &str,
-    tx: &mpsc::Sender<RecordingCommand>,
+    matcher: Matcher,
 ) -> Result<(), StreamEnded> {
+    let org_id = matcher.org_id.as_str();
     let started = Instant::now();
     let token = client
         .auth()
@@ -204,9 +233,7 @@ async fn consume(
         for frame in take_frames(&mut buffer) {
             for mut command in parse_notification(&frame) {
                 keep_opened_in_snapshot(&mut command, &mut opened);
-                if tx.send(command).await.is_err() {
-                    return Err(StreamEnded::Closed);
-                }
+                matcher.forward(command).await?;
             }
         }
         if buffer.len() > MAX_FRAME_BYTES {
@@ -216,6 +243,195 @@ async fn consume(
         }
     }
     Ok(())
+}
+
+/// Starts held until a robot row matches them, by recording id. An async
+/// lock: a held start and a stop are each sent while holding it, so a stop can
+/// never overtake the start it ends.
+type Held = Arc<tokio::sync::Mutex<HashSet<String>>>;
+
+/// What matching a recording started from the web app to this daemon's rows
+/// needs, for one subscription.
+#[derive(Clone)]
+struct Matcher {
+    store: Arc<SqliteStateStore>,
+    org_id: String,
+    tx: mpsc::Sender<RecordingCommand>,
+    held: Held,
+    bus: EventBus,
+}
+
+impl Matcher {
+    /// Send `command` to the dispatcher, a start matched to this daemon's
+    /// rows. A start no robot row matches yet is held until its stop, and sent
+    /// once one does: the robot may connect on this machine, or be registered,
+    /// after the recording started. Errs when the dispatcher is gone.
+    async fn forward(&self, command: RecordingCommand) -> Result<(), StreamEnded> {
+        match command {
+            RecordingCommand::Open { .. } => {
+                match with_rows(&command, &self.store, &self.org_id).await {
+                    Ok(Some(open)) => self.send(open).await,
+                    Ok(None) => {
+                        self.hold(command).await;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "failed to match a recording started from the web app"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            RecordingCommand::Close {
+                ref recording_id, ..
+            } => {
+                // Under the lock, a held start of this recording is either sent
+                // before this stop or never.
+                let mut held = self.held.lock().await;
+                held.remove(recording_id);
+                let sent = self.send(command).await;
+                drop(held);
+                sent
+            }
+            RecordingCommand::Discard {
+                ref cloud_recording_id,
+                ..
+            } => {
+                self.held.lock().await.remove(cloud_recording_id);
+                self.send(command).await
+            }
+            RecordingCommand::Snapshot {
+                ref open_recording_ids,
+                ..
+            } => {
+                // A held start whose stop came while the stream was down is
+                // no longer running.
+                self.held
+                    .lock()
+                    .await
+                    .retain(|recording_id| open_recording_ids.contains(recording_id));
+                self.send(command).await
+            }
+        }
+    }
+
+    async fn send(&self, command: RecordingCommand) -> Result<(), StreamEnded> {
+        self.tx.send(command).await.map_err(|_| StreamEnded::Closed)
+    }
+
+    /// Hold `open` until a robot row matches it or its stop arrives.
+    async fn hold(&self, open: RecordingCommand) {
+        let RecordingCommand::Open { recording_id, .. } = &open else {
+            return;
+        };
+        // The snapshot after a reconnect lists a held start again.
+        if !self.held.lock().await.insert(recording_id.clone()) {
+            return;
+        }
+        tracing::debug!(
+            recording_id,
+            "recording started from the web app waits for its robot to connect here"
+        );
+        let events = self.bus.subscribe();
+        let matcher = self.clone();
+        let recording_id = recording_id.clone();
+        tokio::spawn(async move { matcher.wait_for_robot(open, recording_id, events).await });
+    }
+
+    /// Match a held start again each time a robot is registered, and send it
+    /// once it matches. It is dropped once it is no longer held: its stop or
+    /// discard arrived, or a reconnect's snapshot no longer lists it.
+    async fn wait_for_robot(
+        self,
+        open: RecordingCommand,
+        recording_id: String,
+        mut events: broadcast::Receiver<DaemonEvent>,
+    ) {
+        loop {
+            if !self.held.lock().await.contains(&recording_id) {
+                return;
+            }
+            match with_rows(&open, &self.store, &self.org_id).await {
+                Ok(Some(matched)) => {
+                    let mut held = self.held.lock().await;
+                    if held.remove(&recording_id) {
+                        let _ = self.tx.send(matched).await;
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(%error, recording_id, "failed to match a held start")
+                }
+            }
+            if !robot_registered_or_timeout(&mut events).await {
+                return;
+            }
+        }
+    }
+}
+
+/// Wait until a robot row is registered, or [`HOLD_RECHECK`] passes. `false`
+/// when the daemon is shutting down.
+async fn robot_registered_or_timeout(events: &mut broadcast::Receiver<DaemonEvent>) -> bool {
+    tokio::time::timeout(HOLD_RECHECK, async {
+        loop {
+            match events.recv().await {
+                Ok(DaemonEvent::RobotResolved { .. })
+                | Err(broadcast::error::RecvError::Lagged(_)) => return true,
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(true)
+}
+
+/// `open` with its robot and dataset rows, or `None` when no robot row holds
+/// its robot's server id yet.
+async fn with_rows(
+    open: &RecordingCommand,
+    store: &SqliteStateStore,
+    org_id: &str,
+) -> Result<Option<RecordingCommand>, StateStoreError> {
+    let RecordingCommand::Open {
+        recording_id,
+        robot_id,
+        robot_instance,
+        cloud_dataset_id,
+        start_timestamp_ns,
+        start_timestamp_us,
+        ..
+    } = open
+    else {
+        return Ok(Some(open.clone()));
+    };
+    let Some(robot_index) = store
+        .robot_index_for_cloud_id(org_id, robot_id, *robot_instance)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let dataset_index = match cloud_dataset_id {
+        Some(cloud_dataset_id) => Some(
+            store
+                .dataset_index_for_cloud_id(org_id, cloud_dataset_id)
+                .await?,
+        ),
+        None => None,
+    };
+    Ok(Some(RecordingCommand::Open {
+        recording_id: recording_id.clone(),
+        robot_id: robot_index.to_string(),
+        robot_instance: *robot_instance,
+        dataset_index,
+        cloud_dataset_id: None,
+        start_timestamp_ns: *start_timestamp_ns,
+        start_timestamp_us: *start_timestamp_us,
+    }))
 }
 
 /// Split every complete SSE frame out of `buffer`, leaving any partial tail.
@@ -370,7 +586,8 @@ fn open_command(payload: StartPayload) -> RecordingCommand {
         recording_id: payload.recording_id,
         robot_id: payload.robot_id,
         robot_instance: payload.instance,
-        dataset_id: payload.dataset_ids.into_iter().next(),
+        dataset_index: None,
+        cloud_dataset_id: payload.dataset_ids.into_iter().next(),
         start_timestamp_ns: seconds_to_nanos(payload.start_time),
         start_timestamp_us: seconds_to_microseconds(payload.start_time),
     }
@@ -431,7 +648,8 @@ mod tests {
                 recording_id: "rec-1".into(),
                 robot_id: "robot-1".into(),
                 robot_instance: 2,
-                dataset_id: Some("ds-1".into()),
+                dataset_index: None,
+                cloud_dataset_id: Some("ds-1".into()),
                 start_timestamp_ns: 1_500_000_000,
                 start_timestamp_us: 1_500_000,
             }]
@@ -483,7 +701,8 @@ mod tests {
                     recording_id: "rec-1".into(),
                     robot_id: "robot-1".into(),
                     robot_instance: 0,
-                    dataset_id: Some("ds-1".into()),
+                    dataset_index: None,
+                    cloud_dataset_id: Some("ds-1".into()),
                     start_timestamp_ns: 1_500_000_000,
                     start_timestamp_us: 1_500_000,
                 },
@@ -491,7 +710,8 @@ mod tests {
                     recording_id: "rec-2".into(),
                     robot_id: "robot-2".into(),
                     robot_instance: 1,
-                    dataset_id: None,
+                    dataset_index: None,
+                    cloud_dataset_id: None,
                     start_timestamp_ns: 2_000_000_000,
                     start_timestamp_us: 2_000_000,
                 },
@@ -575,6 +795,201 @@ mod tests {
             }] => assert_eq!(cloud_recording_id, "rec-1"),
             other => panic!("DISCARDED produced {other:?}"),
         }
+    }
+
+    async fn open_store() -> (Arc<SqliteStateStore>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        (Arc::new(store), dir)
+    }
+
+    /// Connect instance 2 of "arm" in org-1, as a process does.
+    async fn connect_arm(store: &SqliteStateStore) -> i64 {
+        store
+            .connect_robot(&data_daemon_shared::RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 2,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .unwrap()
+            .robot_index
+    }
+
+    fn web_start(recording_id: &str) -> RecordingCommand {
+        parse_notification(&format!(
+            r#"{{"type":"START","payload":{{"recording_id":"{recording_id}",
+               "robot_id":"cloud-robot-1","instance":2,"created_by":"someone",
+               "dataset_ids":["cloud-dataset-1"],"start_time":1.5}}}}"#
+        ))
+        .remove(0)
+    }
+
+    fn matcher(store: &Arc<SqliteStateStore>) -> (Matcher, mpsc::Receiver<RecordingCommand>) {
+        let (tx, rx) = mpsc::channel(8);
+        let matcher = Matcher {
+            store: Arc::clone(store),
+            org_id: "org-1".into(),
+            tx,
+            held: Arc::default(),
+            bus: EventBus::new(),
+        };
+        (matcher, rx)
+    }
+
+    /// The server registers robot row `robot_index`, as the robot resolver
+    /// does.
+    async fn register(matcher: &Matcher, robot_index: i64) {
+        matcher
+            .store
+            .resolve_robot(robot_index, "cloud-robot-1", None)
+            .await
+            .unwrap();
+        matcher
+            .bus
+            .publish(DaemonEvent::RobotResolved { robot_index });
+    }
+
+    async fn nothing_sent(rx: &mut mpsc::Receiver<RecordingCommand>) -> bool {
+        tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .is_err()
+    }
+
+    #[tokio::test]
+    async fn a_web_start_is_matched_to_the_robot_row_holding_its_server_id() {
+        let (store, _dir) = open_store().await;
+        let robot_index = connect_arm(&store).await;
+        store
+            .resolve_robot(robot_index, "cloud-robot-1", None)
+            .await
+            .unwrap();
+        let (matcher, mut rx) = matcher(&store);
+
+        matcher.forward(web_start("rec-1")).await.unwrap();
+
+        let Some(RecordingCommand::Open {
+            robot_id,
+            dataset_index,
+            ..
+        }) = rx.recv().await
+        else {
+            panic!("expected an open");
+        };
+        assert_eq!(robot_id, robot_index.to_string());
+        let dataset = store
+            .get_dataset(dataset_index.expect("a dataset row"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dataset.cloud_dataset_id.as_deref(), Some("cloud-dataset-1"));
+        assert_eq!(dataset.status, crate::state::ResolutionStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn a_web_start_waits_for_its_robot_to_be_registered() {
+        let (store, _dir) = open_store().await;
+        let robot_index = connect_arm(&store).await;
+        let (matcher, mut rx) = matcher(&store);
+
+        matcher.forward(web_start("rec-1")).await.unwrap();
+        // The snapshot after a reconnect lists it again: still one start.
+        matcher.forward(web_start("rec-1")).await.unwrap();
+        assert!(nothing_sent(&mut rx).await);
+        register(&matcher, robot_index).await;
+
+        let sent = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("sent once the robot is registered")
+            .unwrap();
+        assert!(matches!(
+            sent,
+            RecordingCommand::Open { ref robot_id, .. } if *robot_id == robot_index.to_string()
+        ));
+        assert!(nothing_sent(&mut rx).await, "the start is sent once");
+    }
+
+    #[tokio::test]
+    async fn a_held_web_start_whose_stop_comes_first_is_dropped() {
+        let (store, _dir) = open_store().await;
+        let robot_index = connect_arm(&store).await;
+        let (matcher, mut rx) = matcher(&store);
+        matcher.forward(web_start("rec-1")).await.unwrap();
+
+        let stop =
+            parse_notification(r#"{"type":"STOP","payload":{"recording_id":"rec-1"}}"#).remove(0);
+        matcher.forward(stop).await.unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(RecordingCommand::Close { .. })
+        ));
+        register(&matcher, robot_index).await;
+
+        assert!(
+            nothing_sent(&mut rx).await,
+            "nothing is opened for a recording that already ended"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_web_start_before_its_robot_connects_is_sent_once_it_connects() {
+        let (store, _dir) = open_store().await;
+        let (matcher, mut rx) = matcher(&store);
+
+        // No robot row on this machine yet: held, not dropped.
+        matcher.forward(web_start("rec-1")).await.unwrap();
+        assert!(nothing_sent(&mut rx).await);
+        let robot_index = connect_arm(&store).await;
+        register(&matcher, robot_index).await;
+
+        let sent = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("sent once the robot connects and is registered")
+            .unwrap();
+        assert!(matches!(
+            sent,
+            RecordingCommand::Open { ref robot_id, .. } if *robot_id == robot_index.to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_held_web_start_is_dropped_when_discarded_or_no_longer_running() {
+        let (store, _dir) = open_store().await;
+        let (matcher, mut rx) = matcher(&store);
+        matcher.forward(web_start("rec-1")).await.unwrap();
+        matcher.forward(web_start("rec-2")).await.unwrap();
+        matcher.forward(web_start("rec-3")).await.unwrap();
+
+        let discard =
+            parse_notification(r#"{"type":"DISCARDED","payload":{"recording_id":"rec-1"}}"#)
+                .remove(0);
+        matcher.forward(discard).await.unwrap();
+        // After a reconnect only rec-3 is still running.
+        matcher
+            .forward(RecordingCommand::Snapshot {
+                open_recording_ids: HashSet::from(["rec-3".to_string()]),
+                observed_at_ns: 0,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *matcher.held.lock().await,
+            HashSet::from(["rec-3".to_string()])
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(RecordingCommand::Discard { .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(RecordingCommand::Snapshot { .. })
+        ));
     }
 
     #[test]

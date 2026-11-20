@@ -232,10 +232,8 @@ async fn stored_recording_id(store: &SqliteStateStore, recording_index: i64) -> 
 struct AnnouncedRecording {
     /// The backend's id, when the announcement carried one.
     recording_id: Option<String>,
-    /// The recording's row in `datasets`, when the SDK started it.
+    /// The recording's row in `datasets`.
     dataset_index: Option<i64>,
-    /// The server's dataset id, when the web app started it.
-    dataset_id: Option<String>,
     /// The window's lower bound on the publish clock.
     open_at_ns: i64,
     /// The recording's own capture-clock start, stored as the row's start.
@@ -257,9 +255,15 @@ pub enum RecordingCommand {
     /// The backend minted a recording for this source.
     Open {
         recording_id: String,
+        /// The robot's row in `robots`, as text: the label its logged data
+        /// carries. The notification watcher finds it from the server id.
         robot_id: String,
         robot_instance: i64,
-        dataset_id: Option<String>,
+        /// The recording's row in `datasets`.
+        dataset_index: Option<i64>,
+        /// The server's id for the dataset, as the notification named it. The
+        /// watcher turns it into `dataset_index`; the dispatcher ignores it.
+        cloud_dataset_id: Option<String>,
         /// The recording's start on the backend's record (Unix nanoseconds),
         /// used as the window's publish-clock open.
         start_timestamp_ns: i64,
@@ -591,7 +595,6 @@ impl Dispatcher {
                     source.clone(),
                     dataset_index,
                     None,
-                    None,
                     publish_timestamp_ns,
                     timestamp_us,
                 )
@@ -787,7 +790,6 @@ impl Dispatcher {
         &mut self,
         source: Source,
         dataset_index: Option<i64>,
-        dataset_id: Option<String>,
         recording_id: Option<String>,
         publish_timestamp_ns: i64,
         timestamp_us: i64,
@@ -809,7 +811,6 @@ impl Dispatcher {
         let announced = AnnouncedRecording {
             recording_id,
             dataset_index,
-            dataset_id,
             open_at_ns: publish_timestamp_ns,
             start_timestamp_us: timestamp_us,
             recording_index: None,
@@ -906,14 +907,15 @@ impl Dispatcher {
         // The row's start is the caller's *capture* time, which the backend
         // gets as `start_time`, stored beside the start's publish time; the
         // window opens on the *publish* clock below.
-        // A robot connected through the daemon labels its data with its row in
-        // `robots`, which the recording points at; a server robot id is no row.
+        // The robot id is the robot's row in `robots`, which the recording
+        // points at; it also stays the label `recordings_for_source` finds the
+        // recording by.
         let new = NewRecording {
             robot_index: source.0.parse().ok(),
             dataset_index: announced.dataset_index,
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
-            dataset_id: announced.dataset_id.as_deref(),
+            dataset_id: None,
             start: caller_timestamp(announced.open_at_ns, announced.start_timestamp_us),
         };
         let recording_index = match self.store.create_recording(new).await {
@@ -1030,14 +1032,14 @@ impl Dispatcher {
                 recording_id,
                 robot_id,
                 robot_instance,
-                dataset_id,
+                dataset_index,
                 start_timestamp_ns,
                 start_timestamp_us,
+                ..
             } => {
                 self.announce_recording(
                     (robot_id, robot_instance),
-                    None,
-                    dataset_id,
+                    dataset_index,
                     Some(recording_id),
                     start_timestamp_ns,
                     start_timestamp_us,
@@ -3617,7 +3619,8 @@ mod tests {
             recording_id: recording_id.into(),
             robot_id: robot.into(),
             robot_instance: 0,
-            dataset_id: None,
+            dataset_index: None,
+            cloud_dataset_id: None,
             start_timestamp_ns: start_ns,
             start_timestamp_us: start_ns / NANOSECONDS_PER_MICROSECOND,
         }
