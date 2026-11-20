@@ -161,7 +161,6 @@ pub trait StateStore: Send + Sync {
 
     /// The dataset rows the server is due to confirm at `now`, as
     /// [`Self::robots_to_resolve`].
-    #[allow(dead_code)] // Used by the dataset resolver.
     async fn datasets_to_resolve(
         &self,
         now: NaiveDateTime,
@@ -177,7 +176,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Option<NaiveDateTime>, StateStoreError>;
 
     /// As [`Self::next_robot_attempt_at`], for dataset rows.
-    #[allow(dead_code)] // Used by the dataset resolver.
     async fn next_dataset_attempt_at(
         &self,
         now: NaiveDateTime,
@@ -197,7 +195,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<bool, StateStoreError>;
 
     /// Record that the server confirmed a dataset row as `cloud_dataset_id`.
-    #[allow(dead_code)] // Used by the dataset resolver.
     async fn resolve_dataset(
         &self,
         dataset_index: i64,
@@ -216,7 +213,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<(), StateStoreError>;
 
     /// As [`Self::hold_robot`], for a dataset row.
-    #[allow(dead_code)] // Used by the dataset resolver.
     async fn hold_dataset(
         &self,
         dataset_index: i64,
@@ -233,7 +229,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<(), StateStoreError>;
 
     /// Mark a `pending` dataset row refused for good, with `reason`.
-    #[allow(dead_code)] // Used by the dataset resolver.
     async fn fail_dataset(
         &self,
         dataset_index: i64,
