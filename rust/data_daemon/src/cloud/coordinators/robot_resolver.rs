@@ -18,6 +18,8 @@
 //! at startup, when a robot is connected, on reconnect, after it missed
 //! events, and while online when the earliest wait runs out.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,23 +30,27 @@ use super::resolution::{
     blocked_message, classify, retry_at, spawn_resolver, Failure, ResolverHandle, RowResolver,
 };
 use crate::api::ApiClient;
+use crate::cloud::robot_packages::{self, SendError};
 use crate::intervals::{BLOCKED_ID_RETRY, PASSING_ID_RETRY};
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::{
     DaemonEvent, EventBus, RobotRow, SqliteStateStore, StateStore, StateStoreError,
 };
+use crate::storage::paths::is_in_robot_packages;
 
 /// Spawn the robot resolver on the current Tokio runtime.
 pub fn spawn_robot_resolver(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
+    packages_root: PathBuf,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> ResolverHandle {
     let resolver = RobotResolver {
         store: Arc::new(store),
         client,
         bus: bus.clone(),
+        packages_root,
     };
     spawn_resolver(resolver, &bus, shutdown_rx)
 }
@@ -54,6 +60,9 @@ struct RobotResolver {
     store: Arc<SqliteStateStore>,
     client: Arc<ApiClient>,
     bus: EventBus,
+    /// Where the SDK saves robot packages
+    /// ([`crate::storage::paths::robot_packages_root`]).
+    packages_root: PathBuf,
 }
 
 #[async_trait]
@@ -64,6 +73,17 @@ impl RowResolver for RobotResolver {
 
     fn wakes_on(&self, event: &DaemonEvent) -> bool {
         matches!(event, DaemonEvent::RobotConnected { .. })
+    }
+
+    /// Delete old packages no robot row names.
+    async fn startup(&self) {
+        match self.store.robot_package_paths().await {
+            Ok(paths) => {
+                let referenced: HashSet<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+                robot_packages::remove_unreferenced(&self.packages_root, &referenced).await;
+            }
+            Err(error) => tracing::warn!(%error, "failed to list the saved robot packages"),
+        }
     }
 
     async fn resolve_due(&self) {
@@ -87,7 +107,8 @@ impl RowResolver for RobotResolver {
 
 impl RobotResolver {
     /// Register one robot row's instance, as `nc.connect_robot` does online,
-    /// in the organization stored on the row.
+    /// in the organization stored on the row, then send its saved package if
+    /// the server needs it.
     async fn resolve(&self, robot: &RobotRow) {
         let RobotRow {
             robot_index,
@@ -95,6 +116,8 @@ impl RobotResolver {
             name,
             shared,
             instance,
+            overwrite_urdf,
+            package_path,
             ..
         } = robot;
         // Only rows made for earlier recordings have no organization or name,
@@ -115,12 +138,47 @@ impl RobotResolver {
             .await
         {
             Ok(registered) => {
+                // The daemon only reads or deletes a package in its own
+                // folder; a path from anywhere else is left alone.
+                let package = package_path.as_deref().filter(|package| {
+                    is_in_robot_packages(&self.packages_root, Path::new(package))
+                });
+                if package.is_none() && package_path.is_some() {
+                    tracing::warn!(
+                        robot_index,
+                        "the robot's package is outside the package folder; it is not sent"
+                    );
+                }
+                if let Some(package) = package {
+                    let sent = robot_packages::send_package(
+                        &self.client,
+                        org_id,
+                        Path::new(package),
+                        &registered,
+                        *shared,
+                        *overwrite_urdf,
+                    )
+                    .await;
+                    if let Err(error) = sent {
+                        // The upload has no 403 of its own either.
+                        let failure = match &error {
+                            SendError::Read(_) => Failure::Retry,
+                            SendError::Upload(error) => classify(error),
+                        };
+                        self.hold(*robot_index, name, failure, &error.to_string())
+                            .await;
+                        return;
+                    }
+                }
                 match self
                     .store
-                    .resolve_robot(*robot_index, &registered.robot_id, None)
+                    .resolve_robot(*robot_index, &registered.robot_id, package_path.as_deref())
                     .await
                 {
                     Ok(true) => {
+                        if let Some(package) = package {
+                            robot_packages::remove_package(Path::new(package)).await;
+                        }
                         tracing::info!(
                             robot_index,
                             robot = name,
@@ -248,7 +306,33 @@ mod tests {
                 store: Arc::clone(&self.store),
                 client: Arc::new(client(server)),
                 bus: self.bus.clone(),
+                packages_root: self.packages_root(),
             }
+        }
+
+        fn packages_root(&self) -> PathBuf {
+            self._dir.path().join("packages")
+        }
+
+        /// Connect instance 0 of "arm" in org-1 with a saved package.
+        async fn connect_with_package(&self) -> (i64, PathBuf) {
+            std::fs::create_dir_all(self.packages_root()).unwrap();
+            let package = self.packages_root().join("arm.zip");
+            std::fs::write(&package, b"zip bytes").unwrap();
+            let robot_index = self
+                .store
+                .connect_robot(&RobotSpec {
+                    org_id: "org-1".into(),
+                    name: "arm".into(),
+                    shared: false,
+                    instance: 0,
+                    overwrite_urdf: false,
+                    package_path: Some(package.display().to_string()),
+                })
+                .await
+                .unwrap()
+                .robot_index;
+            (robot_index, package)
         }
 
         async fn robot(&self, robot_index: i64) -> RobotRow {
@@ -378,6 +462,92 @@ mod tests {
         assert_eq!(robot.reason, Some(ResolutionReason::Rejected));
     }
 
+    fn package_upload(status: u16) -> Mock {
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/cloud-robot-9/package"))
+            .respond_with(ResponseTemplate::new(status))
+    }
+
+    #[tokio::test]
+    async fn the_saved_package_is_sent_before_the_robot_counts_as_registered() {
+        let fixture = Fixture::new().await;
+        let (robot_index, package) = fixture.connect_with_package().await;
+        let server = MockServer::start().await;
+        robot_upsert("org-1", 200).mount(&server).await;
+        package_upload(200).expect(1).mount(&server).await;
+
+        pass(&fixture.resolver(&server), true).await;
+
+        let robot = fixture.robot(robot_index).await;
+        assert_eq!(robot.status, ResolutionStatus::Done);
+        assert_eq!(robot.package_path, None);
+        assert!(!package.exists(), "the sent package is deleted");
+    }
+
+    #[tokio::test]
+    async fn a_package_outside_the_package_folder_is_neither_sent_nor_deleted() {
+        let fixture = Fixture::new().await;
+        let outside = fixture._dir.path().join("arm.urdf");
+        std::fs::write(&outside, b"urdf").unwrap();
+        let robot_index = fixture
+            .store
+            .connect_robot(&RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 0,
+                overwrite_urdf: false,
+                package_path: Some(outside.display().to_string()),
+            })
+            .await
+            .unwrap()
+            .robot_index;
+        let server = MockServer::start().await;
+        robot_upsert("org-1", 200).mount(&server).await;
+        package_upload(200).expect(0).mount(&server).await;
+
+        pass(&fixture.resolver(&server), true).await;
+
+        assert_eq!(
+            fixture.robot(robot_index).await.status,
+            ResolutionStatus::Done
+        );
+        assert!(outside.exists(), "a file outside the package folder stays");
+    }
+
+    #[tokio::test]
+    async fn a_failed_package_upload_holds_the_robot_and_keeps_the_package() {
+        let fixture = Fixture::new().await;
+        let (robot_index, package) = fixture.connect_with_package().await;
+        let server = MockServer::start().await;
+        robot_upsert("org-1", 200).mount(&server).await;
+        package_upload(503).mount(&server).await;
+
+        pass(&fixture.resolver(&server), true).await;
+
+        let robot = fixture.robot(robot_index).await;
+        assert_eq!(robot.status, ResolutionStatus::Pending);
+        assert!(robot.next_attempt_at.is_some());
+        assert!(package.exists());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_package_does_not_hold_the_robot_back() {
+        let fixture = Fixture::new().await;
+        let (robot_index, package) = fixture.connect_with_package().await;
+        let server = MockServer::start().await;
+        robot_upsert("org-1", 200).mount(&server).await;
+        package_upload(422).mount(&server).await;
+
+        pass(&fixture.resolver(&server), true).await;
+
+        assert_eq!(
+            fixture.robot(robot_index).await.status,
+            ResolutionStatus::Done
+        );
+        assert!(!package.exists());
+    }
+
     #[tokio::test]
     async fn the_task_registers_a_connected_robot() {
         let fixture = Fixture::new().await;
@@ -388,6 +558,7 @@ mod tests {
             (*fixture.store).clone(),
             fixture.bus.clone(),
             Arc::new(client(&server)),
+            fixture.packages_root(),
             shutdown_tx.subscribe(),
         );
         sleep(Duration::from_millis(100)).await;

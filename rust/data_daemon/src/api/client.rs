@@ -142,6 +142,20 @@ impl ApiClientError {
     }
 }
 
+/// The slowest link a robot package upload is given time for, in bytes per
+/// second.
+const PACKAGE_UPLOAD_MIN_BYTES_PER_SEC: u64 = 50_000;
+
+/// How long uploading a robot package of `bytes` may take: the usual
+/// `request_timeout` plus the time to send it at
+/// [`PACKAGE_UPLOAD_MIN_BYTES_PER_SEC`]. A large package on a slow link is
+/// not cut off, and a small one still fails about as fast as any request.
+fn package_upload_timeout(request_timeout: Duration, bytes: usize) -> Duration {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    request_timeout
+        + Duration::from_millis(bytes.saturating_mul(1000) / PACKAGE_UPLOAD_MIN_BYTES_PER_SEC)
+}
+
 /// Upload connection-pool tuning for [`build_upload_client`]. Sized together for
 /// the uploader's burst of concurrent per-file PUTs:
 /// - `MAX_IDLE_PER_HOST` matches the uploader's `MAX_CONCURRENT_UPLOADS` so a
@@ -486,6 +500,33 @@ impl ApiClient {
         serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)
     }
 
+    /// `PUT /org/{org}/robots/{robot}/package?is_shared=`: upload a robot's
+    /// URDF package, the zip `nc.connect_robot` builds.
+    pub async fn upload_robot_package(
+        &self,
+        org_id: &str,
+        robot_id: &str,
+        shared: bool,
+        package: &[u8],
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/robots/{robot_id}/package");
+        let timeout = package_upload_timeout(self.options.timeout, package.len());
+        let _ = self
+            .send_with_retry(Method::PUT, &path, |builder| {
+                // A form is consumed by sending, so each attempt builds its own.
+                let part = reqwest::multipart::Part::bytes(package.to_vec())
+                    .file_name("robot_package.zip")
+                    .mime_str("application/zip")
+                    .expect("a valid MIME type");
+                builder
+                    .timeout(timeout)
+                    .query(&[("is_shared", shared)])
+                    .multipart(reqwest::multipart::Form::new().part("robot_package", part))
+            })
+            .await?;
+        Ok(())
+    }
+
     /// `GET /org/{org}/datasets/search/by-name?name=`: the dataset of that
     /// name in the org, or `None` when there is none.
     pub async fn dataset_by_name(
@@ -719,7 +760,7 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::encoding::video_encoder::LossyVideoCodec;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::matchers::{body_json, body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn options(base_url: String) -> ApiClientOptions {
@@ -812,6 +853,63 @@ mod tests {
             .unwrap_err();
 
         assert!(error.is_forbidden());
+    }
+
+    #[tokio::test]
+    async fn upload_robot_package_sends_the_zip_as_robot_package() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/robot-9/package"))
+            .and(query_param("is_shared", "false"))
+            .and(body_string_contains("name=\"robot_package\""))
+            .and(body_string_contains("filename=\"robot_package.zip\""))
+            .and(body_string_contains("zip bytes"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .upload_robot_package("org-1", "robot-9", false, b"zip bytes")
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn a_package_upload_gets_time_for_its_size_on_a_slow_link() {
+        let request_timeout = Duration::from_secs(30);
+        assert_eq!(package_upload_timeout(request_timeout, 0), request_timeout);
+        assert_eq!(
+            package_upload_timeout(request_timeout, 1_000_000),
+            Duration::from_secs(50)
+        );
+        assert_eq!(
+            package_upload_timeout(request_timeout, 10_000_000),
+            Duration::from_secs(230)
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_robot_package_resends_the_zip_on_a_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/robot-9/package"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/robots/robot-9/package"))
+            .and(body_string_contains("zip bytes"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .upload_robot_package("org-1", "robot-9", false, b"zip bytes")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

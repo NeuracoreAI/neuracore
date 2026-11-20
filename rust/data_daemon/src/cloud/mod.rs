@@ -22,6 +22,7 @@
 pub mod cloud_files;
 pub mod coordinators;
 pub mod notifiers;
+pub mod robot_packages;
 pub mod watchers;
 
 #[allow(unused_imports)]
