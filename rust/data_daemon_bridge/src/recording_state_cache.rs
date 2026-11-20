@@ -540,6 +540,26 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_import_items_of_one_robot_keep_separate_recordings() {
+        let first = Source::import_item("cache-import-robot", "session-1", "episode-0");
+        let second = Source::import_item("cache-import-robot", "session-1", "episode-1");
+        let live = Source::robot_instance("cache-import-robot", 0);
+        note_local_start(&first, 1_000);
+        note_local_start(&second, 1_000);
+        note_local_start(&live, 1_000);
+        let second_epoch = epoch(&second);
+        let live_epoch = epoch(&live);
+        assert!(epoch(&first).is_some());
+
+        note_local_end(&first);
+
+        assert_eq!(display(&first, 0.0), Some(None));
+        assert!(second_epoch.is_some());
+        assert_eq!(epoch(&second), second_epoch);
+        assert_eq!(epoch(&live), live_epoch);
+    }
+
+    #[test]
     fn a_local_stop_displays_as_not_recording() {
         // `Some(None)` is a real answer and must stay distinct from `None`.
         let source = source("state-local-stop");

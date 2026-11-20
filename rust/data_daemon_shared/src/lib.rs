@@ -429,12 +429,19 @@ pub mod service_name {
 ///
 /// The one identity the producer and the daemon both speak: every [`Envelope`]
 /// and [`RecordingStateQuery`] carries it, and the daemon keys its windows by
-/// it. An enum so that sources other than a live robot instance can be added
-/// without changing every message that carries one.
+/// it. An import item is its own source rather than a robot instance, so
+/// concurrent imports on one host never share a window with each other or with
+/// a live robot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Source {
     /// A live robot instance.
     RobotInstance { robot_id: String, instance: i64 },
+    /// One item of a backend import session.
+    ImportSession {
+        robot_id: String,
+        import_session_id: String,
+        item_key: String,
+    },
 }
 
 impl Source {
@@ -445,20 +452,55 @@ impl Source {
         }
     }
 
+    pub fn import_item(
+        robot_id: impl Into<String>,
+        import_session_id: impl Into<String>,
+        item_key: impl Into<String>,
+    ) -> Self {
+        Source::ImportSession {
+            robot_id: robot_id.into(),
+            import_session_id: import_session_id.into(),
+            item_key: item_key.into(),
+        }
+    }
+
     pub fn robot_id(&self) -> &str {
         match self {
-            Source::RobotInstance { robot_id, .. } => robot_id,
+            Source::RobotInstance { robot_id, .. } | Source::ImportSession { robot_id, .. } => {
+                robot_id
+            }
+        }
+    }
+
+    /// The robot instance, for a live robot source.
+    pub fn instance(&self) -> Option<i64> {
+        match self {
+            Source::RobotInstance { instance, .. } => Some(*instance),
+            Source::ImportSession { .. } => None,
         }
     }
 
     /// The source's video spool directory relative to the spool root. The
     /// producer and the daemon both build spool paths from this, so they agree
     /// byte-for-byte.
+    ///
+    /// Import identifiers are arbitrary caller strings (an item key may hold
+    /// `/` or `..`, or exceed a filename's length), so they are hashed into a
+    /// fixed-width segment. A collision only shares a directory: chunk
+    /// filenames are already unique per producer thread and open time.
     pub fn spool_subdir(&self) -> std::path::PathBuf {
         match self {
             Source::RobotInstance { robot_id, instance } => {
                 std::path::Path::new(robot_id).join(instance.to_string())
             }
+            Source::ImportSession {
+                robot_id,
+                import_session_id,
+                item_key,
+            } => std::path::Path::new(robot_id).join("import").join(format!(
+                "{:016x}",
+                fnv1a_64(&[import_session_id.as_bytes(), item_key.as_bytes()])
+            )),
         }
     }
 }
@@ -469,8 +511,32 @@ impl std::fmt::Display for Source {
             Source::RobotInstance { robot_id, instance } => {
                 write!(formatter, "{robot_id}/{instance}")
             }
+            Source::ImportSession {
+                robot_id,
+                import_session_id,
+                item_key,
+            } => write!(
+                formatter,
+                "{robot_id}/import/{import_session_id}/{item_key}"
+            ),
         }
     }
+}
+
+/// FNV-1a over `parts`, each followed by a NUL so `("ab", "c")` and
+/// `("a", "bc")` differ. Stable across processes and releases, unlike
+/// [`std::hash::DefaultHasher`].
+fn fnv1a_64(parts: &[&[u8]]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for part in parts {
+        for byte in part.iter().chain(std::iter::once(&0)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+    hash
 }
 
 /// A single message exchanged between the producer and the daemon.
@@ -1038,11 +1104,78 @@ mod tests {
     }
 
     #[test]
+    fn an_import_source_round_trips_on_every_kind_of_envelope() {
+        let source = Source::import_item("robot-1", "session-1", "episodes/0001.mcap");
+        for original in [
+            Envelope::StartRecording {
+                source: source.clone(),
+                robot_name: None,
+                dataset_id: Some("ds-1".into()),
+                dataset_name: None,
+                publish_timestamp_ns: 1_700_000_000_000_000_000,
+                timestamp_us: 1_700_000_000_000_000,
+            },
+            Envelope::Data {
+                source: source.clone(),
+                data_type: "JOINT_POSITIONS".into(),
+                sensor_name: Some("waist".into()),
+                publish_timestamp_ns: 1,
+                timestamp_us: 1,
+                payload: vec![1, 2, 3],
+            },
+            Envelope::StopRecording {
+                source: source.clone(),
+                publish_timestamp_ns: 2,
+                timestamp_us: 2,
+                tags: vec!["good-run".into()],
+            },
+        ] {
+            let bytes = original.encode().expect("encode");
+            assert_eq!(Envelope::decode(&bytes).expect("decode"), original);
+        }
+
+        let query = RecordingStateQuery {
+            source: source.clone(),
+        };
+        let bytes = postcard::to_allocvec(&query).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<RecordingStateQuery>(&bytes).expect("decode"),
+            query
+        );
+    }
+
+    #[test]
     fn a_robot_instance_spools_under_its_instance() {
         assert_eq!(
             Source::robot_instance("robot-1", 3).spool_subdir(),
             std::path::PathBuf::from("robot-1/3")
         );
+    }
+
+    #[test]
+    fn import_items_spool_in_separate_fixed_width_directories() {
+        let first = Source::import_item("robot-1", "session-1", "episode-0").spool_subdir();
+        let second = Source::import_item("robot-1", "session-1", "episode-1").spool_subdir();
+        let other_session = Source::import_item("robot-1", "session-2", "episode-0").spool_subdir();
+        let split_differently =
+            Source::import_item("robot-1", "session-", "1episode-0").spool_subdir();
+
+        assert_ne!(first, second);
+        assert_ne!(first, other_session);
+        assert_ne!(first, split_differently);
+        assert_eq!(
+            first,
+            Source::import_item("robot-1", "session-1", "episode-0").spool_subdir()
+        );
+
+        let hostile = Source::import_item("robot-1", "../..", "/".repeat(512)).spool_subdir();
+        let components: Vec<_> = hostile.components().collect();
+        assert_eq!(components.len(), 3);
+        assert_eq!(
+            hostile.parent(),
+            Some(std::path::Path::new("robot-1/import"))
+        );
+        assert_eq!(hostile.file_name().unwrap().len(), 16);
     }
 
     #[test]

@@ -138,6 +138,27 @@ string_enum! {
     }
 }
 
+/// The item of an import session a recording imports.
+///
+/// An import recording has no robot instance; this pair identifies it locally
+/// and to the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportItem {
+    /// The backend import session the item belongs to.
+    pub import_session_id: String,
+    /// The item's stable key within the session.
+    pub item_key: String,
+}
+
+impl ImportItem {
+    fn from_columns(import_session_id: Option<String>, item_key: Option<String>) -> Option<Self> {
+        Some(ImportItem {
+            import_session_id: import_session_id?,
+            item_key: item_key?,
+        })
+    }
+}
+
 /// A row from the `recordings` table.
 ///
 /// The daemon owns recording identity: `recording_index` is the local primary
@@ -201,6 +222,8 @@ pub struct RecordingRow {
     /// Set when the backend answered 404 for the recording's uploads or
     /// progress. Its remaining uploads are failed and its files kept.
     pub backend_not_found_at: Option<NaiveDateTime>,
+    /// The import session item, for a recording that imports one.
+    pub import_item: Option<ImportItem>,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -240,6 +263,10 @@ impl RecordingRow {
             backend_stop_notified_at: row.try_get("backend_stop_notified_at")?,
             backend_cancel_notified_at: row.try_get("backend_cancel_notified_at")?,
             backend_not_found_at: row.try_get("backend_not_found_at")?,
+            import_item: ImportItem::from_columns(
+                row.try_get("import_session_id")?,
+                row.try_get("item_key")?,
+            ),
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })
