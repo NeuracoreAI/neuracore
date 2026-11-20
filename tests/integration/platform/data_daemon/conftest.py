@@ -84,8 +84,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Fail fast when explicitly enabled phase capture cannot write events."""
-    del config
+    """Register the suite's markers and check phase capture can write.
+
+    Fails fast when explicitly enabled phase capture cannot write events.
+    """
+    config.addinivalue_line(
+        "markers",
+        "no_network_at_start: the test starts with no network, so the pytest "
+        "process is not logged in online first",
+    )
     if not performance_metrics_enabled():
         return
     raw_path = os.environ.get("NCD_PERF_EVENTS_PATH")
@@ -136,13 +143,16 @@ def _name_slug(name: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def login_parent_process() -> Iterator[None]:
+def login_parent_process(request: pytest.FixtureRequest) -> Iterator[None]:
     """Authenticate the parent pytest process for each test.
 
     Logs in during setup and logs out during teardown, so every test
-    performs (and times) a real login against a clean environment.
+    performs (and times) a real login against a clean environment. A test
+    marked ``no_network_at_start`` has no network to log in with, so it is
+    not logged in first: its processes log in offline themselves.
     """
-    ensure_login()
+    if request.node.get_closest_marker("no_network_at_start") is None:
+        ensure_login()
     yield
     # The dedicated local performance-report runner preserves the saved login
     # across cases. Normal integration runs still exercise and time a fresh
