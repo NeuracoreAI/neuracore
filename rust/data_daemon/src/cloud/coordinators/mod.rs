@@ -1,11 +1,13 @@
 //! Cloud coordinators that drive each trace's lifecycle to the backend: batch
-//! registration, resumable uploads, debounced status updates, and the periodic
+//! registration, multipart uploads, debounced status updates, and the periodic
 //! progress reporter. Each exposes a single `spawn_*` entry point so the launch
 //! routine can drive ordered shutdown by dropping the handle.
 
 use std::sync::Arc;
 
-use crate::state::{DaemonEvent, EventBus, RecordingTimestamp, SqliteStateStore, StateStore};
+use crate::state::{
+    DaemonEvent, EventBus, RecordingTimestamp, SqliteStateStore, StateStore, TraceUploadStatus,
+};
 
 pub mod progress;
 pub mod registration;
@@ -74,4 +76,19 @@ pub(crate) async fn stop_uploading_not_found_recording(
         }
     }
     bus.publish(DaemonEvent::RecordingNotFound { recording_index });
+}
+
+/// Send a trace back to registration so its files upload again under new
+/// multipart uploads, provided its upload status is still `expected`.
+pub(crate) async fn restart_trace_uploads(
+    store: &Arc<SqliteStateStore>,
+    trace_id: &str,
+    expected: TraceUploadStatus,
+    reason: &str,
+) {
+    match store.restart_trace_uploads(trace_id, expected).await {
+        Ok(true) => tracing::warn!(trace_id, reason, "restarting the trace's uploads"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, trace_id, "failed to restart the trace's uploads"),
+    }
 }

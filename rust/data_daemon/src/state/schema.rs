@@ -4,6 +4,7 @@
 //! constants in `tests/integration/platform/data_daemon/shared/db_constants.py`
 //! pin the string columns, so the stored spellings must stay stable.
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use chrono::NaiveDateTime;
@@ -275,10 +276,10 @@ pub struct TraceRecord {
     pub error_code: Option<TraceErrorCode>,
     /// Latest error message, if any.
     pub error_message: Option<String>,
-    /// JSON-encoded `{filepath: session_uri}` map populated by the
-    /// registration coordinator. The uploader reads this back on
-    /// `ReadyForUpload` and dispatches one resumable upload per entry.
-    pub upload_session_uris: Option<String>,
+    /// JSON-encoded [`MultipartUploads`] populated by the registration
+    /// coordinator. The uploader reads this back on `ReadyForUpload` and
+    /// uploads one file per entry.
+    pub multipart_uploads: Option<String>,
     /// When the status coordinator's `UPLOAD_COMPLETE` PUT for this trace
     /// was acknowledged by the backend. `NULL` until then; the reaper only
     /// reclaims recordings whose traces are all stamped (or have exhausted
@@ -297,6 +298,15 @@ pub struct TraceRecord {
 }
 
 impl TraceRecord {
+    /// Decode [`multipart_uploads`](Self::multipart_uploads); `None` before
+    /// the trace is registered.
+    pub fn decode_uploads(&self) -> Result<Option<MultipartUploads>, serde_json::Error> {
+        self.multipart_uploads
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+    }
+
     /// Decode a SQLite row into a [`TraceRecord`].
     pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         let write_status = parse_column::<TraceWriteStatus>(row, "write_status")?;
@@ -323,7 +333,7 @@ impl TraceRecord {
             bytes_uploaded: row.try_get("bytes_uploaded")?,
             error_code,
             error_message: row.try_get("error_message")?,
-            upload_session_uris: row.try_get("upload_session_uris")?,
+            multipart_uploads: row.try_get("multipart_uploads")?,
             completion_reported_at: row.try_get("completion_reported_at")?,
             completion_report_attempts: row.try_get("completion_report_attempts")?,
             created_at: row.try_get("created_at")?,
@@ -331,6 +341,22 @@ impl TraceRecord {
         })
     }
 }
+
+/// One file's S3 multipart upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultipartUpload {
+    /// Backend ID of the upload.
+    pub upload_id: String,
+    /// Size of every part except the last.
+    pub part_size_bytes: u64,
+    /// CRC32C of the whole file, as base64 of its 4 big-endian bytes. Set once
+    /// every part is uploaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc32c: Option<String>,
+}
+
+/// A trace's multipart uploads, keyed by cloud filepath.
+pub type MultipartUploads = BTreeMap<String, MultipartUpload>;
 
 fn parse_column<T>(row: &sqlx::sqlite::SqliteRow, column: &'static str) -> Result<T, sqlx::Error>
 where

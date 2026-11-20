@@ -18,12 +18,14 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::api::models::{TraceStatusUpdate, TraceStatusValue};
+use crate::api::models::{CompletedFileUpload, TraceStatusUpdate, TraceStatusValue};
 use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::store::MAX_COMPLETION_REPORT_ATTEMPTS;
-use crate::state::{RecordingRow, SqliteStateStore, StateStore};
+use crate::state::{
+    MultipartUploads, RecordingRow, SqliteStateStore, StateStore, TraceUploadStatus,
+};
 
 /// Maximum number of traces to coalesce before flushing.
 pub const MAX_BATCH_SIZE: usize = 50;
@@ -55,6 +57,8 @@ pub struct StatusUpdate {
     pub completed: bool,
     /// Total bytes once finalised; required when `completed` is `true`.
     pub total_bytes: Option<i64>,
+    /// Multipart uploads finished for the trace, sent with its completion.
+    pub uploaded_files: Vec<CompletedFileUpload>,
 }
 
 impl StatusUpdate {
@@ -66,19 +70,40 @@ impl StatusUpdate {
             uploaded_bytes,
             completed: false,
             total_bytes: None,
+            uploaded_files: Vec::new(),
         }
     }
 
     /// Build a completion update (status=UPLOAD_COMPLETE).
-    pub fn completed(recording_index: i64, trace_id: String, total_bytes: i64) -> Self {
+    pub fn completed(
+        recording_index: i64,
+        trace_id: String,
+        total_bytes: i64,
+        uploaded_files: Vec<CompletedFileUpload>,
+    ) -> Self {
         Self {
             recording_index,
             trace_id,
             uploaded_bytes: total_bytes,
             completed: true,
             total_bytes: Some(total_bytes),
+            uploaded_files,
         }
     }
+}
+
+/// The uploads of `uploads` whose every part is sent, for the backend to
+/// complete.
+pub(crate) fn uploaded_files(uploads: &MultipartUploads) -> Vec<CompletedFileUpload> {
+    uploads
+        .values()
+        .filter_map(|upload| {
+            Some(CompletedFileUpload {
+                upload_id: upload.upload_id.clone(),
+                crc32c: upload.crc32c.clone()?,
+            })
+        })
+        .collect()
 }
 
 /// Handle returned by [`spawn_status_updater`].
@@ -194,10 +219,11 @@ async fn run(
 }
 
 /// Re-queue completion updates for uploaded traces whose backend ack never
-/// landed. The batch PUT is idempotent (same status body the uploader already
-/// sent), so re-driving is safe; each pass increments the trace's attempt
-/// counter and the reclaim gate opens once the attempts are exhausted, so a
-/// permanently-rejected completion cannot retain its recording forever.
+/// landed. The batch PUT is idempotent (same status body and uploaded files
+/// the uploader already sent), so re-driving is safe; each pass increments the
+/// trace's attempt counter and the reclaim gate opens once the attempts are
+/// exhausted, so a permanently-rejected completion cannot retain its recording
+/// forever.
 async fn reconcile_unreported_completions(
     store: &Arc<SqliteStateStore>,
     pending: &mut HashMap<i64, RecordingBatch>,
@@ -214,6 +240,13 @@ async fn reconcile_unreported_completions(
         }
     };
     for trace in stale {
+        let uploads = match trace.decode_uploads() {
+            Ok(uploads) => uploads.unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, trace_id = %trace.trace_id, "could not decode stored multipart uploads");
+                continue;
+            }
+        };
         if trace.completion_report_attempts >= MAX_COMPLETION_REPORT_ATTEMPTS {
             tracing::warn!(
                 trace_id = %trace.trace_id,
@@ -237,6 +270,7 @@ async fn reconcile_unreported_completions(
             recording_index,
             trace.trace_id,
             trace.total_bytes,
+            uploaded_files(&uploads),
         ));
     }
 }
@@ -344,7 +378,7 @@ async fn flush_batch(
         .batch_update_traces(&org_id, &recording_id, &updates_payload)
         .await
     {
-        Ok(()) => {
+        Ok(response) => {
             tracing::debug!(
                 recording_index,
                 recording_id,
@@ -357,10 +391,16 @@ async fn flush_batch(
             let completed: Vec<String> = updates_payload
                 .iter()
                 .filter(|(_, update)| update.status == Some(TraceStatusValue::UploadComplete))
+                .filter(|(trace_id, _)| !response.rejected_traces.contains_key(*trace_id))
                 .map(|(trace_id, _)| trace_id.clone())
                 .collect();
             if let Err(error) = store.mark_traces_completion_reported(&completed).await {
                 tracing::warn!(%error, recording_index, "could not stamp completion_reported_at");
+            }
+            // The backend left these traces unchanged; their files upload again.
+            for (trace_id, reason) in &response.rejected_traces {
+                super::restart_trace_uploads(&store, trace_id, TraceUploadStatus::Uploaded, reason)
+                    .await;
             }
         }
         // A cancelled, saved or reaped recording has nothing left to update.
@@ -417,6 +457,8 @@ impl RecordingBatch {
         if update.completed {
             entry.status = Some(TraceStatusValue::UploadComplete);
             entry.total_bytes = update.total_bytes.or(entry.total_bytes);
+            entry.uploaded_files =
+                (!update.uploaded_files.is_empty()).then_some(update.uploaded_files);
             self.has_completion = true;
         }
     }
@@ -488,6 +530,25 @@ mod tests {
         org_rx
     }
 
+    /// A batch-update response that rejects no trace.
+    fn no_rejections() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"rejected_traces": {}}))
+    }
+
+    /// The stored uploads of a trace whose one file has every part sent.
+    fn sent_uploads(upload_id: &str) -> String {
+        let upload = crate::state::MultipartUpload {
+            upload_id: upload_id.to_string(),
+            part_size_bytes: 16 * 1024 * 1024,
+            crc32c: Some("AAAAAA==".to_string()),
+        };
+        serde_json::to_string(&MultipartUploads::from([(
+            "J/trace.json".to_string(),
+            upload,
+        )]))
+        .unwrap()
+    }
+
     /// Create a recording stamped with the given cloud `recording_id` so the
     /// wiremock URL expectations resolve. Returns the local `recording_index`.
     async fn seed_recording(store: &SqliteStateStore, cloud_recording_id: &str) -> i64 {
@@ -507,7 +568,12 @@ mod tests {
         let mut batch = RecordingBatch::new(1);
         batch.add(StatusUpdate::in_progress(1, "t1".to_string(), 1));
         assert!(!batch.has_completion);
-        batch.add(StatusUpdate::completed(1, "t1".to_string(), 100));
+        batch.add(StatusUpdate::completed(
+            1,
+            "t1".to_string(),
+            100,
+            Vec::new(),
+        ));
         assert!(batch.has_completion);
         // The latest update for the same trace_id overrides bytes_uploaded.
         let entry = batch.updates.get("t1").unwrap();
@@ -546,7 +612,7 @@ mod tests {
         let mut batch = RecordingBatch::new(1);
         let baseline = batch.opened_at + IN_PROGRESS_MAX_WAIT;
         assert!(batch.deadline() <= baseline);
-        batch.add(StatusUpdate::completed(1, "t".to_string(), 1));
+        batch.add(StatusUpdate::completed(1, "t".to_string(), 1, Vec::new()));
         assert!(batch.deadline() < baseline);
     }
 
@@ -562,10 +628,15 @@ mod tests {
             .and(body_json(serde_json::json!({
                 "updates": {
                     "t1": {"uploaded_bytes": 30},
-                    "t2": {"status": "UPLOAD_COMPLETE", "uploaded_bytes": 200, "total_bytes": 200}
+                    "t2": {
+                        "status": "UPLOAD_COMPLETE",
+                        "uploaded_bytes": 200,
+                        "total_bytes": 200,
+                        "uploaded_files": [{"upload_id": "upload-1", "crc32c": "AAAAAA=="}]
+                    }
                 }
             })))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(no_rejections())
             .expect(1)
             .mount(&server)
             .await;
@@ -575,7 +646,15 @@ mod tests {
         let mut batch = RecordingBatch::new(index);
         batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 10));
         batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 30)); // supersedes 10
-        batch.add(StatusUpdate::completed(index, "t2".to_string(), 200));
+        batch.add(StatusUpdate::completed(
+            index,
+            "t2".to_string(),
+            200,
+            vec![CompletedFileUpload {
+                upload_id: "upload-1".to_string(),
+                crc32c: "AAAAAA==".to_string(),
+            }],
+        ));
 
         let result = flush_batch(
             Arc::new(store.clone()),
@@ -588,30 +667,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_batch_stamps_acked_completions() {
+    async fn flush_batch_stamps_acked_completions_and_restarts_rejected_ones() {
         // The reaper's reclaim gate reads `completion_reported_at`; an acked
-        // batch must stamp exactly the traces whose UPLOAD_COMPLETE it
-        // carried, and only those.
+        // batch must stamp exactly the traces whose UPLOAD_COMPLETE the backend
+        // accepted. A rejected trace uploads its files again instead.
+        use crate::state::{TraceRegistrationStatus, TraceUpdate, TraceUploadStatus};
+
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rejected_traces": {"t3": "CHECKSUM_MISMATCH"}
+            })))
             .expect(1)
             .mount(&server)
             .await;
 
         let (store, _dir) = open_store().await;
         let index = seed_recording(&store, "rec-1").await;
+        for trace_id in ["t1", "t2", "t3"] {
+            store
+                .create_trace(index, trace_id, Some("J"), None)
+                .await
+                .unwrap();
+        }
         store
-            .create_trace(index, "t1", Some("J"), None)
-            .await
-            .unwrap();
-        store
-            .create_trace(index, "t2", Some("J"), None)
+            .update_trace(
+                "t3",
+                TraceUpdate {
+                    registration_status: Some(TraceRegistrationStatus::Registered),
+                    upload_status: Some(TraceUploadStatus::Uploaded),
+                    multipart_uploads: Some(sent_uploads("upload-3")),
+                    ..TraceUpdate::default()
+                },
+            )
             .await
             .unwrap();
         let mut batch = RecordingBatch::new(index);
         batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 10));
-        batch.add(StatusUpdate::completed(index, "t2".to_string(), 200));
+        batch.add(StatusUpdate::completed(
+            index,
+            "t2".to_string(),
+            200,
+            Vec::new(),
+        ));
+        batch.add(StatusUpdate::completed(
+            index,
+            "t3".to_string(),
+            300,
+            vec![CompletedFileUpload {
+                upload_id: "upload-3".to_string(),
+                crc32c: "AAAAAA==".to_string(),
+            }],
+        ));
 
         flush_batch(
             Arc::new(store.clone()),
@@ -622,21 +729,23 @@ mod tests {
         .await;
 
         let traces = store.list_traces_for_recording(index).await.unwrap();
-        let stamped_at = |id: &str| {
-            traces
-                .iter()
-                .find(|trace| trace.trace_id == id)
-                .unwrap()
-                .completion_reported_at
-        };
+        let trace = |id: &str| traces.iter().find(|trace| trace.trace_id == id).unwrap();
         assert!(
-            stamped_at("t2").is_some(),
+            trace("t2").completion_reported_at.is_some(),
             "the acked completion is watermarked"
         );
         assert!(
-            stamped_at("t1").is_none(),
+            trace("t1").completion_reported_at.is_none(),
             "an in-progress update is not watermarked"
         );
+        let rejected = trace("t3");
+        assert!(rejected.completion_reported_at.is_none());
+        assert_eq!(
+            (rejected.registration_status, rejected.upload_status),
+            (TraceRegistrationStatus::Pending, TraceUploadStatus::Pending),
+            "the rejected trace registers again"
+        );
+        assert_eq!(rejected.multipart_uploads, None);
     }
 
     /// The dropped-batch recovery path: an uploaded trace whose completion
@@ -650,8 +759,18 @@ mod tests {
         };
 
         let server = MockServer::start().await;
+        // The re-sent completion carries the stored uploads for the backend
+        // to complete.
         Mock::given(method("PUT"))
-            .respond_with(ResponseTemplate::new(200))
+            .and(body_json(serde_json::json!({
+                "updates": {"t1": {
+                    "status": "UPLOAD_COMPLETE",
+                    "uploaded_bytes": 200,
+                    "total_bytes": 200,
+                    "uploaded_files": [{"upload_id": "upload-1", "crc32c": "AAAAAA=="}]
+                }}
+            })))
+            .respond_with(no_rejections())
             .expect(1)
             .mount(&server)
             .await;
@@ -672,6 +791,7 @@ mod tests {
                     write_status: Some(TraceWriteStatus::Written),
                     upload_status: Some(TraceUploadStatus::Uploaded),
                     total_bytes: Some(200),
+                    multipart_uploads: Some(sent_uploads("upload-1")),
                     ..TraceUpdate::default()
                 },
             )
@@ -818,7 +938,7 @@ mod tests {
                 .and(path(format!(
                     "/org/org-1/recording/{recording_id}/traces/batch-update"
                 )))
-                .respond_with(ResponseTemplate::new(200))
+                .respond_with(no_rejections())
                 .expect(1)
                 .mount(&server)
                 .await;
@@ -832,7 +952,12 @@ mod tests {
         first_batch.add(StatusUpdate::in_progress(first, "t1".to_string(), 1));
         pending.insert(first, first_batch);
         let mut second_batch = RecordingBatch::new(second);
-        second_batch.add(StatusUpdate::completed(second, "t2".to_string(), 9));
+        second_batch.add(StatusUpdate::completed(
+            second,
+            "t2".to_string(),
+            9,
+            Vec::new(),
+        ));
         pending.insert(second, second_batch);
 
         flush_all(
@@ -852,7 +977,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path("/org/org-1/recording/rec-1/traces/batch-update"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(no_rejections())
             .mount(&server)
             .await;
 
@@ -901,7 +1026,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path("/org/org-1/recording/rec-1/traces/batch-update"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(no_rejections())
             .mount(&server)
             .await;
 
