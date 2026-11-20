@@ -13,14 +13,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use data_daemon_shared::microseconds_to_seconds;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::{Client, Method, Request, Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::sleep;
 
 use crate::api::auth::{AuthError, AuthProvider};
 use crate::api::models::{
-    BatchRegisterResponse, DatasetSummary, RecordingStartResponse, RegisterTraceRequest,
-    ResumableUploadUrlResponse, RobotRegistrationResponse, TraceStatusUpdate,
+    BatchRegisterResponse, DatasetSummary, OrgSummary, RecordingStartResponse,
+    RegisterTraceRequest, ResumableUploadUrlResponse, RobotRegistrationResponse, TraceStatusUpdate,
 };
 
 /// Retry policy constants — match `const.py::BACKEND_API_*`.
@@ -550,6 +550,25 @@ impl ApiClient {
             .map_err(ApiClientError::Decode)
     }
 
+    /// `GET /org-management/my-orgs`: the organisations the account is a
+    /// member of, whatever its role. The backend names no other.
+    pub async fn my_orgs(&self) -> Result<Vec<OrgSummary>, ApiClientError> {
+        #[derive(Deserialize)]
+        struct Membership {
+            org: OrgSummary,
+        }
+        let response = self
+            .send_with_retry(Method::GET, "/org-management/my-orgs", |builder| builder)
+            .await?;
+        let bytes = response.bytes().await?;
+        let memberships: Vec<Membership> =
+            serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)?;
+        Ok(memberships
+            .into_iter()
+            .map(|membership| membership.org)
+            .collect())
+    }
+
     /// `POST /org/{org}/datasets`: create a dataset, or `None` when one of
     /// that name already exists (409).
     pub async fn dataset_create(
@@ -938,6 +957,32 @@ mod tests {
                 id: "dataset-3".into(),
                 is_shared: false,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn my_orgs_lists_the_organisations_the_account_is_in() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org-management/my-orgs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "org_membership": { "role": "viewer" },
+                    "org": { "id": "org-1", "name": "Acme Robotics", "created_at": 0.0 },
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let orgs = client(&server).my_orgs().await.unwrap();
+
+        assert_eq!(
+            orgs,
+            vec![OrgSummary {
+                id: "org-1".into(),
+                name: "Acme Robotics".into(),
+            }]
         );
     }
 
