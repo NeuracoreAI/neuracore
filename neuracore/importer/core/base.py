@@ -155,7 +155,8 @@ class NeuracoreDatasetImporter(ABC):
             random_sample: If set, import only this many items chosen at random.
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
-                to log target joint actions as end-effector poses for debugging.
+                to log target joint actions as end-effector target poses
+                for debugging.
             robot_id: Neuracore robot ID used for instance allocation/cleanup.
         """
         self.dataset_dir = Path(dataset_dir)
@@ -539,7 +540,11 @@ class NeuracoreDatasetImporter(ABC):
             validate_point_clouds(data)
         elif data_type == DataType.LANGUAGE:
             validate_language(data, format)
-        elif data_type == DataType.POSES or data_type == DataType.END_EFFECTOR_POSES:
+        elif data_type in {
+            DataType.POSES,
+            DataType.END_EFFECTOR_POSES,
+            DataType.END_EFFECTOR_TARGET_POSES,
+        }:
             validate_poses(data, format)
 
     def _validate_joint_data(self, data_type: DataType, data: Any, name: str) -> None:
@@ -759,7 +764,7 @@ class NeuracoreDatasetImporter(ABC):
                     )
                 )
                 self._log_transformed_data(
-                    DataType.END_EFFECTOR_POSES,
+                    DataType.END_EFFECTOR_TARGET_POSES,
                     joint_target_end_effector_pose,
                     "joint_target_end_effector_pose",
                     timestamp,
@@ -979,6 +984,15 @@ class NeuracoreDatasetImporter(ABC):
         elif data_type == DataType.END_EFFECTOR_POSES:
             self.curr_end_effector_poses[name] = transformed_data
             nc.log_end_effector_pose(
+                name=name,
+                pose=transformed_data,
+                robot_name=self.dataset_config.robot.name,
+                instance=instance,
+                timestamp=timestamp,
+                dry_run=self.dry_run,
+            )
+        elif data_type == DataType.END_EFFECTOR_TARGET_POSES:
+            nc.log_end_effector_target_pose(
                 name=name,
                 pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,

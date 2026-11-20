@@ -70,7 +70,7 @@ Each data type mapping supports:
   - `torque_units`: `NM` (default) | `NCM` - Torque unit conversion (for JOINT_TORQUES)
   - `distance_units`: `M` (default) | `MM` - Distance unit conversion (for POINT_CLOUDS)
   - `depth_scale_m`: `float` - Meters per unit of the source depth images, for example `0.001` for millimeters or `0.0001` for an Intel RealSense D405 (required for DEPTH_IMAGES)
-  - `pose_type`: `MATRIX` (default) | `POSITION_ORIENTATION` - Pose representation format (for POSES, END_EFFECTOR_POSES, JOINT_POSITIONS with end effector)
+  - `pose_type`: `MATRIX` (default) | `POSITION_ORIENTATION` - Pose representation format (for POSES, END_EFFECTOR_POSES, END_EFFECTOR_TARGET_POSES, JOINT_POSITIONS with end effector)
   - `orientation`: Configuration object (required when `pose_type: POSITION_ORIENTATION`):
     - `type`: `QUATERNION` (default) | `EULER` | `MATRIX` | `AXIS_ANGLE` - Orientation representation
     - `quaternion_order`: `XYZW` (default) | `WXYZ` - Quaternion component order (when `type: QUATERNION`)
@@ -350,6 +350,24 @@ The importer supports the following data types:
         index_range:
           start: 0
           end: 16  # 4×4 matrix flattened
+  ```
+
+- **END_EFFECTOR_TARGET_POSES**: Commanded/target end-effector poses with the same representation formats as `END_EFFECTOR_POSES`
+
+  ```yaml
+  END_EFFECTOR_TARGET_POSES:
+    source: action.ee_target
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+        angle_units: RADIANS
+    mapping:
+      - name: end_effector_target_pose
+        index_range:
+          start: 0
+          end: 7  # 3 position + 4 quaternion
   ```
 
 - **POSES**: General 6D poses with multiple representation formats (same options as end-effector poses)

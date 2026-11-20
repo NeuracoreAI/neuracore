@@ -485,6 +485,37 @@ def test_reset_episode_state_clears_timestamp_guard():
     )
 
 
+def test_log_transformed_data_logs_end_effector_target_pose(monkeypatch):
+    """_log_transformed_data routes target EE poses to the target log API."""
+    importer = _make_importer_for_timestamp_guard()
+    importer.dry_run = False
+    importer._worker_id = 0
+    importer.dataset_config = SimpleNamespace(robot=SimpleNamespace(name="robot"))
+    importer.robot_instance = MagicMock(return_value=0)
+    logged = MagicMock()
+    monkeypatch.setattr(
+        "neuracore.importer.core.base.nc",
+        SimpleNamespace(log_end_effector_target_pose=logged),
+    )
+
+    pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
+    importer._log_transformed_data(
+        data_type=DataType.END_EFFECTOR_TARGET_POSES,
+        transformed_data=pose,
+        name="left_ee",
+        timestamp=1.5,
+    )
+
+    logged.assert_called_once_with(
+        name="left_ee",
+        pose=pose,
+        robot_name="robot",
+        instance=0,
+        timestamp=1.5,
+        dry_run=False,
+    )
+
+
 def test_log_transformed_data_applies_timestamp_guard(monkeypatch):
     importer = _make_importer_for_timestamp_guard()
     importer.dry_run = False

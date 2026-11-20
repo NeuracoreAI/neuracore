@@ -279,6 +279,13 @@ class TestValidateInputData:
 
         importer._validate_input_data(DataType.END_EFFECTOR_POSES, data, format)
 
+    def test_validate_end_effector_target_poses(self, importer):
+        """Test end effector target pose validation."""
+        format = DataFormat(pose_type=PoseConfig.MATRIX)
+        data = np.zeros(16, dtype=np.float32)
+
+        importer._validate_input_data(DataType.END_EFFECTOR_TARGET_POSES, data, format)
+
     def test_validate_unknown_data_type(self, importer):
         """Test validation with unknown data type (should not raise)."""
         format = DataFormat()
