@@ -85,7 +85,7 @@ fn start_recording(
     source_key: &str,
     robot_instance: i64,
     robot_name: Option<String>,
-    dataset_id: Option<String>,
+    dataset_index: Option<i64>,
     dataset_name: Option<String>,
     timestamp_us: Option<i64>,
 ) -> PyResult<i64> {
@@ -104,7 +104,7 @@ fn start_recording(
             source_key,
             robot_instance,
             robot_name,
-            dataset_id,
+            dataset_index,
             dataset_name,
             publish_timestamp_ns,
             timestamp_us: capture_timestamp_us,
@@ -798,6 +798,23 @@ fn dataset_state(
     )?)
 }
 
+/// The row for a dataset the SDK read from the server, by its server id: the
+/// daemon finds one, or makes one already confirmed. Returns the row's index.
+#[pyfunction]
+#[pyo3(signature = (*, org_id, cloud_dataset_id, timeout_s))]
+fn dataset_for_cloud_id(
+    py: Python<'_>,
+    org_id: String,
+    cloud_dataset_id: String,
+    timeout_s: f64,
+) -> PyResult<i64> {
+    let request = RegistryRequest::DatasetForCloudId {
+        org_id,
+        cloud_dataset_id,
+    };
+    expect_index(ask_registry(py, request, timeout_s)?)
+}
+
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -817,6 +834,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(select_dataset, module)?)?;
     module.add_function(wrap_pyfunction!(robot_state, module)?)?;
     module.add_function(wrap_pyfunction!(dataset_state, module)?)?;
+    module.add_function(wrap_pyfunction!(dataset_for_cloud_id, module)?)?;
     module.add_class::<PyRowState>()?;
     module.add(
         "RegistryRefusedError",

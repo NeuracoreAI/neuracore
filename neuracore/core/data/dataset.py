@@ -52,6 +52,7 @@ class Dataset:
 
     deleted = False
     _id: str | None
+    _kind_known: bool
     _dataset_index: int | None
 
     def __init__(
@@ -93,6 +94,9 @@ class Dataset:
             the start of the next page of recordings.
         """
         self._dataset_index = dataset_index
+        # Whether is_shared is the dataset's kind: not for one only looked up
+        # by name through the daemon, until the server has answered.
+        self._kind_known = dataset_index is None
         self.id = id
         self.org_id = org_id
         self.name = name
@@ -138,6 +142,7 @@ class Dataset:
             self._id = wait_for_dataset_id(self._dataset_index, self.name)
             # The details the server holds, now that it can be asked.
             self._refresh_dataset_metadata()
+            self._kind_known = True
         if self._id is None:
             raise DatasetError(f"Dataset '{self.name}' has no id.")
         return self._id
@@ -150,6 +155,15 @@ class Dataset:
     def dataset_index(self) -> int | None:
         """The data daemon's row for the dataset, if it was selected through it."""
         return self._dataset_index
+
+    @dataset_index.setter
+    def dataset_index(self, value: int) -> None:
+        self._dataset_index = value
+
+    @property
+    def kind_known(self) -> bool:
+        """Whether :attr:`is_shared` is known to be the dataset's kind."""
+        return self._kind_known
 
     def __getstate__(self) -> dict:
         """Return picklable state, dropping the unpicklable page lock.
@@ -633,6 +647,8 @@ class Dataset:
             description=description,
             dataset_index=dataset_index,
         )
+        # The kind asked for is the kind found or created.
+        dataset._kind_known = True
         if wait:
             dataset.id  # noqa: B018 - reading it waits for the server
         return dataset
