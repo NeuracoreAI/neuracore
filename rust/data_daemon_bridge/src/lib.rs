@@ -83,6 +83,20 @@ impl RecordingSource {
         Ok(Self(Source::robot_instance(robot_id, instance)))
     }
 
+    #[staticmethod]
+    fn import_item(robot_id: &str, import_session_id: &str, item_key: &str) -> PyResult<Self> {
+        if robot_id.is_empty() || import_session_id.is_empty() || item_key.is_empty() {
+            return Err(PyValueError::new_err(
+                "robot_id, import_session_id and item_key must not be empty",
+            ));
+        }
+        Ok(Self(Source::import_item(
+            robot_id,
+            import_session_id,
+            item_key,
+        )))
+    }
+
     #[getter]
     fn robot_id(&self) -> &str {
         self.0.robot_id()

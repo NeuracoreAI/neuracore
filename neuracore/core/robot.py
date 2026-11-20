@@ -85,7 +85,7 @@ class Robot:
     def __init__(
         self,
         robot_name: str,
-        instance: int,
+        instance: int | None,
         urdf_path: str | None = None,
         mjcf_path: str | None = None,
         overwrite: bool = False,
@@ -96,7 +96,8 @@ class Robot:
 
         Args:
             robot_name: Unique identifier for the robot type.
-            instance: Instance number for multi-robot deployments.
+            instance: Instance number for multi-robot deployments. None for
+                a handle that only records dataset import items.
             urdf_path: Path to URDF kinematic model file.
                 Mutually exclusive with mjcf_path.
             mjcf_path: Path to MJCF kinematic model file.
@@ -176,12 +177,17 @@ class Robot:
         if self.urdf_path:
             self.joint_info = self._get_joint_info()
 
-    def init(self) -> None:
+    def init(self, register_instance: bool = True) -> None:
         """Initialize the robot on the Neuracore server.
 
         Creates the robot instance on the server and uploads the kinematic model
         if provided. This must be called before using the robot for data streaming
         or recording.
+
+        Args:
+            register_instance: Whether to register this robot instance. When
+                False the robot is only resolved, as dataset imports record
+                through an import session rather than a robot instance.
 
         Raises:
             RobotError: If not authenticated, if the robot is archived or if
@@ -199,14 +205,24 @@ class Robot:
 
         try:
             session = thread_local_session(retry_transient=True)
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
-                json={
-                    "name": self.name,
-                    "instance": self.instance,
-                },  # TODO: Add camera support
-                headers=self._auth.get_headers(),
-            )
+            robots_url = f"{API_URL}/org/{self.org_id}/robots"
+            if register_instance:
+                if self.instance is None:
+                    raise RobotError("Registering a robot instance needs an instance.")
+                response = session.post(
+                    f"{robots_url}?is_shared={self.shared}",
+                    json={
+                        "name": self.name,
+                        "instance": self.instance,
+                    },  # TODO: Add camera support
+                    headers=self._auth.get_headers(),
+                )
+            else:
+                response = session.post(
+                    f"{robots_url}/resolve?is_shared={self.shared}",
+                    json={"name": self.name},
+                    headers=self._auth.get_headers(),
+                )
             response.raise_for_status()
             response_body = response.json()
             self.id = response_body["robot_id"]
@@ -277,7 +293,14 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(self, dataset_id: str, timestamp: float | None = None) -> None:
+    def start_recording(
+        self,
+        dataset_id: str,
+        timestamp: float | None = None,
+        *,
+        import_session_id: str | None = None,
+        item_key: str | None = None,
+    ) -> None:
         """Start recording data from all active streams to a dataset.
 
         Asks the daemon to open a recording window; it owns recording identity
@@ -288,19 +311,37 @@ class Robot:
             dataset_id: Unique identifier of the dataset to record into.
             timestamp: Optional capture time (Unix seconds) for the recording's
                 start, matching the ``log_*`` methods.
+            import_session_id: Import session the recording belongs to. Given
+                together with ``item_key``.
+            item_key: Stable key of the imported item within the session.
 
         Raises:
             RobotError: If the robot is not initialized or if
                 the recording fails to start.
             ValueError: If the timestamp is not finite or is outside the
-                supported microsecond range.
+                supported microsecond range, or if only one of
+                ``import_session_id`` and ``item_key`` is given.
         """
         timestamp_us = resolve_timestamp_us(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
+        if (import_session_id is None) != (item_key is None):
+            raise ValueError("import_session_id and item_key must be given together.")
+
+        source: recording_context.RecordingSource
+        if import_session_id is not None and item_key is not None:
+            source = recording_context.ImportItemSource(
+                self.id, import_session_id, item_key
+            )
+        elif self.instance is not None:
+            source = recording_context.RobotInstanceSource(self.id, self.instance)
+        else:
+            raise RobotError(
+                "This robot handle has no instance and only records import items."
+            )
 
         self._get_daemon_recording_context().start_recording(
-            recording_context.RobotInstanceSource(self.id, self.instance),
+            source,
             robot_name=self.name,
             dataset_id=dataset_id,
             dataset_name=None,
@@ -382,7 +423,9 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        source = recording_context.RobotInstanceSource(self.id, self.instance)
+        source = self._recording_source(self.id)
+        if source is None:
+            return False
         return recording_context.query_recording_state(source) is not None
 
     def _recording_epoch(self) -> int | None:
@@ -417,7 +460,9 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        source = recording_context.RobotInstanceSource(self.id, self.instance)
+        source = self._recording_source(self.id)
+        if source is None:
+            return None
         recording = recording_context.query_recording_state(source, timeout_s=timeout_s)
         return recording.cloud_recording_id if recording is not None else None
 
@@ -769,11 +814,28 @@ class Robot:
             if self.id is None:
                 raise RobotError("Robot not initialized. Call init() first.")
             context = DaemonRecordingContext()
-            context.bind_source(
-                recording_context.RobotInstanceSource(self.id, self.instance)
-            )
+            if self.instance is not None:
+                context.bind_source(
+                    recording_context.RobotInstanceSource(self.id, self.instance)
+                )
             self._daemon_recording_context = context
         return self._daemon_recording_context
+
+    def _recording_source(
+        self, robot_id: str
+    ) -> recording_context.RecordingSource | None:
+        """The source this robot last recorded under, its own instance until then.
+
+        An import start rebinds the context to the imported item, and the
+        recording it opened is only visible under that source. A handle with
+        no instance has no source until it starts an import item.
+        """
+        context = self._daemon_recording_context
+        if context is not None and context.source is not None:
+            return context.source
+        if self.instance is None:
+            return None
+        return recording_context.RobotInstanceSource(robot_id, self.instance)
 
     def _cleanup_daemon_recording_context(self) -> None:
         """Release daemon recording context resources."""
@@ -823,10 +885,13 @@ class Robot:
                 detail = extract_error_detail(e.response)
             raise RobotError(f"Failed to delete robot: {detail or str(e)}")
 
-        _robots.pop(
-            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=self.instance),
-            None,
-        )
+        if self.instance is not None:
+            _robots.pop(
+                RobotInstanceIdentifier(
+                    robot_id=robot_id, robot_instance=self.instance
+                ),
+                None,
+            )
         for robot_name, mapped_id in list(_robot_name_id_mapping.items()):
             if mapped_id == robot_id:
                 del _robot_name_id_mapping[robot_name]
@@ -1044,6 +1109,62 @@ def init(
         raise RobotError("Robot not initialized. Call init() first.")
     _robot_name_id_mapping[robot_name] = robot.id
     _robots[RobotInstanceIdentifier(robot_id=robot.id, robot_instance=instance)] = robot
+    return robot
+
+
+def resolve(
+    robot_name: str,
+    urdf_path: str | None = None,
+    mjcf_path: str | None = None,
+    overwrite: bool = False,
+    shared: bool = False,
+) -> Robot:
+    """Get or create a robot on the server without registering an instance.
+
+    The returned robot is not added to the global registry, so it cannot
+    stream or record on its own.
+
+    Args:
+        robot_name: Unique identifier for the robot type.
+        urdf_path: Path to URDF kinematic model file.
+        mjcf_path: Path to MJCF kinematic model file.
+        overwrite: Whether to overwrite existing robot configuration.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The resolved Robot.
+    """
+    if not robot_name:
+        raise ValueError("Robot name cannot be empty")
+    robot = Robot(robot_name, None, urdf_path, mjcf_path, overwrite, shared)
+    robot.init(register_instance=False)
+    if not robot.id:
+        raise RobotError("Robot not initialized. Call init() first.")
+    return robot
+
+
+def attach(robot_name: str, robot_id: str, shared: bool) -> Robot:
+    """Create a local handle for an existing robot without contacting the server.
+
+    Used by dataset import workers, whose recordings are sourced from items of
+    an import session the parent process already created. The handle has no
+    robot instance, so it is not registered for lookup by instance and can
+    only record import items.
+
+    Args:
+        robot_name: Name of the robot.
+        robot_id: ID of the existing robot.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The Robot handle.
+    """
+    if not robot_name:
+        raise ValueError("Robot name cannot be empty")
+    if not robot_id:
+        raise ValueError("Robot ID cannot be empty")
+    robot = Robot(robot_name, None, shared=shared)
+    robot.id = robot_id
     return robot
 
 

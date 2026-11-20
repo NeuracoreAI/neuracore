@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.data_daemon.bridge import (
+    ImportItemSource,
     LiveRecording,
     RecordingStateUnavailableError,
     RobotInstanceSource,
@@ -118,6 +120,7 @@ def test_an_ordinary_start_records_under_the_robot_instance(native) -> None:
     robot.start_recording("dataset-1", timestamp=12.5)
 
     native.RecordingSource.robot_instance.assert_called_once_with("robot-id-1", 2)
+    native.RecordingSource.import_item.assert_not_called()
     native.start_recording.assert_called_once_with(
         native.RecordingSource.robot_instance.return_value,
         "robot",
@@ -125,4 +128,109 @@ def test_an_ordinary_start_records_under_the_robot_instance(native) -> None:
         None,
         12_500_000,
     )
+    robot.id = None
+
+
+def test_an_import_start_records_and_answers_under_the_item(native) -> None:
+    robot = Robot("robot", instance=None, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    robot.start_recording(
+        "dataset-1", timestamp=12.5, import_session_id="session-1", item_key="ep-3"
+    )
+
+    native.RecordingSource.robot_instance.assert_not_called()
+    native.RecordingSource.import_item.assert_called_once_with(
+        "robot-id-1", "session-1", "ep-3"
+    )
+    assert native.start_recording.call_args.args[0] is (
+        native.RecordingSource.import_item.return_value
+    )
+    with patch(
+        "neuracore.core.robot.recording_context.query_recording_state",
+        return_value=None,
+    ) as query_recording_state:
+        robot.is_recording()
+    query_recording_state.assert_called_once_with(
+        ImportItemSource("robot-id-1", "session-1", "ep-3")
+    )
+    robot.id = None
+
+
+@pytest.mark.parametrize(
+    "import_args", [{"import_session_id": "session-1"}, {"item_key": "ep-3"}]
+)
+def test_an_import_start_needs_both_identifiers(native, import_args) -> None:
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    with pytest.raises(ValueError, match="given together"):
+        robot.start_recording("dataset-1", **import_args)
+
+    native.start_recording.assert_not_called()
+    robot.id = None
+
+
+def test_a_handle_without_an_instance_only_records_import_items(native) -> None:
+    robot = Robot("robot", instance=None, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    with pytest.raises(RobotError, match="only records import items"):
+        robot.start_recording("dataset-1")
+
+    native.start_recording.assert_not_called()
+    native.RecordingSource.robot_instance.assert_not_called()
+    robot.id = None
+
+
+def test_a_handle_without_an_instance_has_no_source_before_its_first_item(
+    native,
+) -> None:
+    """Nothing it does before an import start may reach a robot instance."""
+    robot = Robot("robot", instance=None, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    with patch(
+        "neuracore.core.robot.recording_context.query_recording_state"
+    ) as query_recording_state:
+        assert robot.is_recording() is False
+        assert robot.get_cloud_recording_id(timeout_s=0.0) is None
+    query_recording_state.assert_not_called()
+
+    with pytest.raises(RuntimeError):
+        robot._get_daemon_recording_context().log_joints(
+            "JOINT_POSITIONS", 1_000, "j0", [0.0]
+        )
+    robot.stop_recording()
+    robot.cancel_recording()
+
+    native.stop_recording.assert_not_called()
+    native.cancel_recording.assert_not_called()
+    native.log_joints.assert_not_called()
+    native.RecordingSource.robot_instance.assert_not_called()
+    robot.id = None
+
+
+def test_each_import_item_records_under_its_own_source(native) -> None:
+    robot = Robot("robot", instance=None, org_id="org-1")
+    robot.id = "robot-id-1"
+    native.RecordingSource.import_item.side_effect = lambda *args: args
+
+    for item_key in ("ep-1", "ep-2"):
+        robot.start_recording(
+            "dataset-1", import_session_id="session-1", item_key=item_key
+        )
+        robot.stop_recording()
+
+    started = [call.args[0] for call in native.start_recording.call_args_list]
+    stopped = [call.args[0] for call in native.stop_recording.call_args_list]
+    assert (
+        started
+        == stopped
+        == [
+            ("robot-id-1", "session-1", "ep-1"),
+            ("robot-id-1", "session-1", "ep-2"),
+        ]
+    )
+    native.RecordingSource.robot_instance.assert_not_called()
     robot.id = None

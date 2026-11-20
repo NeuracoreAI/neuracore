@@ -182,7 +182,7 @@ def _publish_json_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    if get_provide_live_data_enabled_manager().is_disabled():
+    if get_provide_live_data_enabled_manager().is_disabled() or robot.instance is None:
         return
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
@@ -246,7 +246,7 @@ def _publish_video_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    if get_provide_live_data_enabled_manager().is_disabled():
+    if get_provide_live_data_enabled_manager().is_disabled() or robot.instance is None:
         return
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
@@ -324,7 +324,9 @@ def _log_group_of_joint_data(
     robot_id = robot.id
     robot_instance = robot.instance
     live_data_orchestrator = (
-        None if live_data_disabled or robot_id is None else StreamManagerOrchestrator()
+        None
+        if live_data_disabled or robot_id is None or robot_instance is None
+        else StreamManagerOrchestrator()
     )
 
     group = _resolve_joint_group(
@@ -347,7 +349,7 @@ def _log_group_of_joint_data(
     native_values = []
 
     for joint_value, binding in zip(joint_data.values(), group.bindings):
-        if robot_id is not None:
+        if robot_id is not None and robot_instance is not None:
             # A live consumer needs the materialised sample now, so build it and
             # publish it; the stream keeps it as its latest data.
             data = JointData(timestamp_us=timestamp_us, value=joint_value)

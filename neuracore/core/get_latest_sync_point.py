@@ -61,7 +61,7 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     Raises:
         RobotError: If the robot is not initialized.
     """
-    if get_consume_live_data_enabled_manager().is_disabled():
+    if get_consume_live_data_enabled_manager().is_disabled() or robot.instance is None:
         return False
 
     if robot.id is None:
@@ -117,7 +117,11 @@ def get_latest_sync_point(
             sync_point.data[data_type] = {}
         sync_point.data[data_type][name_of_sensor_data] = stream_data
 
-    if not include_remote or get_consume_live_data_enabled_manager().is_disabled():
+    if (
+        not include_remote
+        or get_consume_live_data_enabled_manager().is_disabled()
+        or robot.instance is None
+    ):
         return sync_point
 
     if robot.id is None:

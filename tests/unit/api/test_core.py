@@ -678,6 +678,19 @@ def test_stop_recording_rejects_an_invalid_tag_without_stopping(
     recording_robot.stop_recording.assert_not_called()
 
 
+def test_start_recording_passes_the_import_session_item_to_the_daemon(
+    recording_robot,
+) -> None:
+    nc.start_recording(import_session_id="session-1", item_key="episode-7")
+
+    recording_robot.RecordingSource.import_item.assert_called_once_with(
+        "robot-1", "session-1", "episode-7"
+    )
+    assert recording_robot.start_recording.call_args.args[0] is (
+        recording_robot.RecordingSource.import_item.return_value
+    )
+
+
 def test_start_recording_rejects_a_timestamp_outside_the_microsecond_range(
     recording_robot,
 ) -> None:

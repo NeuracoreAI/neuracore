@@ -42,7 +42,7 @@ class Recording:
         recording_id: str,
         total_bytes: int,
         robot_id: str,
-        instance: int,
+        instance: int | None,
         start_time: float,
         end_time: float,
         metadata: RecordingMetadata,
@@ -61,6 +61,7 @@ class Recording:
             total_bytes: Size of the recording episode in bytes.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
+                None for an imported recording.
             start_time: Unix timestamp when recording started.
             end_time: Unix timestamp when recording ended.
             metadata: Metadata associated with the recording.
