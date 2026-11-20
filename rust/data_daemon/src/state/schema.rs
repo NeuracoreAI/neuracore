@@ -195,6 +195,9 @@ pub struct RecordingRow {
     pub robot_index: Option<i64>,
     /// The recording's row in `datasets`.
     pub dataset_index: Option<i64>,
+    /// When the reaper first saw that the recording can never upload. It
+    /// deletes the recording a fixed time later.
+    pub failed_at: Option<NaiveDateTime>,
     /// Caller's start of the recording in microseconds on its data clock.
     pub start_timestamp_us: Option<i64>,
     /// Wall-clock time of the start (Unix nanoseconds): the producer's publish time, or the daemon's clock when the daemon
@@ -263,6 +266,7 @@ impl RecordingRow {
             dataset_id: row.try_get("dataset_id")?,
             robot_index: row.try_get("robot_index")?,
             dataset_index: row.try_get("dataset_index")?,
+            failed_at: row.try_get("failed_at")?,
             start_timestamp_us: row.try_get("start_timestamp_us")?,
             start_publish_timestamp_ns: row.try_get("start_publish_timestamp_ns")?,
             stop_timestamp_us: row.try_get("stop_timestamp_us")?,

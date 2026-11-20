@@ -500,6 +500,14 @@ Waiting recordings are kept until the problem is fixed. To discard them instead,
 3 recordings (1.2 GB) are kept on this machine until the Neuracore server can be reached.
 ```
 
+A recording that can never upload is deleted from this machine within 7 days of the daemon finding it, so it does not fill the disk. That is a recording whose robot or dataset the server refused, one the server no longer holds, or one that could not be fully saved or uploaded. Until then, the status and the warning in your scripts say when it will be deleted:
+
+```text
+1 recording will not upload because the server no longer holds the recording. It will be deleted from this machine within 7 days.
+```
+
+With `recording_reaper` turned off, the daemon keeps these recordings until `neuracore data-daemon reset`. A recording that was still being written when the daemon stopped is discarded when it next starts, whatever this setting.
+
 ### `neuracore data-daemon stop`
 
 ```bash
@@ -557,7 +565,7 @@ nc.stop_recording()
 - A recording is started on the server only once its robot and dataset are confirmed. The daemon keeps it on the machine until then, and uploads it once the server can be reached; the script does not need to be running.
 - Online, `nc.get_dataset(name)` asks the server directly, as before, and never creates a dataset. After an offline login the name cannot be checked, so it goes through the daemon, which creates a dataset of that name once online if the server has none, and the recordings upload into it. `nc.get_dataset(id=...)` needs the server.
 - `nc.stop_recording(wait=True)` stops the recording and raises straight away, as there is nothing to wait for until the server can be reached.
-- When the server blocks a robot or dataset (an archived robot, a rejected API key, an account that cannot record in the organization), its recordings wait on the machine and upload once it is fixed. When it refuses one for good (a robot or dataset the server rejects, or a shared dataset the account may not create), its recordings never upload. The first `nc.connect_robot`, `nc.create_dataset`, offline `nc.get_dataset` by name or `nc.start_recording` in each process warns about anything that needs fixing, and about recordings still kept on the machine because the server cannot be reached; `neuracore data-daemon status` shows the same at any time.
+- When the server blocks a robot or dataset (an archived robot, a rejected API key, an account that cannot record in the organization), its recordings wait on the machine and upload once it is fixed. When it refuses one for good (a robot or dataset the server rejects, or a shared dataset the account may not create), its recordings never upload, and are deleted from this machine within 7 days. The first `nc.connect_robot`, `nc.create_dataset`, offline `nc.get_dataset` by name or `nc.start_recording` in each process warns about anything that needs fixing, and about recordings still kept on the machine because the server cannot be reached; `neuracore data-daemon status` shows the same at any time.
 - If the connection drops while a recording's start is being sent, that recording uploads after the daemon next restarts.
 
 ### Multi node
