@@ -520,9 +520,11 @@ class TestSynchronizationParameterPassthrough:
         ]
 
     def test_recordings_are_fetched_with_the_datasets_sync_parameters(
-        self, mock_data_requests, tmp_path
+        self, mock_data_requests, mock_login, tmp_path, fake_registry
     ) -> None:
         """Non-default parameters must reach the per-recording requests."""
+        fake_registry.dataset_ids["test_dataset"] = "dataset123"
+        nc.login("test_api_key")
         dataset = nc.get_dataset(name="test_dataset")
         dataset.cache_dir = tmp_path / "cache"
         dataset.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -549,9 +551,11 @@ class TestSynchronizationParameterPassthrough:
             assert sent == dataset_details[0]
 
     def test_sync_parameters_survive_slicing(
-        self, mock_data_requests, tmp_path
+        self, mock_data_requests, mock_login, tmp_path, fake_registry
     ) -> None:
         """A sliced synchronized dataset keeps the original parameters."""
+        fake_registry.dataset_ids["test_dataset"] = "dataset123"
+        nc.login("test_api_key")
         dataset = nc.get_dataset(name="test_dataset")
         dataset.cache_dir = tmp_path / "cache"
         dataset.cache_dir.mkdir(parents=True, exist_ok=True)

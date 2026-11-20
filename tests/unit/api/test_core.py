@@ -800,7 +800,9 @@ def recording_robot(monkeypatch):
     monkeypatch.setattr(
         GlobalSingleton(),
         "_active_dataset",
-        SimpleNamespace(id="dataset-1", name="dataset", is_shared=False),
+        SimpleNamespace(
+            id="dataset-1", name="dataset", is_shared=False, dataset_index=None
+        ),
     )
     monkeypatch.setattr(
         "neuracore.core.utils.timestamp_utils.now_us", lambda: PATCHED_NOW_US
