@@ -12,8 +12,8 @@
 //! to. There is no trace registry, no per-frame sequence numbers, and no
 //! recording identity on the wire.
 //!
-//! The surface the SDK's logging layer drives, all keyed by the **source**
-//! `(robot_id, robot_instance)`:
+//! The surface the SDK's logging layer drives, all keyed by the
+//! [`RecordingSource`]: a live robot instance, or one item of an import session.
 //!
 //! - [`start_recording`] / [`stop_recording`] / [`cancel_recording`] publish
 //!   one lifecycle envelope each, carrying the lifecycle wall-clock
@@ -66,6 +66,33 @@ use crate::query::{
 };
 use crate::writer::{note_video_activity, writer_queue, FrameJob, StreamKey, WriterMsg};
 
+/// Who a recording and its data belong to, as the SDK hands it to every native
+/// call. Built once per recording context and passed by reference, so the log
+/// path never re-validates or rebuilds it.
+#[pyclass(frozen, eq, hash, module = "neuracore.data_daemon._data_bridge")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RecordingSource(Source);
+
+#[pymethods]
+impl RecordingSource {
+    #[staticmethod]
+    fn robot_instance(robot_id: &str, instance: i64) -> PyResult<Self> {
+        if robot_id.is_empty() {
+            return Err(PyValueError::new_err("robot_id must not be empty"));
+        }
+        Ok(Self(Source::robot_instance(robot_id, instance)))
+    }
+
+    #[getter]
+    fn robot_id(&self) -> &str {
+        self.0.robot_id()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("RecordingSource({})", self.0)
+    }
+}
+
 /// Announce that a recording has started for a source. Fire-and-forget: the
 /// daemon opens a window and owns all recording identity.
 ///
@@ -77,20 +104,19 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, StreamKey, Writ
 /// what the daemon stores as the row's start and POSTs as the backend
 /// `start_time`. The capture timestamp is returned because it is what tells
 /// this recording apart from its predecessor before either has a cloud id.
+///
+/// An import-item source makes the recording an import of that session item.
 #[pyfunction]
+#[pyo3(signature = (source, robot_name, dataset_id, dataset_name, timestamp_us))]
 fn start_recording(
     py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     robot_name: Option<String>,
     dataset_id: Option<String>,
     dataset_name: Option<String>,
     timestamp_us: Option<i64>,
 ) -> PyResult<i64> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let source = Source::robot_instance(robot_id, robot_instance);
+    let source = &source.0;
     py.detach(|| -> PyResult<i64> {
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
@@ -108,7 +134,7 @@ fn start_recording(
         // The daemon stores this exact value as the recording's start, so this
         // process now holds the same identity a refresh would fetch — a
         // recording bracketed here needs no query at all.
-        recording_state_cache::note_local_start(&source, capture_timestamp_us);
+        recording_state_cache::note_local_start(source, capture_timestamp_us);
         // The writer is deliberately not told where the window opened: a chunk
         // may span the boundary, and the daemon splits it per frame.
         Ok(capture_timestamp_us)
@@ -126,25 +152,22 @@ fn start_recording(
 /// (~1000 joints ≈ 2 ms). The names are split and zipped with the values on the
 /// publisher thread, off this path.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, names, values, timestamp_us))]
+#[pyo3(signature = (source, data_type, names, values, timestamp_us))]
 fn log_joints(
     py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     data_type: &str,
     names: &str,
     values: Vec<f64>,
     timestamp_us: i64,
 ) -> PyResult<()> {
-    if robot_id.is_empty() || data_type.is_empty() {
-        return Err(PyValueError::new_err(
-            "robot_id and data_type must not be empty",
-        ));
+    if data_type.is_empty() {
+        return Err(PyValueError::new_err("data_type must not be empty"));
     }
     if values.is_empty() {
         return Ok(());
     }
-    let source = Source::robot_instance(robot_id, robot_instance);
+    let source = source.0.clone();
     let data_type = data_type.to_string();
     let joined_names = names.to_string();
     py.detach(move || {
@@ -188,12 +211,11 @@ pyo3::create_exception!(
 /// boundary; every internal Rust component downstream works with the strongly
 /// typed [`FrameDtype`].
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_us, depth_scale_m = None, intrinsics = None, extrinsics = None))]
+#[pyo3(signature = (source, data_type, name, width, height, dtype, payload, timestamp_us, depth_scale_m = None, intrinsics = None, extrinsics = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     data_type: &str,
     name: &str,
     width: u32,
@@ -205,9 +227,9 @@ fn log_frame(
     intrinsics: Option<Vec<f32>>,
     extrinsics: Option<Vec<f32>>,
 ) -> PyResult<()> {
-    if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
+    if data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
-            "robot_id, data_type and name must not be empty",
+            "data_type and name must not be empty",
         ));
     }
     let frame_dtype =
@@ -242,7 +264,7 @@ fn log_frame(
 
     let job = FrameJob {
         stream: StreamKey {
-            source: Source::robot_instance(robot_id, robot_instance),
+            source: source.0.clone(),
             data_type: data_type.to_string(),
             sensor_name: name.to_string(),
         },
@@ -285,22 +307,21 @@ fn log_frame(
 /// here unchanged. The daemon classifies the label downstream
 /// (see `content_type_for`); it imposes no allowlist.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, payload, timestamp_us))]
+#[pyo3(signature = (source, data_type, name, payload, timestamp_us))]
 fn log_json(
     py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     data_type: &str,
     name: &str,
     payload: &[u8],
     timestamp_us: i64,
 ) -> PyResult<()> {
-    if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
+    if data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
-            "robot_id, data_type and name must not be empty",
+            "data_type and name must not be empty",
         ));
     }
-    let source = Source::robot_instance(robot_id, robot_instance);
+    let source = source.0.clone();
     let data_type = data_type.to_string();
     let name = name.to_string();
     let owned_payload = payload.to_vec();
@@ -342,18 +363,14 @@ fn log_json(
 /// stop and POSTed as the backend `end_time`, never used for window
 /// membership.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None, tags = Vec::new()))]
+#[pyo3(signature = (source, timestamp_us = None, tags = Vec::new()))]
 fn stop_recording(
     py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     timestamp_us: Option<i64>,
     tags: Vec<String>,
 ) -> PyResult<()> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let source = Source::robot_instance(robot_id, robot_instance);
+    let source = &source.0;
     py.detach(|| -> PyResult<()> {
         // Drain the data publisher before stamping the window's upper bound.
         // `log_joint_*` / `log_json` only hand their envelope to the background
@@ -384,7 +401,7 @@ fn stop_recording(
             timestamp_us: capture_timestamp_us,
             tags,
         })?;
-        recording_state_cache::note_local_end(&source);
+        recording_state_cache::note_local_end(source);
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
@@ -400,11 +417,8 @@ fn stop_recording(
 /// daemon's holdback and the `SourceFlushed` marker route them into the
 /// just-closed window. Idempotent.
 #[pyfunction]
-fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let source = Source::robot_instance(robot_id, robot_instance);
+fn flush_source(py: Python<'_>, source: &RecordingSource) -> PyResult<()> {
+    let source = source.0.clone();
     py.detach(|| {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
@@ -430,17 +444,13 @@ fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult
 /// publish clock); the daemon stores it as the row's stop and POSTs it as the
 /// backend `end_time`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None))]
+#[pyo3(signature = (source, timestamp_us = None))]
 fn cancel_recording(
     py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     timestamp_us: Option<i64>,
 ) -> PyResult<()> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let source = Source::robot_instance(robot_id, robot_instance);
+    let source = &source.0;
     py.detach(|| -> PyResult<()> {
         let capture_timestamp_us =
             timestamp_us.unwrap_or_else(|| now_ns() / NANOSECONDS_PER_MICROSECOND);
@@ -461,7 +471,7 @@ fn cancel_recording(
             source: source.clone(),
             timestamp_us: capture_timestamp_us,
         })?;
-        recording_state_cache::note_local_end(&source);
+        recording_state_cache::note_local_end(source);
         Ok(())
     })
 }
@@ -544,9 +554,8 @@ fn parse_frame_dtype(
 /// boundary; a caller that sees `None` is either outside a recording or ahead
 /// of the first refresh, and must treat both the same.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance))]
-fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
-    recording_state_cache::epoch(&Source::robot_instance(robot_id, robot_instance))
+fn recording_epoch(source: &RecordingSource) -> Option<i64> {
+    recording_state_cache::epoch(&source.0)
 }
 
 /// Which recording, if any, a source currently has open.
@@ -565,18 +574,13 @@ fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
 /// `None` or the recording's `recording_index` / `cloud_recording_id` /
 /// `start_timestamp_us`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timeout_s))]
+#[pyo3(signature = (source, timeout_s))]
 fn recording_state<'py>(
     py: Python<'py>,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &RecordingSource,
     timeout_s: f64,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let source = Source::robot_instance(robot_id, robot_instance);
-    let answer = py.detach(|| recording_state_cache::display(&source, timeout_s));
+    let answer = py.detach(|| recording_state_cache::display(&source.0, timeout_s));
     let Some(recording) = answer else {
         return Ok(None);
     };
@@ -630,6 +634,7 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<RecordingSource>()?;
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;

@@ -425,11 +425,13 @@ pthread
 pyarrow
 pyav
 pycache
+pyclass
 pydantic
 pyee
 pyfunction
 pygments
 pyinstrument
+pymethods
 pymodule
 pyproject
 pyquaternion

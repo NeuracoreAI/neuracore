@@ -300,8 +300,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         self._get_daemon_recording_context().start_recording(
-            robot_id=self.id,
-            robot_instance=self.instance,
+            recording_context.RobotInstanceSource(self.id, self.instance),
             robot_name=self.name,
             dataset_id=dataset_id,
             dataset_name=None,
@@ -383,9 +382,8 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        return (
-            recording_context.query_recording_state(self.id, self.instance) is not None
-        )
+        source = recording_context.RobotInstanceSource(self.id, self.instance)
+        return recording_context.query_recording_state(source) is not None
 
     def _recording_epoch(self) -> int | None:
         """Which recording the daemon has open for this source, as a token.
@@ -419,9 +417,8 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        recording = recording_context.query_recording_state(
-            self.id, self.instance, timeout_s=timeout_s
-        )
+        source = recording_context.RobotInstanceSource(self.id, self.instance)
+        recording = recording_context.query_recording_state(source, timeout_s=timeout_s)
         return recording.cloud_recording_id if recording is not None else None
 
     def _package_urdf(self) -> dict:
@@ -772,7 +769,9 @@ class Robot:
             if self.id is None:
                 raise RobotError("Robot not initialized. Call init() first.")
             context = DaemonRecordingContext()
-            context.bind_source(self.id, self.instance)
+            context.bind_source(
+                recording_context.RobotInstanceSource(self.id, self.instance)
+            )
             self._daemon_recording_context = context
         return self._daemon_recording_context
 
