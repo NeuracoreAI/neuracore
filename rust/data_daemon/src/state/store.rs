@@ -228,9 +228,29 @@ pub trait StateStore: Send + Sync {
         recording_index: i64,
     ) -> Result<Option<String>, StateStoreError>;
 
+    /// The robot row whose server id is `cloud_robot_id` for `instance`, in
+    /// `org_id` (or a row made before the `robots` table): the row a recording
+    /// started from the web app is matched to, as its robot's logged data is
+    /// labelled with that row. `None` when no row has the id yet.
+    async fn robot_index_for_cloud_id(
+        &self,
+        org_id: &str,
+        cloud_robot_id: &str,
+        instance: i64,
+    ) -> Result<Option<i64>, StateStoreError>;
+
+    /// Whether a robot row of `instance` in `org_id` waits for the server to
+    /// register it: `pending` with no server id yet.
+    async fn has_unregistered_robot(
+        &self,
+        org_id: &str,
+        instance: i64,
+    ) -> Result<bool, StateStoreError>;
+
     /// The dataset row for the server's dataset `cloud_dataset_id` in
     /// `org_id`, made already confirmed (and with no name) when there is none:
-    /// a dataset the SDK read from the server is known by its server id.
+    /// a dataset the SDK read from the server, or one a recording started from
+    /// the web app names, is known by its server id.
     async fn dataset_index_for_cloud_id(
         &self,
         org_id: &str,
@@ -1384,6 +1404,44 @@ impl StateStore for SqliteStateStore {
         .fetch_optional(&self.read_pool)
         .await?;
         Ok(org.flatten())
+    }
+
+    async fn robot_index_for_cloud_id(
+        &self,
+        org_id: &str,
+        cloud_robot_id: &str,
+        instance: i64,
+    ) -> Result<Option<i64>, StateStoreError> {
+        let index = sqlx::query_scalar(
+            "SELECT robot_index FROM robots \
+              WHERE cloud_robot_id = ?2 AND instance = ?3 \
+                AND (org_id = ?1 OR org_id IS NULL) \
+           ORDER BY org_id IS NULL, robot_index DESC \
+              LIMIT 1",
+        )
+        .bind(org_id)
+        .bind(cloud_robot_id)
+        .bind(instance)
+        .fetch_optional(&self.read_pool)
+        .await?;
+        Ok(index)
+    }
+
+    async fn has_unregistered_robot(
+        &self,
+        org_id: &str,
+        instance: i64,
+    ) -> Result<bool, StateStoreError> {
+        let exists = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM robots \
+                             WHERE org_id = ?1 AND instance = ?2 \
+                               AND status = 'pending' AND cloud_robot_id IS NULL)",
+        )
+        .bind(org_id)
+        .bind(instance)
+        .fetch_one(&self.read_pool)
+        .await?;
+        Ok(exists)
     }
 
     async fn dataset_index_for_cloud_id(
