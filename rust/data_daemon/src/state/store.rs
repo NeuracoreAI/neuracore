@@ -98,6 +98,10 @@ pub struct NewRecording<'a> {
     pub robot_instance: Option<i64>,
     /// Dataset identifier.
     pub dataset_id: Option<&'a str>,
+    /// The recording's row in `robots`.
+    pub robot_index: Option<i64>,
+    /// The recording's row in `datasets`.
+    pub dataset_index: Option<i64>,
     /// The recording's start.
     pub start: RecordingTimestamp,
 }
@@ -219,6 +223,23 @@ pub trait StateStore: Send + Sync {
         reason: Option<ResolutionReason>,
         until: NaiveDateTime,
     ) -> Result<(), StateStoreError>;
+
+    /// The organization a recording's server calls go to: its robot row's.
+    /// `None` when the recording has no robot row, or a row made for a
+    /// recording that predates the `robots` table.
+    async fn recording_org_id(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<String>, StateStoreError>;
+
+    /// The start notifier's periodic set, oldest first: recordings not yet
+    /// started on the server that are cancelled (to settle), or whose start
+    /// was never sent and whose dataset row, if any, is confirmed.
+    async fn recordings_for_start_resweep(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Stamp that the start notifier is sending the recording's start, so a
+    /// re-check never sends it again.
+    async fn mark_start_sent(&self, recording_index: i64) -> Result<(), StateStoreError>;
 
     /// Mark a `pending` robot row refused for good, with `reason`.
     #[allow(dead_code)] // Used by the robot resolver.
@@ -1031,8 +1052,8 @@ impl StateStore for SqliteStateStore {
             "INSERT INTO recordings ( \
                  robot_id, robot_instance, dataset_id, \
                  start_timestamp_us, start_publish_timestamp_ns, \
-                 created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6)",
+                 created_at, last_updated, robot_index, dataset_index \
+             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6, ?8, ?9)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
@@ -1041,6 +1062,8 @@ impl StateStore for SqliteStateStore {
         .bind(new.start.publish_timestamp_ns)
         .bind(now)
         .bind(NANOSECONDS_PER_MICROSECOND)
+        .bind(new.robot_index)
+        .bind(new.dataset_index)
         .execute(&mut *tx)
         .await?;
 
@@ -1323,6 +1346,53 @@ impl StateStore for SqliteStateStore {
         reason: ResolutionReason,
     ) -> Result<(), StateStoreError> {
         self.fail(Table::Robots, robot_index, reason).await
+    }
+
+    async fn recording_org_id(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<String>, StateStoreError> {
+        let org: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT r.org_id FROM recordings rec \
+               JOIN robots r ON r.robot_index = rec.robot_index \
+              WHERE rec.recording_index = ?1",
+        )
+        .bind(recording_index)
+        .fetch_optional(&self.read_pool)
+        .await?;
+        Ok(org.flatten())
+    }
+
+    async fn recordings_for_start_resweep(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT r.* FROM recordings r \
+              WHERE r.recording_id IS NULL AND r.backend_start_notified_at IS NULL \
+                AND (r.cancelled_at IS NOT NULL \
+                     OR (r.start_sent_at IS NULL \
+                         AND (r.dataset_index IS NULL \
+                              OR EXISTS (SELECT 1 FROM datasets d \
+                                          WHERE d.dataset_index = r.dataset_index \
+                                            AND d.status = 'done')))) \
+           ORDER BY r.recording_index ASC",
+        )
+        .fetch_all(&self.read_pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn mark_start_sent(&self, recording_index: i64) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE recordings SET start_sent_at = ?2 \
+              WHERE recording_index = ?1 AND start_sent_at IS NULL",
+        )
+        .bind(recording_index)
+        .bind(Utc::now().naive_utc())
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
     }
 
     async fn fail_dataset(
@@ -2688,6 +2758,8 @@ mod tests {
     async fn seed_recording(store: &SqliteStateStore, instance: i64) -> i64 {
         store
             .create_recording(NewRecording {
+                robot_index: None,
+                dataset_index: None,
                 robot_id: Some("robot-1"),
                 robot_instance: Some(instance),
                 dataset_id: Some("ds-1"),
