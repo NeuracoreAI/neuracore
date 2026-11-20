@@ -175,12 +175,14 @@ def _connect_import_robot(
     """
 
     def connect() -> Robot:
+        # Wait for the server, so an archived robot raises here.
         return nc.connect_robot(
             robot_name=robot_name,
             urdf_path=urdf_path,
             mjcf_path=mjcf_path,
             overwrite=overwrite,
             shared=shared,
+            wait=True,
         )
 
     try:

@@ -475,8 +475,7 @@ impl ApiClient {
     /// `POST /org/{org}/robots?is_shared=`: register a robot instance.
     ///
     /// An upsert by name: it returns the robot of that name, creating it if
-    /// there is none, and registers `instance` on it. The same call
-    /// `nc.connect_robot` makes online.
+    /// there is none, and registers `instance` on it.
     pub async fn robot_upsert(
         &self,
         org_id: &str,

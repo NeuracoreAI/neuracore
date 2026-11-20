@@ -29,7 +29,6 @@ from neuracore_types import (
 from neuracore_types.utils import validate_safe_name
 
 from neuracore.api.core import _get_robot
-from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
     DepthDataStream,
@@ -180,12 +179,13 @@ def _publish_json_to_p2p(
         data_type: Type of data being published
         data: Data to publish
     """
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+    # Live data needs the server's id; until the robot is registered, none.
+    if robot.known_id is None:
+        return
     if get_provide_live_data_enabled_manager().is_disabled():
         return
     StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
+        robot.known_id, robot.instance
     ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
         data.model_dump(mode="json")
     )
@@ -244,12 +244,13 @@ def _publish_video_to_p2p(
         camera_data_without_frame: Camera metadata
         image: Frame data
     """
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+    # Live data needs the server's id; until the robot is registered, none.
+    if robot.known_id is None:
+        return
     if get_provide_live_data_enabled_manager().is_disabled():
         return
     StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
+        robot.known_id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
         camera_data_without_frame, frame=image
     )
@@ -321,7 +322,7 @@ def _log_group_of_joint_data(
         bindings_for_type = {}
         binding_cache[data_type] = bindings_for_type
     live_data_disabled = get_provide_live_data_enabled_manager().is_disabled()
-    robot_id = robot.id
+    robot_id = robot.known_id
     robot_instance = robot.instance
     live_data_orchestrator = (
         None if live_data_disabled or robot_id is None else StreamManagerOrchestrator()
