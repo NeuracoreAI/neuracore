@@ -314,6 +314,7 @@ pub fn cleanup_stale_ipc() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data_daemon_shared::Source;
     use tempfile::tempdir;
 
     #[test]
@@ -373,8 +374,7 @@ mod tests {
 
         let recording_index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 ..Default::default()
             })
             .await
@@ -425,8 +425,7 @@ mod tests {
 
         let recording_index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-2"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-2", 0)),
                 ..Default::default()
             })
             .await

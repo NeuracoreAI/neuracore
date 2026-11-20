@@ -244,6 +244,7 @@ async fn notify_backend(
 mod tests {
     use super::*;
     use crate::state::RecordingTimestamp;
+    use data_daemon_shared::Source;
 
     use std::time::Duration;
 
@@ -280,8 +281,7 @@ mod tests {
     async fn seed_recording(store: &SqliteStateStore) -> i64 {
         store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(7),
+                source: Some(&Source::robot_instance("robot-1", 7)),
                 dataset_id: Some("ds-1"),
                 start: RecordingTimestamp {
                     publish_timestamp_ns: 1_700_000_000_000_000_000,

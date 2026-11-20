@@ -531,6 +531,7 @@ mod tests {
     use crate::state::store::TraceUpdate;
     use crate::state::RecordingTimestamp;
     use crate::state::{NewRecording, TraceUploadStatus, TraceWriteStatus};
+    use data_daemon_shared::Source;
     use std::time::Duration;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path, query_param};
@@ -577,8 +578,7 @@ mod tests {
     ) -> i64 {
         let recording_index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 dataset_id: Some("ds-1"),
                 start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })
@@ -940,8 +940,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let recording_index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 dataset_id: Some("ds-1"),
                 start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })

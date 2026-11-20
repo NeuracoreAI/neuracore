@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use data_daemon_shared::NANOSECONDS_PER_MICROSECOND;
+use data_daemon_shared::{Source, NANOSECONDS_PER_MICROSECOND};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
@@ -92,10 +92,8 @@ impl RecordingTimestamp {
 /// `StartRecording` envelope; the store allocates the `recording_index`.
 #[derive(Debug, Clone, Default)]
 pub struct NewRecording<'a> {
-    /// Robot identifier — first half of the source key.
-    pub robot_id: Option<&'a str>,
-    /// Robot instance — second half of the source key.
-    pub robot_instance: Option<i64>,
+    /// The source that records it.
+    pub source: Option<&'a Source>,
     /// Dataset identifier.
     pub dataset_id: Option<&'a str>,
     /// The recording's start.
@@ -131,8 +129,7 @@ pub trait StateStore: Send + Sync {
     #[allow(dead_code)]
     async fn recordings_for_source(
         &self,
-        robot_id: &str,
-        robot_instance: i64,
+        source: &Source,
     ) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Stamp the cloud `recording_id` **and** `backend_start_notified_at`
@@ -158,8 +155,7 @@ pub trait StateStore: Send + Sync {
     async fn recording_index_for_known_recording(
         &self,
         recording_id: &str,
-        robot_id: &str,
-        robot_instance: i64,
+        source: &Source,
         start_timestamp_us: i64,
         tolerance_us: u64,
     ) -> Result<Option<i64>, StateStoreError>;
@@ -820,6 +816,10 @@ impl StateStore for SqliteStateStore {
         &self,
         new: NewRecording<'_>,
     ) -> Result<RecordingRow, StateStoreError> {
+        let (robot_id, robot_instance) = match new.source {
+            Some(Source::RobotInstance { robot_id, instance }) => (Some(robot_id), Some(*instance)),
+            None => (None, None),
+        };
         let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         let result = sqlx::query(
@@ -829,8 +829,8 @@ impl StateStore for SqliteStateStore {
                  created_at, last_updated \
              ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6)",
         )
-        .bind(new.robot_id)
-        .bind(new.robot_instance)
+        .bind(robot_id)
+        .bind(robot_instance)
         .bind(new.dataset_id)
         .bind(new.start.timestamp_us)
         .bind(new.start.publish_timestamp_ns)
@@ -863,16 +863,16 @@ impl StateStore for SqliteStateStore {
 
     async fn recordings_for_source(
         &self,
-        robot_id: &str,
-        robot_instance: i64,
+        source: &Source,
     ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let Source::RobotInstance { robot_id, instance } = source;
         let rows = sqlx::query(
             "SELECT * FROM recordings \
               WHERE robot_id = ?1 AND robot_instance = ?2 \
            ORDER BY recording_index ASC",
         )
         .bind(robot_id)
-        .bind(robot_instance)
+        .bind(instance)
         .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
@@ -921,11 +921,11 @@ impl StateStore for SqliteStateStore {
     async fn recording_index_for_known_recording(
         &self,
         recording_id: &str,
-        robot_id: &str,
-        robot_instance: i64,
+        source: &Source,
         start_timestamp_us: i64,
         tolerance_us: u64,
     ) -> Result<Option<i64>, StateStoreError> {
+        let Source::RobotInstance { robot_id, instance } = source;
         let recording_index = sqlx::query_scalar::<_, i64>(
             "SELECT recording_index FROM recordings \
               WHERE recording_id = ?1 \
@@ -936,7 +936,7 @@ impl StateStore for SqliteStateStore {
         )
         .bind(recording_id)
         .bind(robot_id)
-        .bind(robot_instance)
+        .bind(instance)
         .bind(start_timestamp_us)
         .bind(i64::try_from(tolerance_us).unwrap_or(i64::MAX))
         .fetch_optional(&self.read_pool)
@@ -1858,7 +1858,7 @@ mod tests {
         let (store, _tempdir) = open_store().await;
         let recording_index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp {
                     publish_timestamp_ns: 1_700_000_000_000_000_000,
                     timestamp_us: Some(5),
@@ -1888,8 +1888,7 @@ mod tests {
     async fn seed_recording(store: &SqliteStateStore, instance: i64) -> i64 {
         store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(instance),
+                source: Some(&Source::robot_instance("robot-1", instance)),
                 dataset_id: Some("ds-1"),
                 start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })
@@ -2014,7 +2013,10 @@ mod tests {
         // A different instance must not be returned.
         seed_recording(&store, 9).await;
 
-        let rows = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let rows = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         let indices: Vec<i64> = rows.iter().map(|row| row.recording_index).collect();
         assert_eq!(indices, vec![first, second]);
     }
@@ -2031,8 +2033,7 @@ mod tests {
                 store
                     .recording_index_for_known_recording(
                         recording_id,
-                        "robot-1",
-                        instance,
+                        &Source::robot_instance("robot-1", instance),
                         start_us,
                         TOLERANCE_US,
                     )

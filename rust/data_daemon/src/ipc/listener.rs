@@ -272,9 +272,7 @@ async fn serve_recording_state_queries(
         };
 
         let reply = RecordingStateReply {
-            recording: recording_state
-                .live(store, &query.robot_id, query.robot_instance)
-                .await,
+            recording: recording_state.live(store, &query.source).await,
         };
 
         let bytes = match reply.encode() {

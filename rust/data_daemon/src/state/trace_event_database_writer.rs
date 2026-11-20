@@ -366,6 +366,7 @@ mod tests {
     use crate::state::store::NewRecording;
     use crate::state::RecordingTimestamp;
     use crate::state::StateStore;
+    use data_daemon_shared::Source;
     use tempfile::TempDir;
 
     async fn store_with_trace() -> (Arc<SqliteStateStore>, TempDir, String) {
@@ -377,8 +378,7 @@ mod tests {
         );
         let rec = store
             .create_recording(NewRecording {
-                robot_id: Some("r"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("r", 0)),
                 start: RecordingTimestamp::observed_at(1),
                 ..Default::default()
             })
@@ -490,8 +490,7 @@ mod tests {
         );
         let rec = store
             .create_recording(NewRecording {
-                robot_id: Some("r"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("r", 0)),
                 start: RecordingTimestamp::observed_at(1),
                 ..Default::default()
             })
