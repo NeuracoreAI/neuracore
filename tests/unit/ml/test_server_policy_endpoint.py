@@ -30,6 +30,14 @@ B = 1
 PREDICTION_HORIZON = 3
 TEST_ROBOT_ID = "test_robot"
 TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
+
+
+@pytest.fixture(autouse=True)
+def daemon_confirms_test_robot_with_mocked_id(fake_registry) -> None:
+    """connect_robot takes the robot id from the daemon, not the server mock."""
+    fake_registry.robot_ids[TEST_ROBOT_ID] = TEST_ROBOT_PAYLOAD["robot_id"]
+
+
 FAKE_PREDICTED_DATA: dict[DataType, dict[str, BatchedNCData]] = {
     DataType.JOINT_TARGET_POSITIONS: {
         "joint1": BatchedJointData(value=torch.full((B, PREDICTION_HORIZON, 1), 0.1)),

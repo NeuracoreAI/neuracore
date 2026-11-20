@@ -6,6 +6,8 @@ live data streaming. It maintains global state for active robots and
 recording sessions.
 """
 
+import logging
+import threading
 import time
 from warnings import warn
 
@@ -30,8 +32,14 @@ from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S = 60 * 15
 _RECORDING_UPLOAD_POLL_INTERVAL_S = 0.2
+# How long a connected robot waits for the server to register it before its
+# live data streaming is given up, and how often it asks the daemon.
+LIVE_DATA_WAIT_S = 10 * 60.0
+LIVE_DATA_POLL_S = 1.0
 
 
 def _get_robot(robot_name: str | None, instance: int) -> Robot:
@@ -146,12 +154,18 @@ def connect_robot(
     mjcf_path: str | None = None,
     overwrite: bool = False,
     shared: bool = False,
+    wait: bool | None = None,
 ) -> Robot:
     """Initialize a robot connection and set it as the active robot.
 
-    Creates or connects to a robot instance, validates version compatibility,
-    and initializes streaming managers for live data and recording state updates.
-    The robot becomes the active robot for subsequent operations.
+    Connects the robot instance through the data daemon, online or offline:
+    the daemon has the server register it, and upload its description if the
+    server needs it. Online this waits for the server by default. After an
+    offline login, or with the daemon running offline, it returns straight
+    away; the robot's server id is fetched when it is first
+    read, which waits for the server, and live data streaming starts once it
+    is known. The robot becomes the
+    active robot for subsequent operations.
 
     Upload of a robot description file (URDF or MJCF) is not required,
     but it is recommended for better visualization within Neuracore.
@@ -167,25 +181,78 @@ def connect_robot(
         shared: Whether you want to register the robot as shared/open-source.
             Note that setting shared=True is only available to specific
             members allocated by the Neuracore team.
+        wait: Wait for the server to register the robot before returning, so
+            a refusal raises here. ``None``, the default, waits when the last
+            login reached the server and the daemon runs online.
 
     Returns:
         The initialized and connected robot instance.
 
     Raises:
-        RobotError: If the robot could not be initialized or is archived.
+        RobotError: If waiting and the server refused the robot, or the robot
+            could not be initialized.
+        RobotArchivedError: If waiting and the robot is archived.
+        ServerUnreachableError: If ``wait`` is ``True`` and the last login
+            could not reach the server.
         ValidationError: If the model paths are not valid or if a URDF visual
             mesh has an unsupported format.
+        OrganizationError: If offline and no organization is saved.
         DaemonLifecycleError: If the data daemon could not be started.
     """
-    robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
-    GlobalSingleton()._active_robot = robot
-    # Initialize push update managers
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-    StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     # Only the daemon hears a recording started from the web.
     ensure_daemon_running()
+    robot = _init_robot(
+        robot_name,
+        instance,
+        urdf_path,
+        mjcf_path,
+        overwrite,
+        shared,
+        wait=wait,
+    )
+    GlobalSingleton()._active_robot = robot
+    if robot.is_registered:
+        StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
+    else:
+        threading.Thread(
+            target=_start_live_data_once_registered,
+            args=(robot,),
+            name=f"neuracore-live-data-{robot_name}-{instance}",
+            daemon=True,
+        ).start()
     return robot
+
+
+def _start_live_data_once_registered(robot: Robot) -> None:
+    """Start the robot's live data streaming once the server registers it.
+
+    Runs off the caller's thread and never raises. It waits up to
+    :data:`LIVE_DATA_WAIT_S`, through holds the user can fix such as an archived
+    robot, and gives up when the server refuses the robot for good, when this
+    process's login was offline (it cannot stream), or when the time is up.
+    """
+    deadline = time.monotonic() + LIVE_DATA_WAIT_S
+    try:
+        while time.monotonic() < deadline:
+            if get_auth().is_offline or robot._robot_index is None:
+                return
+            state = bridge.robot_row_state(robot._robot_index)
+            if state is None or state.status == "failed":
+                return
+            if state.status == "done" and state.cloud_id:
+                StreamManagerOrchestrator().get_provider_manager(
+                    robot.id, robot.instance
+                )
+                return
+            time.sleep(LIVE_DATA_POLL_S)
+        logger.info(
+            "No live data for robot %s: the server did not register it within "
+            "%.0f minutes.",
+            robot.name,
+            LIVE_DATA_WAIT_S / 60,
+        )
+    except Exception as error:  # noqa: BLE001 - never raised to the user
+        logger.debug("No live data for robot %s: %s", robot.name, error)
 
 
 def update_robot_name(
@@ -378,6 +445,21 @@ def stop_recording(
             "the Neuracore server can be reached, so it cannot be waited for "
             "while offline."
         )
+    if wait:
+        if timestamp is None:
+            # The recording stops when asked, not after the waits below.
+            timestamp = time.time()
+        try:
+            # The server starts the recording only once it has confirmed the
+            # robot and the dataset, so wait for both before waiting for the
+            # recording's id. A refusal raises here.
+            robot.id  # noqa: B018 - reading it waits for the server
+            dataset = GlobalSingleton()._active_dataset
+            if dataset is not None and dataset.dataset_index is not None:
+                dataset.id  # noqa: B018 - reading it waits for the server
+        except Exception:
+            robot.stop_recording(timestamp=timestamp, tags=stop_tags)
+            raise
     wait_deadline = time.monotonic() + wait_timeout_s
     cloud_recording_id = robot.get_cloud_recording_id() if wait else None
     robot.stop_recording(timestamp=timestamp, tags=stop_tags)
@@ -441,8 +523,9 @@ def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
         return
 
     robot = _get_robot(robot_name, instance)
-    if not robot.id:
-        raise RobotError("Robot not initialized. Call init() first.")
+    if not robot.is_registered:
+        # Never registered, so its live data never started.
+        return
     StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
 
 

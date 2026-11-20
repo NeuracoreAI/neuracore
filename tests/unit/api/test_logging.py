@@ -753,7 +753,7 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
     native start event.
     """
     robot = Robot("test_robot", instance=3, org_id="org-1")
-    robot.id = "robot-from-sse"
+    robot._robot_index = 7
     native = MagicMock()
 
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
@@ -776,7 +776,7 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
     native.log_json.assert_called_once()
     args = native.log_json.call_args.args
     assert args[:4] == (
-        "robot-from-sse",
+        "7",
         3,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value,
         "secondary_gripper",
@@ -827,7 +827,7 @@ def test_log_joints_rounds_seconds_to_the_nearest_microsecond(
 def test_log_done_records_flag_to_daemon(monkeypatch, value, expected) -> None:
     """log_done stores a DONE sample under the done sensor name."""
     robot = Robot("test_robot", instance=0, org_id="org-1")
-    robot.id = "robot-id"
+    robot._robot_index = 5
     native = MagicMock()
 
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
@@ -839,7 +839,7 @@ def test_log_done_records_flag_to_daemon(monkeypatch, value, expected) -> None:
 
     native.log_json.assert_called_once()
     args = native.log_json.call_args.args
-    assert args[:4] == ("robot-id", 0, DataType.DONE.value, "done")
+    assert args[:4] == ("5", 0, DataType.DONE.value, "done")
     assert json.loads(args[4]) == DoneData(timestamp=12.5, done=expected).model_dump(
         mode="json"
     )
@@ -1050,7 +1050,7 @@ LOG_FRAME_TIMESTAMP_ARG = 8
 def daemon_robot(monkeypatch):
     """A recording robot whose daemon bridge is a mock, with live data disabled."""
     robot = Robot("test_robot", instance=0, org_id="org-1")
-    robot.id = "robot-1"
+    robot._robot_index = 1
     native = MagicMock()
     native.recording_epoch.return_value = 1_000
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)

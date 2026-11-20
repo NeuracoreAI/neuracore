@@ -145,6 +145,8 @@ class _FakeConnect:
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
+        # Without waiting for the server, an archived robot does not raise.
+        assert kwargs.get("wait") is True
         if len(self.calls) <= self.archived_refusals:
             raise RobotArchivedError("Robot 'bot' is archived.")
         return self.robot
