@@ -110,7 +110,10 @@ def _create_nc_data_at_timestep(
         )
 
         return ParallelGripperOpenAmountData(open_amount=marker)
-    if data_type == DataType.END_EFFECTOR_POSES:
+    if data_type in {
+        DataType.END_EFFECTOR_POSES,
+        DataType.END_EFFECTOR_TARGET_POSES,
+    }:
         from neuracore_types.nc_data.end_effector_pose_data import EndEffectorPoseData
 
         return EndEffectorPoseData(
@@ -206,7 +209,11 @@ def _extract_output_marker(batched_nc_data, data_type: DataType) -> float:
         DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
     }:
         return float(batched_nc_data.open_amount[0, 0, 0])
-    if data_type in {DataType.END_EFFECTOR_POSES, DataType.POSES}:
+    if data_type in {
+        DataType.END_EFFECTOR_POSES,
+        DataType.END_EFFECTOR_TARGET_POSES,
+        DataType.POSES,
+    }:
         return float(batched_nc_data.pose[0, 0, 0])
     if data_type == DataType.RGB_IMAGES:
         return float(batched_nc_data.frame[0, 0, 0, 0, 0])

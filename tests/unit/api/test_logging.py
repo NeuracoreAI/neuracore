@@ -648,6 +648,63 @@ def test_log_end_effector_poses(
     )
 
 
+def test_log_end_effector_target_poses(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging target end effector pose data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    nc.log_end_effector_target_pose(
+        name="left_ee",
+        pose=np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5]),
+    )
+    nc.log_end_effector_target_poses({
+        "left_ee": np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5]),
+        "right_ee": np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]),
+    })
+
+
+def test_log_end_effector_target_pose_validation(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test validation of target end effector pose inputs."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    with pytest.raises(ValueError, match="End effector pose must be a numpy array"):
+        nc.log_end_effector_target_pose(name="right_ee", pose="not_a_list")
+
+    with pytest.raises(ValueError, match="End effector names must be strings"):
+        nc.log_end_effector_target_pose(
+            name=123, pose=np.array([0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071])
+        )
+
+    with pytest.raises(
+        ValueError, match="End effector pose must be a valid unit quaternion"
+    ):
+        nc.log_end_effector_target_pose(
+            name="right_ee", pose=np.array([0.6, 0.4, 0.3, 0.0, 1.0, 0.0, 1.0])
+        )
+
+    with pytest.raises(
+        ValueError, match="End effector pose must be a 7-element numpy array"
+    ):
+        nc.log_end_effector_target_pose(
+            name="left_ee", pose=np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5])
+        )
+
+
 def test_log_pose(
     temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
@@ -947,6 +1004,12 @@ LOG_ENTRY_POINTS = [
     ("log_custom_1d", {"name": "c", "data": np.zeros(3)}, "log_json"),
     ("log_pose", {"name": "p", "pose": _UNIT_POSE}, "log_json"),
     ("log_end_effector_pose", {"name": "e", "pose": _UNIT_POSE}, "log_json"),
+    ("log_end_effector_target_pose", {"name": "e", "pose": _UNIT_POSE}, "log_json"),
+    (
+        "log_end_effector_target_poses",
+        {"poses": {"e": _UNIT_POSE}},
+        "log_json",
+    ),
     ("log_parallel_gripper_open_amount", {"name": "g", "value": 0.5}, "log_json"),
     ("log_parallel_gripper_open_amounts", {"values": {"g": 0.5}}, "log_json"),
     (

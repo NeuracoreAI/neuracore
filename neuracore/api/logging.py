@@ -1027,8 +1027,92 @@ def log_end_effector_pose(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    timestamp_us = resolve_timestamp_us(timestamp)
+    _log_end_effector_pose(
+        name,
+        pose,
+        robot_name,
+        instance,
+        resolve_timestamp_us(timestamp),
+        dry_run,
+        DataType.END_EFFECTOR_POSES,
+    )
 
+
+def log_end_effector_target_pose(
+    name: str,
+    pose: np.ndarray,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log commanded/target end-effector pose data for a robot.
+
+    This logs the commanded/target end-effector pose, as opposed to
+    log_end_effector_pose which logs the actual end-effector pose.
+
+    Args:
+        name: Name of the end effector
+        pose: 7-element numpy array: [x, y, z, qx, qy, qz, qw]
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+    """
+    _log_end_effector_pose(
+        name,
+        pose,
+        robot_name,
+        instance,
+        resolve_timestamp_us(timestamp),
+        dry_run,
+        DataType.END_EFFECTOR_TARGET_POSES,
+    )
+
+
+def log_end_effector_target_poses(
+    poses: dict[str, np.ndarray],
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log commanded/target end-effector pose data for a robot.
+
+    This logs the commanded/target end-effector poses, as opposed to
+    log_end_effector_pose which logs the actual end-effector pose.
+
+    Args:
+        poses: Dictionary mapping end-effector names to 7-element numpy arrays:
+            [x, y, z, qx, qy, qz, qw]
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+    """
+    timestamp_us = resolve_timestamp_us(timestamp)
+    for name, pose in poses.items():
+        _log_end_effector_pose(
+            name,
+            pose,
+            robot_name,
+            instance,
+            timestamp_us,
+            dry_run,
+            DataType.END_EFFECTOR_TARGET_POSES,
+        )
+
+
+def _log_end_effector_pose(
+    name: str,
+    pose: np.ndarray,
+    robot_name: str | None,
+    instance: int,
+    timestamp_us: int,
+    dry_run: bool,
+    data_type: DataType,
+) -> None:
+    """Log one end-effector pose at a resolved microsecond timestamp."""
     if not isinstance(pose, np.ndarray):
         raise ValueError(
             f"End effector pose must be a numpy array, got {type(pose).__name__}."
@@ -1055,22 +1139,18 @@ def log_end_effector_pose(
         return
 
     robot = _get_robot(robot_name, instance)
-    str_id = f"{DataType.END_EFFECTOR_POSES.value}:{name}"
+    str_id = f"{data_type.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
-        stream = JsonDataStream(
-            data_type=DataType.END_EFFECTOR_POSES, data_type_name=storage_name
-        )
+        stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
         robot.add_data_stream(str_id, stream)
 
     assert isinstance(stream, JsonDataStream)
 
     ee_pose_data = EndEffectorPoseData(timestamp_us=timestamp_us, pose=pose.tolist())
     stream.log(ee_pose_data, recording_epoch=robot._recording_epoch())
-    _record_json_to_daemon(
-        robot, DataType.END_EFFECTOR_POSES, storage_name, ee_pose_data, timestamp_us
-    )
-    _publish_json_to_p2p(robot, str_id, DataType.END_EFFECTOR_POSES, ee_pose_data)
+    _record_json_to_daemon(robot, data_type, storage_name, ee_pose_data, timestamp_us)
+    _publish_json_to_p2p(robot, str_id, data_type, ee_pose_data)
 
 
 def log_parallel_gripper_open_amount(
