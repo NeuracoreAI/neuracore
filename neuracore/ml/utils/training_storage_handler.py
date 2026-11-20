@@ -106,33 +106,9 @@ class TrainingStorageHandler(UploadStorageMixin):
         self._last_reported_epoch = -1
         self._last_reported_step = -1
 
-    def _get_upload_url(self, filepath: str, content_type: str) -> str:
-        """Get a signed upload URL for a file in cloud storage.
-
-        Args:
-            filepath: Path of the file to upload.
-            content_type: MIME type of the file.
-
-        Returns:
-            str: Signed URL for uploading the file.
-
-        Raises:
-            ValueError: If the request to get the upload URL fails.
-        """
-        params = {
-            "filepath": filepath,
-            "content_type": content_type,
-        }
-
-        response = self._get_request(
-            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/upload-url",
-            params=params,
-        )
-        if response.status_code != 200:
-            raise ValueError(
-                f"Failed to get upload URL for {filepath}: {response.text}"
-            )
-        return response.json()["url"]
+    def _upload_start_url(self) -> str:
+        """Return the training job's v2 upload start route."""
+        return f"{self._upload_base_url()}/training/jobs/{self.training_job_id}/uploads"
 
     def _promote_upload(self, filepath: str) -> None:
         """Promote a staging upload onto its final cloud path.
