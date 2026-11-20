@@ -14,14 +14,14 @@ from neuracore.api.core import (
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
 
-DATA_DAEMON_TEST_STATE_ROOT = Path(".data_daemon_test_state")
-"""Root directory for all test-local daemon state (DB, recordings, artifacts)."""
+DATA_DAEMON_TEST_STATE_ROOT = Path(".data_daemon_test_state").resolve()
+"""Root directory for all test-local daemon state (DB, log, recordings, artifacts)."""
 
 DATA_DAEMON_TEST_ARTIFACTS_DIR = (
     DATA_DAEMON_TEST_STATE_ROOT
     / "artifacts"
     / (time.strftime("%Y%m%d_%H%M%S") + os.environ.get("PYTEST_XDIST_WORKER", ""))
-).resolve()
+)
 """Timestamped directory holding one subdirectory of artifacts per test."""
 
 OFFLINE_RECORDINGS_ROOT = DATA_DAEMON_TEST_STATE_ROOT / "recordings"
