@@ -36,21 +36,21 @@ pub const CHUNKS_DIRNAME: &str = "chunks";
 pub const SPOOL_DIRNAME: &str = ".rgb_spool";
 
 /// Resolve the producer's video spool directory for a `(source, sensor)`
-/// stream: `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
+/// stream: `{recordings_root}/.rgb_spool/{source_key}/{instance}/{data_type}/{sensor_name}/`.
 ///
 /// Both producer and daemon agree on this layout so the daemon can find and
 /// relink the producer's spooled NUTs. `sensor_name` is omitted from the path
 /// when absent.
 pub fn spool_dir(
     recordings_root: &Path,
-    robot_id: &str,
+    source_key: &str,
     robot_instance: i64,
     data_type: &str,
     sensor_name: Option<&str>,
 ) -> PathBuf {
     let mut dir = recordings_root
         .join(SPOOL_DIRNAME)
-        .join(robot_id)
+        .join(source_key)
         .join(robot_instance.to_string())
         .join(data_type);
     if let Some(sensor_name) = sensor_name {
@@ -76,7 +76,7 @@ pub fn spool_chunk_filename(publish_ns: i64, thread_id: i64) -> String {
 /// Resolve the full spool path for one spooled chunk.
 pub fn spool_chunk_path(
     recordings_root: &Path,
-    robot_id: &str,
+    source_key: &str,
     robot_instance: i64,
     data_type: &str,
     sensor_name: Option<&str>,
@@ -85,7 +85,7 @@ pub fn spool_chunk_path(
 ) -> PathBuf {
     spool_dir(
         recordings_root,
-        robot_id,
+        source_key,
         robot_instance,
         data_type,
         sensor_name,

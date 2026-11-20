@@ -300,7 +300,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         self._get_daemon_recording_context().start_recording(
-            robot_id=self.id,
+            source_key=self.id,
             robot_instance=self.instance,
             robot_name=self.name,
             dataset_id=dataset_id,

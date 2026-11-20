@@ -188,16 +188,16 @@ pub struct DispatcherContext {
 pub struct RecordingState(Arc<DashMap<Source, AnnouncedRecording>>);
 
 impl RecordingState {
-    /// What `(robot_id, robot_instance)` currently has open, if anything.
+    /// What `(source_key, robot_instance)` currently has open, if anything.
     pub async fn live(
         &self,
         store: &SqliteStateStore,
-        robot_id: &str,
+        source_key: &str,
         robot_instance: i64,
     ) -> Option<LiveRecording> {
         let announced = self
             .0
-            .get(&(robot_id.to_string(), robot_instance))
+            .get(&(source_key.to_string(), robot_instance))
             .map(|entry| entry.clone())?;
         let recording_id = match (announced.recording_id, announced.recording_index) {
             (Some(recording_id), _) => Some(recording_id),
@@ -254,7 +254,7 @@ pub enum RecordingCommand {
     /// The backend minted a recording for this source.
     Open {
         recording_id: String,
-        robot_id: String,
+        source_key: String,
         robot_instance: i64,
         dataset_id: Option<String>,
         /// The recording's start on the backend's record (Unix nanoseconds),
@@ -576,14 +576,14 @@ impl Dispatcher {
     async fn handle_inbound(&mut self, envelope: Envelope, recv_at: Instant) {
         match envelope {
             Envelope::StartRecording {
-                robot_id,
+                source_key,
                 robot_instance,
                 dataset_id,
                 publish_timestamp_ns,
                 timestamp_us,
                 ..
             } => {
-                let source = (robot_id, robot_instance);
+                let source = (source_key, robot_instance);
                 self.announce_recording(
                     source.clone(),
                     dataset_id,
@@ -599,14 +599,14 @@ impl Dispatcher {
                     .await;
             }
             Envelope::StopRecording {
-                robot_id,
+                source_key,
                 robot_instance,
                 publish_timestamp_ns,
                 timestamp_us,
                 tags,
             } => {
                 self.handle_stop(
-                    (robot_id, robot_instance),
+                    (source_key, robot_instance),
                     publish_timestamp_ns,
                     timestamp_us,
                     &tags,
@@ -615,15 +615,15 @@ impl Dispatcher {
                 .await;
             }
             Envelope::CancelRecording {
-                robot_id,
+                source_key,
                 robot_instance,
                 timestamp_us,
             } => {
-                self.handle_cancel((robot_id, robot_instance), timestamp_us)
+                self.handle_cancel((source_key, robot_instance), timestamp_us)
                     .await;
             }
             Envelope::Data {
-                robot_id,
+                source_key,
                 robot_instance,
                 data_type,
                 sensor_name,
@@ -631,7 +631,7 @@ impl Dispatcher {
                 timestamp_us,
                 payload,
             } => {
-                let source = (robot_id, robot_instance);
+                let source = (source_key, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -646,14 +646,14 @@ impl Dispatcher {
                 });
             }
             Envelope::BatchedData {
-                robot_id,
+                source_key,
                 robot_instance,
                 data_type,
                 publish_timestamp_ns,
                 timestamp_us,
                 items,
             } => {
-                let source = (robot_id, robot_instance);
+                let source = (source_key, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -667,7 +667,7 @@ impl Dispatcher {
                 });
             }
             Envelope::VideoChunkReady {
-                robot_id,
+                source_key,
                 robot_instance,
                 data_type,
                 sensor_name,
@@ -683,7 +683,7 @@ impl Dispatcher {
                 dtype,
                 frame_publish_offsets_us,
             } => {
-                let source = (robot_id, robot_instance);
+                let source = (source_key, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -706,12 +706,12 @@ impl Dispatcher {
                 });
             }
             Envelope::SourceFlushed {
-                robot_id,
+                source_key,
                 robot_instance,
                 publish_timestamp_ns,
                 producer_pid,
             } => {
-                let source = (robot_id, robot_instance);
+                let source = (source_key, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -721,12 +721,12 @@ impl Dispatcher {
                 });
             }
             Envelope::VideoProducerActive {
-                robot_id,
+                source_key,
                 robot_instance,
                 publish_timestamp_ns,
                 producer_pid,
             } => {
-                let source = (robot_id, robot_instance);
+                let source = (source_key, robot_instance);
                 self.touch_source(&source, recv_at);
                 // Held for the same reason data is: the claim rides the
                 // producer's port, `StartRecording` the calling thread's.
@@ -794,7 +794,7 @@ impl Dispatcher {
             {
                 tracing::debug!(
                     recording_id,
-                    robot_id = source.0,
+                    source_key = source.0,
                     "recording already known here; ignoring duplicate start"
                 );
                 return;
@@ -808,7 +808,7 @@ impl Dispatcher {
             start_timestamp_us: timestamp_us,
             recording_index: None,
         };
-        tracing::debug!(robot_id = source.0, "recording announced");
+        tracing::debug!(source_key = source.0, "recording announced");
         self.announced.0.insert(source, announced);
     }
 
@@ -843,7 +843,7 @@ impl Dispatcher {
                 tracing::warn!(
                     %error,
                     recording_id,
-                    robot_id = source.0,
+                    source_key = source.0,
                     "failed to check for an existing recording; ignoring the start"
                 );
                 true
@@ -911,11 +911,11 @@ impl Dispatcher {
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
             Err(error) => {
-                tracing::warn!(%error, robot_id = source.0, "failed to create recording row");
+                tracing::warn!(%error, source_key = source.0, "failed to create recording row");
                 return;
             }
         };
-        tracing::info!(recording_index, robot_id = source.0, "recording started");
+        tracing::info!(recording_index, source_key = source.0, "recording started");
         if let Some(mut announcement) = self.announced.0.get_mut(&source) {
             announcement.recording_index = Some(recording_index);
         }
@@ -1020,14 +1020,14 @@ impl Dispatcher {
         match command {
             RecordingCommand::Open {
                 recording_id,
-                robot_id,
+                source_key,
                 robot_instance,
                 dataset_id,
                 start_timestamp_ns,
                 start_timestamp_us,
             } => {
                 self.announce_recording(
-                    (robot_id, robot_instance),
+                    (source_key, robot_instance),
                     dataset_id,
                     Some(recording_id),
                     start_timestamp_ns,
@@ -1049,7 +1049,7 @@ impl Dispatcher {
                 };
                 tracing::info!(
                     recording_id,
-                    robot_id = source.0,
+                    source_key = source.0,
                     "closing a recording the backend reported stopped"
                 );
                 // Clock skew can put the backend's end where no window closes.
@@ -1120,7 +1120,7 @@ impl Dispatcher {
             let Some(live_start) = live_start else {
                 tracing::info!(
                     recording_id,
-                    robot_id = source.0,
+                    source_key = source.0,
                     "dropping the announcement of a recording that stopped while \
                      disconnected from the backend's recording notifications"
                 );
@@ -1129,7 +1129,7 @@ impl Dispatcher {
             };
             tracing::warn!(
                 recording_id,
-                robot_id = source.0,
+                source_key = source.0,
                 "closing recording {recording_id}: it stopped while this daemon was \
                  disconnected from the backend's recording notifications"
             );
@@ -1185,7 +1185,7 @@ impl Dispatcher {
         self.announced.0.remove(&source);
 
         let Some(entry) = self.windows.get_mut(&source) else {
-            tracing::debug!(robot_id = source.0, "stop for unknown source; ignoring");
+            tracing::debug!(source_key = source.0, "stop for unknown source; ignoring");
             return;
         };
         entry.last_seen = Some(recv_at);
@@ -1253,7 +1253,7 @@ impl Dispatcher {
             window.awaiting_flush = true;
             window.flushed_producers.clear();
             tracing::warn!(
-                robot_id = source.0,
+                source_key = source.0,
                 recording_index,
                 "stop arrived after a later recording started; refining the retired recording's stop"
             );
@@ -1278,7 +1278,7 @@ impl Dispatcher {
             recording_index
         } else {
             tracing::debug!(
-                robot_id = source.0,
+                source_key = source.0,
                 publish_timestamp_ns,
                 "stop does not belong to any retained recording window; ignoring"
             );
@@ -1311,7 +1311,10 @@ impl Dispatcher {
             return;
         };
         let Some(window) = entry.live.take() else {
-            tracing::debug!(robot_id = source.0, "cancel with no live window; ignoring");
+            tracing::debug!(
+                source_key = source.0,
+                "cancel with no live window; ignoring"
+            );
             return;
         };
         let cancelled_from_ns = window.started_at_ns;
@@ -1528,7 +1531,7 @@ impl Dispatcher {
         if window.awaiting_flush && !window.flush_markers_settled() {
             tracing::warn!(
                 recording_index = window.recording_index,
-                robot_id = source.0,
+                source_key = source.0,
                 elapsed_s = elapsed.as_secs_f64(),
                 outstanding_producers = window
                     .video_producers
@@ -1576,7 +1579,7 @@ impl Dispatcher {
             .collect();
         for source in stale {
             tracing::warn!(
-                robot_id = source.0,
+                source_key = source.0,
                 "source idle past reap horizon; force-closing window"
             );
             let Some(entry) = self.windows.get_mut(&source) else {
@@ -2235,7 +2238,7 @@ mod tests {
     /// `publish_timestamp_ns`.
     fn start_timed(robot: &str, publish_timestamp_ns: i64, timestamp_us: i64) -> Envelope {
         Envelope::StartRecording {
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             robot_name: None,
             dataset_id: None,
@@ -2247,7 +2250,7 @@ mod tests {
 
     fn stop(robot: &str, publish_timestamp_ns: i64) -> Envelope {
         Envelope::StopRecording {
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             publish_timestamp_ns,
             timestamp_us: publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND,
@@ -2259,7 +2262,7 @@ mod tests {
     /// this source's just-stopped window.
     fn source_flushed(robot: &str, publish_timestamp_ns: i64, producer_pid: u32) -> Envelope {
         Envelope::SourceFlushed {
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             publish_timestamp_ns,
             producer_pid,
@@ -2270,7 +2273,7 @@ mod tests {
     /// (decoupled) capture timestamp.
     fn datum_full(robot: &str, publish_ts: i64, capture_us: i64, value: i64) -> Envelope {
         Envelope::Data {
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             data_type: "joints".into(),
             sensor_name: Some("waist".into()),
@@ -2872,7 +2875,7 @@ mod tests {
         publish_offsets_us: &[u32],
     ) -> Envelope {
         Envelope::VideoChunkReady {
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_0".into()),
@@ -3432,7 +3435,7 @@ mod tests {
         tx.send(start("robot-1", 100)).await.unwrap();
         tx.send(datum("robot-1", 110, 1)).await.unwrap();
         tx.send(Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             timestamp_us: 120,
         })
@@ -3478,7 +3481,7 @@ mod tests {
             .await
             .unwrap();
         tx.send(Envelope::StopRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             publish_timestamp_ns: PUBLISH_STOP_NS,
             timestamp_us: CALLER_STOP_US,
@@ -3514,7 +3517,7 @@ mod tests {
             .await
             .unwrap();
         tx.send(Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             timestamp_us: CALLER_STOP_US,
         })
@@ -3544,7 +3547,7 @@ mod tests {
     fn announced(robot: &str, recording_id: &str, start_ns: i64) -> RecordingCommand {
         RecordingCommand::Open {
             recording_id: recording_id.into(),
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             dataset_id: None,
             start_timestamp_ns: start_ns,
@@ -3926,7 +3929,7 @@ mod tests {
         dispatcher
             .handle_inbound(
                 Envelope::CancelRecording {
-                    robot_id: "robot-1".into(),
+                    source_key: "robot-1".into(),
                     robot_instance: 0,
                     timestamp_us: 211,
                 },
@@ -4354,7 +4357,7 @@ mod tests {
         tx.send(start("robot-1", 130)).await.unwrap();
         tx.send(datum("robot-1", 140, 2)).await.unwrap();
         tx.send(Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
+            source_key: "robot-1".into(),
             robot_instance: 0,
             timestamp_us: 150,
         })
@@ -4482,7 +4485,7 @@ mod tests {
         dispatcher
             .handle_inbound(
                 Envelope::StopRecording {
-                    robot_id: "robot-1".into(),
+                    source_key: "robot-1".into(),
                     robot_instance: 0,
                     publish_timestamp_ns: 200,
                     timestamp_us: 0,
@@ -4624,7 +4627,7 @@ mod tests {
     /// A producer's claim that it is logging video, before any chunk sealed.
     fn video_producer_active(robot: &str, publish_ts: i64, producer_pid: u32) -> Envelope {
         Envelope::VideoProducerActive {
-            robot_id: robot.into(),
+            source_key: robot.into(),
             robot_instance: 0,
             publish_timestamp_ns: publish_ts,
             producer_pid,
