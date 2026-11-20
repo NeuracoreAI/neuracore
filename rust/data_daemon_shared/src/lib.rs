@@ -472,8 +472,8 @@ pub enum Envelope {
         robot_instance: i64,
         /// Optional robot human-readable name.
         robot_name: Option<String>,
-        /// Optional dataset identifier.
-        dataset_id: Option<String>,
+        /// The daemon's row for the dataset to record into.
+        dataset_index: Option<i64>,
         /// Optional dataset human-readable name.
         dataset_name: Option<String>,
         /// Producer wall-clock publish time (Unix nanoseconds) at which the
@@ -897,6 +897,12 @@ pub enum RegistryRequest {
     RobotState { robot_index: i64 },
     /// Answered with [`RegistryReply::State`].
     DatasetState { dataset_index: i64 },
+    /// The row for a dataset the SDK read from the server, by its server id:
+    /// found, or made already confirmed. Answered with [`RegistryReply::Index`].
+    DatasetForCloudId {
+        org_id: String,
+        cloud_dataset_id: String,
+    },
 }
 
 /// Whether the server has confirmed a robot or dataset row.
@@ -1112,6 +1118,10 @@ mod tests {
             }),
             RegistryRequest::RobotState { robot_index: 3 },
             RegistryRequest::DatasetState { dataset_index: 4 },
+            RegistryRequest::DatasetForCloudId {
+                org_id: "org-1".into(),
+                cloud_dataset_id: "cloud-dataset-1".into(),
+            },
         ];
         for request in requests {
             let bytes = request.encode().unwrap();
@@ -1163,7 +1173,7 @@ mod tests {
             source_key: "robot-1".into(),
             robot_instance: 3,
             robot_name: Some("arm".into()),
-            dataset_id: Some("ds-1".into()),
+            dataset_index: Some(4),
             dataset_name: Some("warehouse".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_us: 1_700_000_000_000_000,

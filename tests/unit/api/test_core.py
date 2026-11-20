@@ -92,7 +92,6 @@ def test_logout_resets_global_state_when_listener_raises(temp_config_dir):
     """A failing teardown listener must not leave stale public API state."""
     global_state = api_core.GlobalSingleton()
     global_state._active_robot = Mock()
-    global_state._active_dataset_id = "dataset-id"
     global_state._active_dataset = Mock()
     global_state._has_validated_version = True
 
@@ -107,7 +106,6 @@ def test_logout_resets_global_state_when_listener_raises(temp_config_dir):
         auth.remove_listener(Auth.LOGOUT_EVENT, failing_listener)
 
     assert global_state._active_robot is None
-    assert global_state._active_dataset_id is None
     assert global_state._active_dataset is None
     assert global_state._has_validated_version is False
 
@@ -796,12 +794,15 @@ def recording_robot(monkeypatch):
     monkeypatch.setattr(recording_context, "ensure_daemon_running", lambda: None)
     monkeypatch.setattr(api_core, "_get_robot", lambda *_args: robot)
     monkeypatch.setattr(robot, "is_recording", lambda: True)
-    monkeypatch.setattr(GlobalSingleton(), "_active_dataset_id", "dataset-1")
     monkeypatch.setattr(
         GlobalSingleton(),
         "_active_dataset",
         SimpleNamespace(
-            id="dataset-1", name="dataset", is_shared=False, dataset_index=None
+            name="dataset",
+            is_shared=False,
+            kind_known=True,
+            org_id="org-1",
+            dataset_index=4,
         ),
     )
     monkeypatch.setattr(

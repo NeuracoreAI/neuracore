@@ -20,11 +20,11 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils import backend_utils
+from neuracore.data_daemon import bridge
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 from ..core.auth import get_auth
-from ..core.data.dataset import Dataset
-from ..core.exceptions import DatasetError, RobotError, ServerUnreachableError
+from ..core.exceptions import RobotError, ServerUnreachableError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
@@ -109,7 +109,6 @@ def logout() -> None:
         get_auth().logout()
     finally:
         GlobalSingleton()._active_robot = None
-        GlobalSingleton()._active_dataset_id = None
         GlobalSingleton()._active_dataset = None
         GlobalSingleton()._has_validated_version = False
 
@@ -281,34 +280,39 @@ def start_recording(
     """
     robot = _get_robot(robot_name, instance)
     active_dataset = GlobalSingleton()._active_dataset
-    if active_dataset is not None and active_dataset.dataset_index is not None:
-        # Selected through the daemon: its id is fetched now, if not known.
-        GlobalSingleton()._active_dataset_id = active_dataset.id
-    active_dataset_id = GlobalSingleton()._active_dataset_id
-    if active_dataset_id is None:
+    if active_dataset is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    if active_dataset is None or active_dataset.id != active_dataset_id:
-        try:
-            active_dataset = Dataset.get_by_id(active_dataset_id)
-        except DatasetError:
-            active_dataset = None
-    if active_dataset is not None:
+    if active_dataset.dataset_index is None:
+        # Read from the server (by name online, by id, a merge or a clone):
+        # recordings point at a daemon row, so the daemon is given the server
+        # id it already has, for a row the server has confirmed.
+        active_dataset.dataset_index = bridge.dataset_row_for_cloud_id(
+            org_id=active_dataset.org_id, cloud_dataset_id=active_dataset.id
+        )
+    if active_dataset.org_id != robot.org_id:
+        raise RobotError(
+            f"Robot '{robot.name}' and dataset '{active_dataset.name}' are in "
+            "different organizations. Connect the robot and select the dataset "
+            "in the same organization."
+        )
+    if active_dataset.kind_known:
         if robot.shared and not active_dataset.is_shared:
             raise RobotError(
                 "Shared robot cannot be used with a non-shared dataset. "
                 "If you requested a shared dataset, creation may have failed "
                 "because you are not authorized to upload shared datasets or "
                 "an existing non-shared dataset with the same name was reused. "
-                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
+                f"Active dataset: '{active_dataset.name}'."
             )
         if not robot.shared and active_dataset.is_shared:
             raise RobotError(
                 "Non-shared robot cannot be used with a shared dataset. "
                 "Shared datasets require shared robots. If you requested a "
                 "shared robot, ensure connect_robot(shared=True) succeeded. "
-                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
+                f"Active dataset: '{active_dataset.name}'."
             )
-    robot.start_recording(active_dataset_id, timestamp=timestamp)
+    assert active_dataset.dataset_index is not None
+    robot.start_recording(active_dataset.dataset_index, timestamp=timestamp)
 
 
 def _normalize_stop_tags(tags: list[str] | None) -> list[str]:
