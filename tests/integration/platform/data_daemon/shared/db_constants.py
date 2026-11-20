@@ -93,3 +93,11 @@ TRACE_UPLOAD_PROGRESS_STATUSES = {
     TRACE_UPLOAD_UPLOADING,
     TRACE_UPLOAD_UPLOADED,
 }
+
+# The robot and dataset rows recordings point at (migration 0007).
+ROBOTS_TABLE = "robots"
+DATASETS_TABLE = "datasets"
+COLUMN_ROBOT_INDEX = "robot_index"
+COLUMN_DATASET_INDEX = "dataset_index"
+ROW_PENDING = "pending"
+ROW_DONE = "done"
