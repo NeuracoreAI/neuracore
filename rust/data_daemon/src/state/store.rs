@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use data_daemon_shared::NANOSECONDS_PER_MICROSECOND;
+use data_daemon_shared::{DatasetSpec, RobotSpec, NANOSECONDS_PER_MICROSECOND};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
 
 use crate::state::schema::{
-    ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
-    TraceUploadStatus, TraceWriteStatus,
+    DatasetRow, ProgressReportStatus, RecordingRow, ResolutionStatus, RobotRow, TraceErrorCode,
+    TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
 };
 
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
@@ -102,6 +102,15 @@ pub struct NewRecording<'a> {
     pub start: RecordingTimestamp,
 }
 
+/// A robot instance's row after [`StateStore::connect_robot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectedRobot {
+    pub robot_index: i64,
+    /// A saved package the new one replaced before it was sent, for the
+    /// caller to delete.
+    pub replaced_package: Option<String>,
+}
+
 /// Persistence interface for daemon state.
 ///
 /// Covers the operations the dispatcher, per-trace actors, and cloud
@@ -124,6 +133,25 @@ pub trait StateStore: Send + Sync {
         &self,
         recording_index: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Find or create the row for `spec`'s robot instance and mark it for the
+    /// server to confirm: `pending`, due now and with no reason, keeping any
+    /// server id: connecting again is a fresh attempt. A
+    /// package in `spec` replaces one not yet sent, with its `overwrite_urdf`;
+    /// a process connecting without one changes neither, so a camera process
+    /// cannot undo the owner's request.
+    async fn connect_robot(&self, spec: &RobotSpec) -> Result<ConnectedRobot, StateStoreError>;
+
+    /// Find or create the row for `spec`'s dataset and mark it for the server
+    /// to confirm, as [`Self::connect_robot`]. A description or tags in `spec`
+    /// replace the row's; a process giving none keeps them. Returns its index.
+    async fn select_dataset(&self, spec: &DatasetSpec) -> Result<i64, StateStoreError>;
+
+    /// Fetch a robot row by its index.
+    async fn get_robot(&self, robot_index: i64) -> Result<Option<RobotRow>, StateStoreError>;
+
+    /// Fetch a dataset row by its index.
+    async fn get_dataset(&self, dataset_index: i64) -> Result<Option<DatasetRow>, StateStoreError>;
 
     /// Return the most recently created recordings for a source, ordered by
     /// `recording_index` ascending. Used by the recovery sweep and the
@@ -859,6 +887,137 @@ impl StateStore for SqliteStateStore {
             Some(row) => Some(RecordingRow::from_row(&row)?),
             None => None,
         })
+    }
+
+    async fn connect_robot(&self, spec: &RobotSpec) -> Result<ConnectedRobot, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        let existing: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT robot_index, package_path FROM robots \
+              WHERE org_id = ?1 AND name = ?2 AND shared = ?3 AND instance = ?4",
+        )
+        .bind(&spec.org_id)
+        .bind(&spec.name)
+        .bind(spec.shared)
+        .bind(spec.instance)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let connected = match existing {
+            Some((robot_index, saved_package)) => {
+                sqlx::query(
+                    "UPDATE robots \
+                        SET status = ?2, reason = NULL, next_attempt_at = NULL, \
+                            overwrite_urdf = CASE WHEN ?4 IS NULL THEN overwrite_urdf ELSE ?3 END, \
+                            package_path = COALESCE(?4, package_path), \
+                            last_used_at = ?5 \
+                      WHERE robot_index = ?1",
+                )
+                .bind(robot_index)
+                .bind(ResolutionStatus::Pending.as_str())
+                .bind(spec.overwrite_urdf)
+                .bind(spec.package_path.as_deref())
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                let replaced_package = saved_package
+                    .filter(|saved| spec.package_path.as_ref().is_some_and(|new| new != saved));
+                ConnectedRobot {
+                    robot_index,
+                    replaced_package,
+                }
+            }
+            None => {
+                let result = sqlx::query(
+                    "INSERT INTO robots ( \
+                         org_id, name, shared, instance, overwrite_urdf, package_path, \
+                         status, last_used_at, created_at \
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                )
+                .bind(&spec.org_id)
+                .bind(&spec.name)
+                .bind(spec.shared)
+                .bind(spec.instance)
+                .bind(spec.overwrite_urdf)
+                .bind(spec.package_path.as_deref())
+                .bind(ResolutionStatus::Pending.as_str())
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                ConnectedRobot {
+                    robot_index: result.last_insert_rowid(),
+                    replaced_package: None,
+                }
+            }
+        };
+        tx.commit().await?;
+        Ok(connected)
+    }
+
+    async fn select_dataset(&self, spec: &DatasetSpec) -> Result<i64, StateStoreError> {
+        let tags = serde_json::to_string(&spec.tags)
+            .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+        let mut tx = self.write_pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT dataset_index FROM datasets WHERE org_id = ?1 AND name = ?2 AND shared = ?3",
+        )
+        .bind(&spec.org_id)
+        .bind(&spec.name)
+        .bind(spec.shared)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let dataset_index = match existing {
+            Some(dataset_index) => {
+                sqlx::query(
+                    "UPDATE datasets \
+                        SET status = ?2, reason = NULL, next_attempt_at = NULL, \
+                            description = COALESCE(?3, description), \
+                            tags = CASE WHEN ?4 = '[]' THEN tags ELSE ?4 END, last_used_at = ?5 \
+                      WHERE dataset_index = ?1",
+                )
+                .bind(dataset_index)
+                .bind(ResolutionStatus::Pending.as_str())
+                .bind(spec.description.as_deref())
+                .bind(&tags)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                dataset_index
+            }
+            None => sqlx::query(
+                "INSERT INTO datasets ( \
+                     org_id, name, shared, description, tags, status, last_used_at, created_at \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            )
+            .bind(&spec.org_id)
+            .bind(&spec.name)
+            .bind(spec.shared)
+            .bind(spec.description.as_deref())
+            .bind(&tags)
+            .bind(ResolutionStatus::Pending.as_str())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?
+            .last_insert_rowid(),
+        };
+        tx.commit().await?;
+        Ok(dataset_index)
+    }
+
+    async fn get_robot(&self, robot_index: i64) -> Result<Option<RobotRow>, StateStoreError> {
+        let row = sqlx::query("SELECT * FROM robots WHERE robot_index = ?1")
+            .bind(robot_index)
+            .fetch_optional(&self.read_pool)
+            .await?;
+        Ok(row.as_ref().map(RobotRow::from_row).transpose()?)
+    }
+
+    async fn get_dataset(&self, dataset_index: i64) -> Result<Option<DatasetRow>, StateStoreError> {
+        let row = sqlx::query("SELECT * FROM datasets WHERE dataset_index = ?1")
+            .bind(dataset_index)
+            .fetch_optional(&self.read_pool)
+            .await?;
+        Ok(row.as_ref().map(DatasetRow::from_row).transpose()?)
     }
 
     async fn recordings_for_source(
@@ -1849,6 +2008,170 @@ mod tests {
             (row.stop_timestamp_us, row.stop_publish_timestamp_ns),
             (Some(1_700_000_005_123_456), Some(1_700_000_005_123_456_789))
         );
+    }
+
+    #[tokio::test]
+    async fn upgrade_gives_earlier_recordings_confirmed_rows_in_no_organization() {
+        // Recordings from before the robots and datasets tables hold the
+        // server's ids; they get rows already confirmed, one per robot
+        // instance and per dataset, and keep using the selected organization.
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let earlier_migrations = tempdir.path().join("migrations");
+        std::fs::create_dir(&earlier_migrations).unwrap();
+        for entry in
+            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations")).unwrap()
+        {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if name.as_str() < "0007" {
+                std::fs::copy(entry.path(), earlier_migrations.join(name)).unwrap();
+            }
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(earlier_migrations.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let now = Utc::now().naive_utc();
+        for (robot_id, instance, dataset_id) in [
+            ("cloud-robot-1", 0, "cloud-dataset-1"),
+            ("cloud-robot-1", 0, "cloud-dataset-1"),
+            ("cloud-robot-1", 1, "cloud-dataset-2"),
+        ] {
+            sqlx::query(
+                "INSERT INTO recordings (robot_id, robot_instance, dataset_id, created_at, last_updated) \
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+            )
+            .bind(robot_id)
+            .bind(instance)
+            .bind(dataset_id)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool.close().await;
+
+        let store = SqliteStateStore::open(&path).await.expect("open store");
+        let rows = store.list_recordings().await.unwrap();
+        let robots: Vec<RobotRow> = robots_of(&store, &rows).await;
+        assert_eq!(rows[0].robot_index, rows[1].robot_index);
+        assert_ne!(rows[0].robot_index, rows[2].robot_index);
+        assert_eq!(rows[0].dataset_index, rows[1].dataset_index);
+        assert_ne!(rows[0].dataset_index, rows[2].dataset_index);
+        for robot in &robots {
+            assert_eq!(robot.status, ResolutionStatus::Done);
+            assert_eq!(robot.org_id, None);
+            assert_eq!(robot.cloud_robot_id.as_deref(), Some("cloud-robot-1"));
+        }
+        assert_eq!(robots[2].instance, 1);
+        let dataset = store
+            .get_dataset(rows[2].dataset_index.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (dataset.status, dataset.cloud_dataset_id.as_deref()),
+            (ResolutionStatus::Done, Some("cloud-dataset-2"))
+        );
+    }
+
+    async fn robots_of(store: &SqliteStateStore, rows: &[RecordingRow]) -> Vec<RobotRow> {
+        let mut robots = Vec::new();
+        for row in rows {
+            robots.push(
+                store
+                    .get_robot(row.robot_index.expect("a robot row"))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        robots
+    }
+
+    #[tokio::test]
+    async fn reconnecting_marks_a_confirmed_row_for_the_server_to_check_again() {
+        let (store, _tempdir) = open_store().await;
+        let spec = RobotSpec {
+            org_id: "org-1".into(),
+            name: "arm".into(),
+            shared: false,
+            instance: 0,
+            overwrite_urdf: false,
+            package_path: Some("/saved/package.zip".into()),
+        };
+        let robot_index = store.connect_robot(&spec).await.unwrap().robot_index;
+        sqlx::query(
+            "UPDATE robots SET status = 'done', cloud_robot_id = 'cloud-robot-1', \
+                    next_attempt_at = ?2 WHERE robot_index = ?1",
+        )
+        .bind(robot_index)
+        .bind(Utc::now().naive_utc() + chrono::Duration::minutes(5))
+        .execute(store.write_pool())
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE robots SET overwrite_urdf = 1 WHERE robot_index = ?1")
+            .bind(robot_index)
+            .execute(store.write_pool())
+            .await
+            .unwrap();
+
+        // Connected again with no package: the saved one, and the request to
+        // overwrite with it, stay.
+        let again = store
+            .connect_robot(&RobotSpec {
+                package_path: None,
+                ..spec
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(again.robot_index, robot_index);
+        assert_eq!(again.replaced_package, None);
+        let robot = store.get_robot(robot_index).await.unwrap().unwrap();
+        assert_eq!(robot.status, ResolutionStatus::Pending);
+        assert_eq!((robot.reason, robot.next_attempt_at), (None, None));
+        assert_eq!(robot.cloud_robot_id.as_deref(), Some("cloud-robot-1"));
+        assert_eq!(robot.package_path.as_deref(), Some("/saved/package.zip"));
+        assert!(robot.overwrite_urdf);
+    }
+
+    #[tokio::test]
+    async fn selecting_a_dataset_without_details_keeps_the_ones_given() {
+        let (store, _tempdir) = open_store().await;
+        let created = DatasetSpec {
+            org_id: "org-1".into(),
+            name: "warehouse".into(),
+            shared: false,
+            description: Some("pick and place".into()),
+            tags: vec!["shelf-a".into()],
+        };
+        let dataset_index = store.select_dataset(&created).await.unwrap();
+
+        // Another process selects it by name only.
+        store
+            .select_dataset(&DatasetSpec {
+                description: None,
+                tags: Vec::new(),
+                ..created
+            })
+            .await
+            .unwrap();
+
+        let dataset = store.get_dataset(dataset_index).await.unwrap().unwrap();
+        assert_eq!(dataset.description.as_deref(), Some("pick and place"));
+        assert_eq!(dataset.tags, vec!["shelf-a".to_string()]);
     }
 
     #[tokio::test]

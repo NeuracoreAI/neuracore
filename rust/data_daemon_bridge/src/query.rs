@@ -3,7 +3,9 @@
 //! The thin producer owns no recording identity and no daemon state, so
 //! everything it needs to know it asks for: whether a daemon is up
 //! ([`wait_until_ready`]), which version it was built from ([`daemon_version`]),
-//! and which recording a source has open ([`query_recording_state`]).
+//! which recording a source has open ([`query_recording_state`]), and the
+//! robots and datasets it connects and selects through the daemon
+//! ([`registry`]).
 //!
 //! Two concerns, kept apart. [`request_reply_once`] and [`poll_until`] know how
 //! to talk to an iceoryx2 request-response port — loan, send, poll for a reply,
@@ -14,7 +16,8 @@
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
-    HealthReply, HealthRequest, LiveRecording, RecordingStateReply, VersionReply, VersionRequest,
+    HealthReply, HealthRequest, LiveRecording, RecordingStateReply, RegistryReply, RegistryRequest,
+    VersionReply, VersionRequest,
 };
 use iceoryx2::port::client::Client;
 use iceoryx2::prelude::ipc;
@@ -30,6 +33,11 @@ const RECEIVE_POLL: Duration = Duration::from_millis(2);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long a single health request waits for the daemon's reply before re-asking.
 const HEALTH_RESPONSE_WAIT: Duration = Duration::from_millis(20);
+/// Interval between successive registry requests while the daemon is silent.
+const REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How long a single registry request waits for the daemon's reply before
+/// re-asking. Answering only reads or writes the daemon's state store.
+const REGISTRY_RESPONSE_WAIT: Duration = Duration::from_millis(250);
 /// Interval between successive version requests to the daemon.
 const VERSION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long a single version request waits for the daemon's reply before re-asking.
@@ -187,4 +195,31 @@ pub(crate) fn query_recording_state(
             |payload| Ok(Some(RecordingStateReply::decode(payload)?.recording)),
         )
     })
+}
+
+/// Send `request` to the daemon's registry service, re-asking until it
+/// answers or `timeout_s` elapses.
+///
+/// `Ok(None)` means nothing answered in time. Re-asking is safe: connecting a
+/// robot or selecting a dataset finds the row an earlier attempt made.
+pub(crate) fn registry(
+    request: &RegistryRequest,
+    timeout_s: f64,
+) -> Result<Option<RegistryReply>, ProducerError> {
+    let request_bytes = request.encode()?;
+    poll_until(
+        Instant::now() + bounded_timeout(timeout_s),
+        REGISTRY_POLL_INTERVAL,
+        || {
+            with_producer(|state| {
+                request_reply_once(
+                    &state.registry_client,
+                    &request_bytes,
+                    REGISTRY_RESPONSE_WAIT,
+                    "registry",
+                    |payload| Ok(Some(RegistryReply::decode(payload)?)),
+                )
+            })
+        },
+    )
 }

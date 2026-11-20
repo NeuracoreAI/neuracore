@@ -98,6 +98,29 @@ pub fn spool_root(recordings_root: &Path) -> PathBuf {
     recordings_root.join(SPOOL_DIRNAME)
 }
 
+/// Top-level directory (under `recordings_root`) holding the URDF packages
+/// the SDK saves for the robots it connects, until the robot resolver sends
+/// them to the server. Hidden, like the spool, so `data-daemon reset` and the
+/// recording sweeps never take it for a recording. The daemon only reads or
+/// deletes a package inside it.
+pub const ROBOT_PACKAGES_DIRNAME: &str = ".robot_packages";
+
+/// Resolve the directory robot packages are saved under.
+pub fn robot_packages_root(recordings_root: &Path) -> PathBuf {
+    recordings_root.join(ROBOT_PACKAGES_DIRNAME)
+}
+
+/// Whether `path` names a file inside `packages_root`, the only place the
+/// daemon reads or deletes a robot package from. A path climbing out with
+/// `..` is not.
+pub fn is_in_robot_packages(packages_root: &Path, path: &Path) -> bool {
+    path.starts_with(packages_root)
+        && path != packages_root
+        && !path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+}
+
 /// Build the filename for a video chunk at `chunk_index` — `chunk_NNNN.nut`.
 ///
 /// The producer writes directly to this final path; no `.tmp` staging is
