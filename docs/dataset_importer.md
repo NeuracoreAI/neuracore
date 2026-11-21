@@ -166,7 +166,7 @@ The importer supports the following data types:
       - name: depth_gripper
         source_name: depth_gripper
   ```
-  Every depth image holds integer units of `depth_scale_m` meters. The importer stores the values exactly as uint16 with that unit. Values must fit uint16, and 0 means no return. MCAP messages that embed depth as float metres together with a per-message `depth_scale_m` field (as the MCAP exporter does) are converted back to uint16 sensor units during import.
+  Every depth image holds integer units of `depth_scale_m` meters. The importer stores the values exactly as uint16 with that unit. Values must fit uint16, and 0 means no return. MCAP messages that embed depth as float metres together with a per-message `depth_scale_m` field are converted back to uint16 sensor units during import.
 
 - **POINT_CLOUDS**: 3D point clouds (N×3 arrays) with distance unit configuration
   
@@ -647,6 +647,11 @@ Schemas that stay unreadable fall back to raw bytes.
 
 **Camera calibration.** `extrinsics_source` and `intrinsics_source` are not yet
 read for MCAP datasets, so camera streams are imported without calibration.
+
+**Neuracore exports.** Files from `neuracore export mcap` keep camera frames and
+point clouds in attachments. The importer adds each frame to its message, under
+`frame` for cameras and `points` for point clouds, so map those fields. See
+[MCAP export format](mcap_export_format.md).
 
 Worked examples: `neuracore/importer/config/mcap/example_openarm.yaml` (flat
 `sensor_msgs`-style topics) and

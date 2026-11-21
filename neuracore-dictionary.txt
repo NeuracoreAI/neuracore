@@ -638,3 +638,4 @@ yourdfpy
 ZBWs
 zerolatency
 znear
+zstd
