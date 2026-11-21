@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from neuracore_types import BatchedNCData, BatchedRGBData, DataType
 
-from ..base import PreprocessingMethod
+from ..base import PreprocessingMethod, PreprocessingType
 
 
 class GaussianNoise(PreprocessingMethod):
@@ -15,7 +15,7 @@ class GaussianNoise(PreprocessingMethod):
     """
 
     # randn_like over a full frame is expensive; far cheaper batched on the device
-    on_cpu = False
+    preprocessing_type = PreprocessingType.PHOTOMETRIC
 
     def __init__(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torchvision.transforms as T
 from neuracore_types import BatchedNCData, BatchedRGBData, DataType
 
-from ..base import PreprocessingMethod
+from ..base import PreprocessingMethod, PreprocessingType
 
 
 class ColorJitter(PreprocessingMethod):
@@ -28,7 +28,7 @@ class ColorJitter(PreprocessingMethod):
 
     # Batched on the device it costs one pass over the batch rather
     # than one pass per frame on a contended worker CPU.
-    on_cpu = False
+    preprocessing_type = PreprocessingType.PHOTOMETRIC
 
     def __init__(
         self,

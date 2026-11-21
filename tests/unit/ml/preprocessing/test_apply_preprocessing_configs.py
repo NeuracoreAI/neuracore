@@ -6,6 +6,7 @@ from neuracore.ml.core.ml_types import BatchedTrainingSamples
 from neuracore.ml.preprocessing.base import (
     PreprocessingConfiguration,
     PreprocessingMethod,
+    PreprocessingType,
 )
 from neuracore.ml.utils.preprocessing import (
     apply_device_preprocessing,
@@ -62,46 +63,54 @@ def test_apply_methods_for_data_type_executes_handlers_in_order():
     assert call_order == ["first", "second"]
 
 
-class _StagedStep(_RecordStep):
-    """Records its label, and reports whichever stage it was built for."""
+class _GeometricStep(_RecordStep):
+    preprocessing_type = PreprocessingType.GEOMETRIC
 
-    def __init__(self, call_order: list[str], label: str, on_cpu: bool) -> None:
-        super().__init__(call_order, label)
-        self.on_cpu = on_cpu
+
+class _PhotometricStep(_RecordStep):
+    preprocessing_type = PreprocessingType.PHOTOMETRIC
 
 
 def test_split_by_stage_partitions_and_preserves_order():
     order: list[str] = []
     config = PreprocessingConfiguration({
         DataType.RGB_IMAGES: [
-            _StagedStep(order, "resize", on_cpu=True),
-            _StagedStep(order, "jitter", on_cpu=False),
-            _StagedStep(order, "noise", on_cpu=False),
+            _GeometricStep(order, "resize"),
+            _PhotometricStep(order, "jitter"),
+            _PhotometricStep(order, "noise"),
         ]
     })
 
-    on_cpu, on_device = config.split_by_stage()
+    geometric, photometric = config.split_by_stage()
 
-    assert [m._label for m in on_cpu[DataType.RGB_IMAGES]] == ["resize"]
-    assert [m._label for m in on_device[DataType.RGB_IMAGES]] == ["jitter", "noise"]
+    assert [m._label for m in geometric[DataType.RGB_IMAGES]] == ["resize"]
+    assert [m._label for m in photometric[DataType.RGB_IMAGES]] == ["jitter", "noise"]
 
 
 def test_split_by_stage_omits_data_types_with_nothing_to_do():
     order: list[str] = []
     config = PreprocessingConfiguration({
-        DataType.RGB_IMAGES: [_StagedStep(order, "jitter", on_cpu=False)],
-        DataType.DEPTH_IMAGES: [_StagedStep(order, "resize", on_cpu=True)],
+        DataType.RGB_IMAGES: [_PhotometricStep(order, "jitter")],
+        DataType.DEPTH_IMAGES: [_GeometricStep(order, "resize")],
     })
 
-    on_cpu, on_device = config.split_by_stage()
+    geometric, photometric = config.split_by_stage()
 
-    assert DataType.RGB_IMAGES not in on_cpu
-    assert DataType.DEPTH_IMAGES not in on_device
+    assert DataType.RGB_IMAGES not in geometric
+    assert DataType.DEPTH_IMAGES not in photometric
 
 
-def test_methods_run_on_the_worker_unless_they_opt_out():
+def test_methods_run_in_the_geometric_group_unless_they_opt_out():
     """The safe default: a method with no opinion runs where it always did."""
-    assert _RecordStep(call_order=[], label="x").on_cpu is True
+    record_step = _RecordStep(call_order=[], label="x")
+    assert record_step.preprocessing_type is PreprocessingType.GEOMETRIC
+
+
+def test_subclass_name_is_the_snake_case_class_name():
+    class RGBChannelShuffle(_RecordStep):
+        pass
+
+    assert RGBChannelShuffle.name == "rgb_channel_shuffle"
 
 
 def test_apply_device_preprocessing_transforms_inputs_and_outputs():
@@ -117,10 +126,10 @@ def test_apply_device_preprocessing_transforms_inputs_and_outputs():
     apply_device_preprocessing(
         batch,
         PreprocessingConfiguration(
-            {DataType.RGB_IMAGES: [_StagedStep(order, "in", on_cpu=False)]}
+            {DataType.RGB_IMAGES: [_PhotometricStep(order, "in")]}
         ),
         PreprocessingConfiguration(
-            {DataType.RGB_IMAGES: [_StagedStep(order, "out", on_cpu=False)]}
+            {DataType.RGB_IMAGES: [_PhotometricStep(order, "out")]}
         ),
     )
 
@@ -137,7 +146,7 @@ def test_apply_device_preprocessing_skips_absent_data_types():
     apply_device_preprocessing(
         batch,
         PreprocessingConfiguration(
-            {DataType.RGB_IMAGES: [_StagedStep(order, "in", on_cpu=False)]}
+            {DataType.RGB_IMAGES: [_PhotometricStep(order, "in")]}
         ),
         PreprocessingConfiguration(),
     )
