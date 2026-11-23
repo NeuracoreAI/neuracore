@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS datasets (
 
 ALTER TABLE recordings ADD COLUMN robot_index INTEGER REFERENCES robots (robot_index);
 ALTER TABLE recordings ADD COLUMN dataset_index INTEGER REFERENCES datasets (dataset_index);
+-- A robot's logged data is labelled with its row; the daemon finds a robot's
+-- recordings by it.
+CREATE INDEX IF NOT EXISTS idx_recordings_robot_row ON recordings (robot_index, robot_instance);
 -- When the start notifier first sent the recording's start to the server.
 -- Until then no start of it can be in flight or already on the server, so it
 -- is safe to send on any re-check.

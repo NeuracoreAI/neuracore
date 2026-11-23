@@ -221,7 +221,7 @@ struct VideoChunkState {
     /// like `width` and `height`, a change of stored dtype or depth scale
     /// seals the open chunk and reopens at the new one.
     dtype: FrameDtype,
-    /// `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
+    /// `{recordings_root}/.rgb_spool/{robot_index}/{instance}/{data_type}/{sensor_name}/`.
     spool_dir: PathBuf,
     /// Active NUT writer for the in-progress chunk. `None` between chunks.
     nut_writer: Option<NutWriter>,
@@ -321,7 +321,7 @@ fn with_video_chunks<R>(operation: impl FnOnce(&mut HashMap<String, VideoChunkSl
 /// conversion happens later, on a compression-pool worker (see
 /// [`compress_worker`]), never on this hot path.
 pub(crate) struct FrameJob {
-    pub(crate) robot_id: String,
+    pub(crate) robot_index: i64,
     pub(crate) robot_instance: i64,
     pub(crate) data_type: String,
     pub(crate) sensor_name: String,
@@ -345,7 +345,7 @@ pub(crate) enum WriterMsg {
     /// `StopRecording` itself once acked. No lifecycle envelope is published
     /// here — see the module note on lifecycle ordering.
     FlushSource {
-        robot_id: String,
+        robot_index: i64,
         robot_instance: i64,
         ack: Sender<()>,
     },
@@ -353,7 +353,7 @@ pub(crate) enum WriterMsg {
     /// it (the daemon's cancel + recovery sweep reclaim the spooled NUTs), then
     /// acknowledge. The caller publishes `CancelRecording` itself once acked.
     DropSource {
-        robot_id: String,
+        robot_index: i64,
         robot_instance: i64,
         ack: Sender<()>,
     },
@@ -870,7 +870,7 @@ fn submit_frame(pool: &CompressPool, in_flight: &mut VecDeque<PendingFrame>, mut
 /// Mux one already-compressed pending frame into its chunk (writer thread).
 fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
     if let Err(error) = record_video_frame(
-        &pending.job.robot_id,
+        pending.job.robot_index,
         pending.job.robot_instance,
         &pending.job.data_type,
         &pending.job.sensor_name,
@@ -942,7 +942,7 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 }
             }
             Some(WriterMsg::FlushSource {
-                robot_id,
+                robot_index,
                 robot_instance,
                 ack,
             }) => {
@@ -952,14 +952,14 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 while !in_flight.is_empty() {
                     write_front(&mut in_flight);
                 }
-                if let Err(error) = flush_source_chunks(&robot_id, robot_instance) {
+                if let Err(error) = flush_source_chunks(robot_index, robot_instance) {
                     tracing::warn!(%error, "failed to flush tail video chunks on stop");
                 }
-                announce_source_flushed(&robot_id, robot_instance);
+                announce_source_flushed(robot_index, robot_instance);
                 let _ = ack.send(());
             }
             Some(WriterMsg::DropSource {
-                robot_id,
+                robot_index,
                 robot_instance,
                 ack,
             }) => {
@@ -969,7 +969,7 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 while !in_flight.is_empty() {
                     write_front(&mut in_flight);
                 }
-                let prefix = source_prefix(&robot_id, robot_instance);
+                let prefix = source_prefix(robot_index, robot_instance);
                 with_video_chunks(|streams| {
                     streams.retain(|key, _| !key.starts_with(&prefix));
                 });
@@ -1058,7 +1058,7 @@ fn should_flush_chunk(logical_chunk_bytes: u64, frame_count: u32, open_ns: i64) 
 /// worker (see [`submit_frame`]); this only muxes it into the chunk.
 #[allow(clippy::too_many_arguments)]
 fn record_video_frame(
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     sensor_name: &str,
@@ -1070,7 +1070,7 @@ fn record_video_frame(
     timestamp_us: i64,
     calibration: FrameCalibration,
 ) -> Result<(), ProducerError> {
-    let key = stream_key(robot_id, robot_instance, data_type, sensor_name);
+    let key = stream_key(robot_index, robot_instance, data_type, sensor_name);
     // Resolve the slot, building the per-stream state (and its spool dir) only
     // on the FIRST frame of a stream. The spool-dir path build is several
     // allocations, so doing it per frame (as an earlier revision did) added
@@ -1082,7 +1082,7 @@ fn record_video_frame(
         if let Some(slot) = registry.streams.get(&key) {
             return Some(slot.clone());
         }
-        let spool = spool_dir(robot_id, robot_instance, data_type, sensor_name)?;
+        let spool = spool_dir(robot_index, robot_instance, data_type, sensor_name)?;
         let slot = Arc::new(Mutex::new(VideoChunkState {
             width,
             height,
@@ -1123,7 +1123,7 @@ fn record_video_frame(
         let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         append_frame_locked(
             &mut state,
-            robot_id,
+            robot_index,
             robot_instance,
             data_type,
             sensor_name,
@@ -1159,7 +1159,7 @@ fn record_video_frame(
 #[allow(clippy::too_many_arguments)]
 fn append_frame_locked(
     state: &mut VideoChunkState,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     sensor_name: &str,
@@ -1175,7 +1175,7 @@ fn append_frame_locked(
     // The caller publishes the collected envelopes outside the lock.
     let seal = |state: &mut VideoChunkState, announcements: &mut Vec<Envelope>| {
         if let Some(envelope) =
-            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
+            flush_chunk_locked(robot_index, robot_instance, data_type, sensor_name, state)
         {
             announcements.push(envelope);
         }
@@ -1338,7 +1338,7 @@ fn append_frame_locked(
 /// must hold the per-stream lock. Returns `None` when there is no open chunk
 /// writer (no frames since the last flush).
 fn flush_chunk_locked(
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     sensor_name: &str,
@@ -1371,7 +1371,7 @@ fn flush_chunk_locked(
     state.frame_count = 0;
 
     Some(Envelope::VideoChunkReady {
-        robot_id: robot_id.to_string(),
+        robot_index,
         robot_instance,
         data_type: data_type.to_string(),
         sensor_name: Some(sensor_name.to_string()),
@@ -1415,7 +1415,7 @@ fn seal_aged_chunks() {
             .collect()
     });
     for (key, slot) in slots {
-        let (robot_id, robot_instance, data_type, sensor_name) = split_stream_key(&key);
+        let (robot_index, robot_instance, data_type, sensor_name) = split_stream_key(&key);
         let aged_envelope = {
             let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             // Consumed every sweep, so "quiet" means quiet since the last one.
@@ -1429,7 +1429,7 @@ fn seal_aged_chunks() {
                 continue;
             }
             flush_chunk_locked(
-                &robot_id,
+                robot_index,
                 robot_instance,
                 &data_type,
                 &sensor_name,
@@ -1444,8 +1444,8 @@ fn seal_aged_chunks() {
 
 /// Flush and remove every open video chunk for a source. Each flushed chunk is
 /// announced so the daemon can route it before the `StopRecording` lands.
-fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), ProducerError> {
-    let prefix = source_prefix(robot_id, robot_instance);
+fn flush_source_chunks(robot_index: i64, robot_instance: i64) -> Result<(), ProducerError> {
+    let prefix = source_prefix(robot_index, robot_instance);
     let slots: Vec<(String, VideoChunkSlot)> = with_video_chunks(|streams| {
         let keys: Vec<String> = streams
             .keys()
@@ -1461,7 +1461,7 @@ fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), Produc
         let flush_envelope = {
             let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             flush_chunk_locked(
-                robot_id,
+                robot_index,
                 robot_instance,
                 &data_type,
                 &sensor_name,
@@ -1479,9 +1479,9 @@ fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), Produc
 
 /// Announce that the source's flush barrier is complete — no further tail
 /// chunks are coming for its just-stopped recording.
-fn announce_source_flushed(robot_id: &str, robot_instance: i64) {
+fn announce_source_flushed(robot_index: i64, robot_instance: i64) {
     let _ = publisher_tx().send(PublishMsg::Announce(Envelope::SourceFlushed {
-        robot_id: robot_id.to_string(),
+        robot_index,
         robot_instance,
         publish_timestamp_ns: now_ns(),
         producer_pid: std::process::id(),
@@ -1511,8 +1511,8 @@ fn should_claim_video(last_claim_ns: Option<i64>, publish_ns: i64) -> bool {
 ///
 /// Best-effort: a dropped claim leaves the daemon with the chunk-driven
 /// attribution it had before.
-pub(crate) fn note_video_activity(robot_id: &str, robot_instance: i64, publish_ns: i64) {
-    let prefix = source_prefix(robot_id, robot_instance);
+pub(crate) fn note_video_activity(robot_index: i64, robot_instance: i64, publish_ns: i64) {
+    let prefix = source_prefix(robot_index, robot_instance);
     let claim = with_video_registry(|registry| {
         if !should_claim_video(registry.claims.get(&prefix).copied(), publish_ns) {
             return false;
@@ -1524,7 +1524,7 @@ pub(crate) fn note_video_activity(robot_id: &str, robot_instance: i64, publish_n
         return;
     }
     let _ = publisher_tx().send(PublishMsg::Announce(Envelope::VideoProducerActive {
-        robot_id: robot_id.to_string(),
+        robot_index,
         robot_instance,
         publish_timestamp_ns: publish_ns,
         producer_pid: std::process::id(),
@@ -1544,18 +1544,18 @@ pub(crate) fn note_video_activity(robot_id: &str, robot_instance: i64, publish_n
 /// reaching for [`writer_queue`] would spawn it a writer thread it has no use
 /// for. No ack is awaited because the caller is the shared refresh thread — the
 /// barrier publishes its own marker once it drains.
-pub(crate) fn flush_source_detached(robot_id: &str, robot_instance: i64) {
+pub(crate) fn flush_source_detached(robot_index: i64, robot_instance: i64) {
     let owes_marker = with_video_registry(|registry| {
         registry
             .claims
-            .contains_key(&source_prefix(robot_id, robot_instance))
+            .contains_key(&source_prefix(robot_index, robot_instance))
     });
     if !owes_marker {
         return;
     }
     let (ack, _) = channel();
     let _ = writer_queue().push(WriterMsg::FlushSource {
-        robot_id: robot_id.to_string(),
+        robot_index,
         robot_instance,
         ack,
     });
@@ -1710,7 +1710,7 @@ mod tests {
         let logged_at = now_ns() - 1_000_000_000;
         append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1727,7 +1727,7 @@ mod tests {
             state.chunk_publish_ns, logged_at,
             "the chunk carries its opening frame's publish time verbatim"
         );
-        match flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal") {
+        match flush_chunk_locked(1012, 0, "RGB", "cam", &mut state).expect("seal") {
             Envelope::VideoChunkReady {
                 publish_timestamp_ns,
                 ..
@@ -1752,7 +1752,7 @@ mod tests {
         for (publish_ns, timestamp_us) in [(boundary - 1_000_000, 1_000), (boundary, 2_000)] {
             let sealed = append_frame_locked(
                 &mut state,
-                "r",
+                1,
                 0,
                 "RGB",
                 "cam",
@@ -1797,7 +1797,7 @@ mod tests {
 
         append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1828,7 +1828,7 @@ mod tests {
 
         let sealed = append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1844,7 +1844,7 @@ mod tests {
 
         let sealed = append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1889,7 +1889,7 @@ mod tests {
 
         append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1902,11 +1902,11 @@ mod tests {
             FrameCalibration::default(),
         );
         let first = state.chunk_publish_ns;
-        flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
+        flush_chunk_locked(1012, 0, "RGB", "cam", &mut state).expect("seal");
 
         append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1940,7 +1940,7 @@ mod tests {
         let frame_2x2 = vec![0u8; 2 * 2 * 3];
         let opened = append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -1963,7 +1963,7 @@ mod tests {
         let frame_4x4 = vec![0u8; 4 * 4 * 3];
         let sealed = append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -2019,7 +2019,7 @@ mod tests {
 
         let opened = append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "DEPTH_IMAGES",
             "cam",
@@ -2038,7 +2038,7 @@ mod tests {
         // sealed before opening the sensor-unit chunk.
         let sealed = append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "DEPTH_IMAGES",
             "cam",
@@ -2077,7 +2077,7 @@ mod tests {
         let frame = vec![0u8; 2 * 2 * 2];
         append_frame_locked(
             &mut state,
-            "r",
+            1,
             0,
             "DEPTH_IMAGES",
             "cam",
@@ -2089,7 +2089,7 @@ mod tests {
             1_000,
             FrameCalibration::default(),
         );
-        let envelope = flush_chunk_locked("r", 0, "DEPTH_IMAGES", "cam", &mut state)
+        let envelope = flush_chunk_locked(1012, 0, "DEPTH_IMAGES", "cam", &mut state)
             .expect("open chunk seals");
         match envelope {
             Envelope::VideoChunkReady { dtype, .. } => {
@@ -2139,7 +2139,7 @@ mod tests {
         {
             let announcements = append_frame_locked(
                 &mut state,
-                "r",
+                1,
                 0,
                 "RGB",
                 "cam",
@@ -2158,7 +2158,7 @@ mod tests {
         }
         assert_eq!(state.frame_count, 3);
 
-        let envelope = flush_chunk_locked("r", 0, "RGB", "cam", &mut state)
+        let envelope = flush_chunk_locked(1012, 0, "RGB", "cam", &mut state)
             .expect("an open chunk seals into an announcement");
         match envelope {
             Envelope::VideoChunkReady {
@@ -2202,7 +2202,7 @@ mod tests {
         for (index, capture_us) in [10_000, 20_000, 30_000].into_iter().enumerate() {
             append_frame_locked(
                 &mut state,
-                "r",
+                1,
                 0,
                 "RGB",
                 "cam",
@@ -2216,7 +2216,7 @@ mod tests {
             );
         }
 
-        let envelope = flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
+        let envelope = flush_chunk_locked(1012, 0, "RGB", "cam", &mut state).expect("seal");
         match envelope {
             Envelope::VideoChunkReady {
                 publish_timestamp_ns,
@@ -2240,7 +2240,7 @@ mod tests {
         // chunk.
         let dir = tempfile::tempdir().unwrap();
         let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
-        assert!(flush_chunk_locked("r", 0, "RGB", "cam", &mut state).is_none());
+        assert!(flush_chunk_locked(1012, 0, "RGB", "cam", &mut state).is_none());
     }
 
     #[test]
@@ -2257,7 +2257,7 @@ mod tests {
         for timestamp_us in [5_000, 5_000, 5_000, 4_000] {
             let _ = append_frame_locked(
                 &mut state,
-                "r",
+                1,
                 0,
                 "RGB",
                 "cam",
@@ -2275,7 +2275,7 @@ mod tests {
             "every frame is written despite non-monotonic capture timestamps"
         );
 
-        match flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal") {
+        match flush_chunk_locked(1012, 0, "RGB", "cam", &mut state).expect("seal") {
             Envelope::VideoChunkReady { frame_count, .. } => assert_eq!(frame_count, 4),
             other => panic!("expected VideoChunkReady, got {other:?}"),
         }
@@ -2284,7 +2284,7 @@ mod tests {
     /// A minimal video-frame message carrying `bytes` of payload.
     fn frame_msg(bytes: usize) -> WriterMsg {
         WriterMsg::Frame(Box::new(FrameJob {
-            robot_id: "robot".to_string(),
+            robot_index: 3,
             robot_instance: 0,
             data_type: "RGB_IMAGES".to_string(),
             sensor_name: "camera".to_string(),
@@ -2341,7 +2341,7 @@ mod tests {
         // A flush/cancel must enqueue immediately even while frames are blocked.
         assert!(queue
             .push(WriterMsg::FlushSource {
-                robot_id: "robot".to_string(),
+                robot_index: 3,
                 robot_instance: 0,
                 ack: ack_tx,
             })
@@ -2417,7 +2417,7 @@ mod tests {
     fn append_ts_us(state: &mut VideoChunkState, timestamp_us: i64) -> Vec<Envelope> {
         append_frame_locked(
             state,
-            "r",
+            1,
             0,
             "RGB",
             "cam",
@@ -2476,7 +2476,7 @@ mod tests {
         for index in 7..12 {
             append_ts_us(&mut state, base + index * FRAME_GAP_US);
         }
-        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+        flush_chunk_locked(1012, 0, "RGB", "cam", &mut state);
 
         // The poisoned frame lands at 0; the first true frame costs one
         // synthesized step at the learned gap and re-anchors, so the rest of
@@ -2504,7 +2504,7 @@ mod tests {
         for index in 3..6 {
             append_ts_us(&mut state, base - 10_000_000 + index * FRAME_GAP_US);
         }
-        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+        flush_chunk_locked(1012, 0, "RGB", "cam", &mut state);
 
         // The rewound frame costs one synthesized step at the learned gap and
         // re-anchors, so the tail keeps capture-relative spacing.
@@ -2536,7 +2536,7 @@ mod tests {
         for index in 4..6 {
             append_ts_us(&mut state, base + index * FRAME_GAP_US);
         }
-        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+        flush_chunk_locked(1012, 0, "RGB", "cam", &mut state);
 
         let spike = 1_000_000 + 3 * FRAME_GAP_US;
         let expected: Vec<u64> = vec![
@@ -2566,7 +2566,7 @@ mod tests {
         for index in 0..12 {
             append_ts_us(&mut state, base + index * FRAME_GAP_US);
         }
-        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+        flush_chunk_locked(1012, 0, "RGB", "cam", &mut state);
 
         let expected: Vec<u64> = (0..6).map(|index| (index * FRAME_GAP_US) as u64).collect();
         let chunks = sealed_chunk_pts(dir.path());

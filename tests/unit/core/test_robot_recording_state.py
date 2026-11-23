@@ -74,7 +74,7 @@ def test_the_cloud_id_wait_is_handed_to_the_bridge() -> None:
     ) as query_recording_state:
         assert robot.get_cloud_recording_id(timeout_s=1.0) == "cloud-1"
 
-    query_recording_state.assert_called_once_with("1", 0, timeout_s=1.0)
+    query_recording_state.assert_called_once_with(1, 0, timeout_s=1.0)
     robot.id = None
 
 

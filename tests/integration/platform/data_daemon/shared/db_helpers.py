@@ -49,7 +49,6 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_RECORDING_ID,
     COLUMN_RECORDING_INDEX,
     COLUMN_REGISTRATION_STATUS,
-    COLUMN_ROBOT_ID,
     COLUMN_ROBOT_INDEX,
     COLUMN_ROBOT_INSTANCE,
     COLUMN_STOPPED_AT,
@@ -176,22 +175,23 @@ class DaemonDbStore:
 
     def fetch_recordings_for_source(
         self,
-        robot_id: str,
+        robot_index: int,
         robot_instance: int,
     ) -> list[dict[str, Any]]:
         """Return recording rows for one source ordered by ``recording_index``.
 
-        Source identity is ``(robot_id, robot_instance)``. This mirrors the
-        daemon's own source lookup (``idx_recordings_source``) and is how tests
-        correlate a worker's recordings to daemon-minted ``recording_index``
-        values without seeing the local handle.
+        Source identity is ``(robot_index, robot_instance)``: the robot's row in
+        the daemon, which labels its logged data. This mirrors the daemon's own
+        source lookup (``idx_recordings_robot_row``) and is how tests correlate
+        a worker's recordings to daemon-minted ``recording_index`` values
+        without seeing the local handle.
         """
         with closing(self.connect()) as conn:
             rows = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} "
-                f"WHERE {COLUMN_ROBOT_ID} = ? AND {COLUMN_ROBOT_INSTANCE} = ? "
+                f"WHERE {COLUMN_ROBOT_INDEX} = ? AND {COLUMN_ROBOT_INSTANCE} = ? "
                 f"ORDER BY {COLUMN_RECORDING_INDEX}",
-                (robot_id, robot_instance),
+                (robot_index, robot_instance),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -283,11 +283,11 @@ def fetch_recording(recording_key: int | str) -> dict[str, Any] | None:
 
 
 def fetch_recordings_for_source(
-    robot_id: str,
+    robot_index: int,
     robot_instance: int,
 ) -> list[dict[str, Any]]:
     """Return recording rows for one source ordered by ``recording_index``."""
-    return _TEST_STORE.fetch_recordings_for_source(robot_id, robot_instance)
+    return _TEST_STORE.fetch_recordings_for_source(robot_index, robot_instance)
 
 
 def fetch_all_traces(
@@ -300,7 +300,7 @@ def fetch_all_traces(
 
 
 def wait_for_recording_index_for_source(
-    robot_id: str,
+    robot_index: int,
     robot_instance: int,
     *,
     after_index: int = 0,
@@ -309,7 +309,7 @@ def wait_for_recording_index_for_source(
 ) -> int:
     """Block until the daemon assigns a recording with index > ``after_index``.
 
-    Returns the highest ``recording_index`` for ``(robot_id, robot_instance)``
+    Returns the highest ``recording_index`` for ``(robot_index, robot_instance)``
     once it exceeds ``after_index`` — i.e. the recording just started. The daemon
     assigns ``recording_index`` the moment it sees ``StartRecording``, so a short
     poll covers the window between the producer's ``start_recording`` call and the
@@ -330,7 +330,7 @@ def wait_for_recording_index_for_source(
     newest: int | None = None
     while True:
         try:
-            rows = fetch_recordings_for_source(robot_id, robot_instance)
+            rows = fetch_recordings_for_source(robot_index, robot_instance)
         except sqlite3.OperationalError:
             # Daemon has created the DB file but not yet the schema; retry.
             rows = []
@@ -341,7 +341,7 @@ def wait_for_recording_index_for_source(
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 "Daemon did not assign a new recording_index for source "
-                f"({robot_id}, {robot_instance}); expected an index greater than "
+                f"({robot_index}, {robot_instance}); expected an index greater than "
                 f"{after_index}, newest seen {newest} after {timeout_s}s."
             )
         time.sleep(poll_interval_s)
@@ -1545,7 +1545,7 @@ def assert_recordings_wait_on_unconfirmed_rows(results: list[ContextResult]) -> 
                 f"Offline recording_index {recording_index} for source "
                 f"{result.source} has no recordings row"
             )
-            assert str(row[COLUMN_ROBOT_INDEX]) == result.source[0], row
+            assert row[COLUMN_ROBOT_INDEX] == result.source[0], row
             robot = fetch_robot_row(row[COLUMN_ROBOT_INDEX])
             dataset = fetch_dataset_row(row[COLUMN_DATASET_INDEX])
             assert robot is not None and dataset is not None, row

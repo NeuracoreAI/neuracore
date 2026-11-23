@@ -136,7 +136,7 @@ pub(crate) enum PublishMsg {
     /// `BatchedData`. Serialisation happens on the publisher thread, off the
     /// caller.
     Joint {
-        robot_id: String,
+        robot_index: i64,
         robot_instance: i64,
         data_type: String,
         /// Joint names joined by `\0` (split + zipped with `values` here, off
@@ -148,7 +148,7 @@ pub(crate) enum PublishMsg {
     },
     /// One JSON sample to publish as a `Data` envelope.
     Json {
-        robot_id: String,
+        robot_index: i64,
         robot_instance: i64,
         data_type: String,
         sensor_name: String,
@@ -268,7 +268,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
     while let Ok(msg) = rx.recv() {
         let result = match msg {
             PublishMsg::Joint {
-                robot_id,
+                robot_index,
                 robot_instance,
                 data_type,
                 joined_names,
@@ -293,7 +293,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                     }
                 }
                 publish(&Envelope::BatchedData {
-                    robot_id,
+                    robot_index,
                     robot_instance,
                     data_type,
                     publish_timestamp_ns,
@@ -302,7 +302,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 })
             }
             PublishMsg::Json {
-                robot_id,
+                robot_index,
                 robot_instance,
                 data_type,
                 sensor_name,
@@ -310,7 +310,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 timestamp_us,
                 publish_timestamp_ns,
             } => publish(&Envelope::Data {
-                robot_id,
+                robot_index,
                 robot_instance,
                 data_type,
                 sensor_name: Some(sensor_name),

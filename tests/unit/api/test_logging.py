@@ -776,7 +776,7 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
     native.log_json.assert_called_once()
     args = native.log_json.call_args.args
     assert args[:4] == (
-        "7",
+        7,
         3,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value,
         "secondary_gripper",
@@ -839,7 +839,7 @@ def test_log_done_records_flag_to_daemon(monkeypatch, value, expected) -> None:
 
     native.log_json.assert_called_once()
     args = native.log_json.call_args.args
-    assert args[:4] == ("5", 0, DataType.DONE.value, "done")
+    assert args[:4] == (5, 0, DataType.DONE.value, "done")
     assert json.loads(args[4]) == DoneData(timestamp=12.5, done=expected).model_dump(
         mode="json"
     )

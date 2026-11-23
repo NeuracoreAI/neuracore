@@ -152,7 +152,7 @@ def _record_one(
     start_returned_at = time.time()
 
     recording_index = wait_for_recording_index_for_source(
-        str(robot.id),
+        robot.robot_index,
         int(robot.instance),
         after_index=after_index,
         timeout_s=MAX_TIME_TO_START_S,
@@ -181,7 +181,7 @@ def _record_one(
 
 def _fetch_only_recording(robot: Any) -> dict[str, Any]:
     """Return the single recording row this source produced."""
-    rows = fetch_recordings_for_source(str(robot.id), int(robot.instance))
+    rows = fetch_recordings_for_source(robot.robot_index, int(robot.instance))
     assert len(rows) == 1, f"Expected exactly one recording for the source; got {rows}"
     return rows[0]
 
@@ -310,7 +310,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended(
             rows = {
                 int(row[COLUMN_RECORDING_INDEX]): row
                 for row in fetch_recordings_for_source(
-                    str(robot.id), int(robot.instance)
+                    robot.robot_index, int(robot.instance)
                 )
             }
             assert rows.keys() >= {later_index, earlier_index}, (

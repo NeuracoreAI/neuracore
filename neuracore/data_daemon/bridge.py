@@ -71,7 +71,7 @@ class RecordingStateUnavailableError(RuntimeError):
 
 
 def query_recording_state(
-    robot_id: str, robot_instance: int, timeout_s: float = 0.0
+    robot_index: int, robot_instance: int, timeout_s: float = 0.0
 ) -> LiveRecording | None:
     """Which recording, if any, a source currently has open.
 
@@ -87,7 +87,7 @@ def query_recording_state(
     that late; a recording this process bracketed is exact immediately.
 
     Args:
-        robot_id: Robot identifier of the source.
+        robot_index: The robot's row in the data daemon, which labels its logged data.
         robot_instance: Robot instance of the source.
         timeout_s: How long to wait for the daemon to mint the open recording's
             cloud id, which it does asynchronously. The wait happens in the
@@ -101,10 +101,10 @@ def query_recording_state(
             source. Silence is not "not recording", and callers must not read it
             as such.
     """
-    reply = _load_native().recording_state(robot_id, robot_instance, timeout_s)
+    reply = _load_native().recording_state(robot_index, robot_instance, timeout_s)
     if reply is None:
         raise RecordingStateUnavailableError(
-            f"the daemon has not answered for {robot_id} instance {robot_instance}"
+            f"the daemon has not answered for {robot_index} instance {robot_instance}"
         )
     live = reply["recording"]
     if live is None:
@@ -399,7 +399,7 @@ class RecordingContext:
     A *thin shipper* bridge: ``start_recording`` / ``log_joints`` / ``log_frame``
     / ``log_json`` / ``stop_recording`` / ``cancel_recording`` forward straight
     through to ``_data_bridge`` over iceoryx2, tagged only with the **source**
-    ``(robot_id, robot_instance)``. The daemon owns all recording identity —
+    ``(robot_index, robot_instance)``. The daemon owns all recording identity —
     there is no recording id on the wire, so this class carries none. Routing
     is by a producer-stamped *publish* timestamp (wall clock), decoupled from
     the data's own capture timestamp, so the daemon partitions recordings by
@@ -408,10 +408,10 @@ class RecordingContext:
 
     def __init__(self) -> None:
         """Initialize the recording context."""
-        self._robot_id: str | None = None
+        self._robot_index: int | None = None
         self._robot_instance: int = 0
 
-    def bind_source(self, robot_id: str, robot_instance: int = 0) -> None:
+    def bind_source(self, robot_index: int, robot_instance: int = 0) -> None:
         """Bind messages to a robot source without starting a recording.
 
         A process may learn that a recording is active through SSE even when a
@@ -420,17 +420,18 @@ class RecordingContext:
         the daemon-owned recording window, but must not publish another start.
 
         Args:
-            robot_id: Robot identifier used as the daemon source key.
+            robot_index: The robot's row in the data daemon, which labels its
+                logged data.
             robot_instance: Robot instance used as the daemon source key.
         """
-        if not robot_id:
-            raise ValueError("robot_id is required to bind a recording source.")
-        self._robot_id = robot_id
+        if robot_index is None:
+            raise ValueError("robot_index is required to bind a recording source.")
+        self._robot_index = robot_index
         self._robot_instance = robot_instance
 
     def start_recording(
         self,
-        robot_id: str,
+        robot_index: int,
         robot_instance: int = 0,
         robot_name: str | None = None,
         dataset_index: int | None = None,
@@ -441,7 +442,8 @@ class RecordingContext:
         """Announce a recording to the daemon for a source.
 
         Publishes one ``StartRecording`` envelope tagged with the source
-        ``(robot_id, robot_instance)``. The daemon gets the cloud id from the backend.
+        ``(robot_index, robot_instance)``. The daemon gets the cloud id from the
+        backend.
 
         ``timestamp_us`` is the recording's start in microseconds on the
         caller's capture clock, stored and returned as this recording's start
@@ -454,10 +456,10 @@ class RecordingContext:
             before either has a cloud id.
         """
         ensure_daemon_running()
-        self.bind_source(robot_id, robot_instance)
+        self.bind_source(robot_index, robot_instance)
 
         return _load_native().start_recording(
-            robot_id,
+            robot_index,
             robot_instance,
             robot_name,
             dataset_index,
@@ -482,9 +484,9 @@ class RecordingContext:
         """
         if not values:
             return
-        robot_id = self._require_source("log_joints")
+        robot_index = self._require_source("log_joints")
         _load_native().log_joints(
-            robot_id,
+            robot_index,
             self._robot_instance,
             data_type,
             joined_names,
@@ -524,11 +526,11 @@ class RecordingContext:
             extrinsics: Optional row-major 4x4 camera extrinsics, flattened to
                 16 values.
         """
-        robot_id = self._require_source("log_frame")
+        robot_index = self._require_source("log_frame")
         native = _load_native()
         try:
             native.log_frame(
-                robot_id,
+                robot_index,
                 self._robot_instance,
                 data_type,
                 name,
@@ -558,9 +560,9 @@ class RecordingContext:
         ``data_type`` is an opaque wire label and ``payload`` is already
         serialized, so the daemon stores it verbatim as a per-trace JSON sample.
         """
-        robot_id = self._require_source("log_json")
+        robot_index = self._require_source("log_json")
         _load_native().log_json(
-            robot_id,
+            robot_index,
             self._robot_instance,
             data_type,
             name,
@@ -575,10 +577,10 @@ class RecordingContext:
         behaves exactly like ``stop_recording``'s: it is the recording's
         capture stop time in microseconds.
         """
-        if not self._robot_id:
+        if self._robot_index is None:
             return
         _load_native().cancel_recording(
-            self._robot_id, self._robot_instance, timestamp_us
+            self._robot_index, self._robot_instance, timestamp_us
         )
 
     def recording_epoch(self) -> int | None:
@@ -594,17 +596,17 @@ class RecordingContext:
         the caller's thread, and a recording this process bracketed is known
         without asking at all.
         """
-        if self._robot_id is None:
+        if self._robot_index is None:
             return None
-        return _load_native().recording_epoch(self._robot_id, self._robot_instance)
+        return _load_native().recording_epoch(self._robot_index, self._robot_instance)
 
-    def _require_source(self, operation: str) -> str:
-        """Return the active source's robot id or raise if logging before start."""
-        if not self._robot_id:
+    def _require_source(self, operation: str) -> int:
+        """Return the active robot index or raise if logging before start."""
+        if self._robot_index is None:
             raise RuntimeError(
                 f"{operation} called before start_recording set a source."
             )
-        return self._robot_id
+        return self._robot_index
 
     def stop_recording(self, timestamp_us: int, tags: list[str] | None = None) -> None:
         """Publish one ``StopRecording`` tagged with the source.
@@ -619,10 +621,10 @@ class RecordingContext:
         tail chunks and must be called straight after, so the caller can close
         its own logging gate in between.
         """
-        if not self._robot_id:
+        if self._robot_index is None:
             return
         _load_native().stop_recording(
-            self._robot_id, self._robot_instance, timestamp_us, tags or []
+            self._robot_index, self._robot_instance, timestamp_us, tags or []
         )
 
     def flush_source(self) -> None:
@@ -631,9 +633,9 @@ class RecordingContext:
         Mandatory after :meth:`stop_recording` — tail chunks are sealed nowhere
         else. No-op before a source is bound.
         """
-        if not self._robot_id:
+        if self._robot_index is None:
             return
-        _load_native().flush_source(self._robot_id, self._robot_instance)
+        _load_native().flush_source(self._robot_index, self._robot_instance)
 
     def close(self) -> None:
         """Release resources owned by this instance.

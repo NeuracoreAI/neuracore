@@ -133,7 +133,7 @@ def test_recording_made_offline_uploads_once_online(
                     ]
                     observed.wait_for_all_complete(recording_indexes, timeout_s=180.0)
                 results = resolve_cloud_recording_ids(results, observed=observed)
-                _wait_for_robot_registered(int(robot_rows.pop()))
+                _wait_for_robot_registered(robot_rows.pop())
                 # Back online, the script logs in again, as the offline login
                 # told it to; until then its session is still offline.
                 nc.login()
