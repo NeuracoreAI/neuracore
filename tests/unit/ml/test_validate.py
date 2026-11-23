@@ -38,7 +38,7 @@ def run_validation_with_fake_python_script(
 ):
     """Run run_in_venv with a venv whose python runs the given shell body."""
 
-    def create_fake_venv(venv_path, with_pip=True):
+    def create_fake_venv(venv_path, with_pip=True, **_kwargs):
         venv_bin_dir = Path(venv_path) / "bin"
         venv_bin_dir.mkdir(parents=True)
         (venv_bin_dir / "pip").symlink_to("/bin/true")
@@ -120,6 +120,48 @@ def test_run_in_venv_reports_segfault_before_any_log_lines(
     assert error_msg.startswith("Validation crashed with a segmentation fault")
     assert "Validation stopped before it wrote any log lines." in error_msg
     assert error_msg.endswith("Validation errors:\nFatal Python error")
+
+
+def test_link_validation_venv_adds_host_site_packages(tmp_path):
+    validate._link_validation_venv_to_host_sdk(tmp_path / "venv")
+
+    pth_text = (
+        validate._venv_site_packages(tmp_path / "venv") / "neuracore-host.pth"
+    ).read_text()
+
+    assert "import site; site.addsitedir(" in pth_text
+    for path in validate._host_site_package_dirs():
+        assert str(path) in pth_text
+
+
+def test_run_in_venv_does_not_pip_install_neuracore_from_pypi(
+    fake_cgroup_memory_events, monkeypatch, tmp_path
+):
+    pip_calls = []
+
+    def fail_if_pip_install(cmd, **kwargs):
+        pip_calls.append(cmd)
+        raise AssertionError(f"unexpected subprocess.run: {cmd}")
+
+    monkeypatch.setattr(validate.subprocess, "run", fail_if_pip_install)
+    validation_results = json.dumps({
+        "algo_check": None,
+        "error_msg": "",
+        "success": True,
+    })
+    script_body = (
+        f"echo '{validate.JSON_START_MARKER}'\n"
+        f"cat <<'EOF'\n{validation_results}\nEOF\n"
+        f"echo '{validate.JSON_END_MARKER}'\n"
+        "exit 0\n"
+    )
+
+    _, error_msg = run_validation_with_fake_python_script(
+        monkeypatch, tmp_path, script_body
+    )
+
+    assert error_msg == ""
+    assert pip_calls == []
 
 
 def test_run_in_venv_keeps_traceback_from_validation_exception(

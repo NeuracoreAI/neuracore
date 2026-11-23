@@ -1,8 +1,9 @@
 """Algorithm validation script for neuracore ML algorithms.
 
 This module provides a command-line tool for validating ML algorithms in an
-isolated virtual environment. It creates a temporary venv, installs dependencies,
-and runs validation to ensure algorithms meet neuracore requirements.
+isolated virtual environment. It creates a temporary venv that imports the
+neuracore already installed on the job, then runs validation to ensure
+algorithms meet neuracore requirements.
 """
 
 import argparse
@@ -11,6 +12,7 @@ import logging
 import os
 import re
 import signal
+import site
 import subprocess
 import sys
 import tempfile
@@ -61,13 +63,52 @@ class OutOfMemoryKillEvidence:
     kernel_log_line: str = ""
 
 
+def _host_site_package_dirs() -> list[Path]:
+    """Return the site-packages directories of this validation job's Python."""
+    return [Path(path) for path in site.getsitepackages() if Path(path).is_dir()]
+
+
+def _venv_site_packages(venv_path: Path) -> Path:
+    """Return the site-packages directory of a newly created virtualenv."""
+    if os.name == "nt":
+        return venv_path / "Lib" / "site-packages"
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    return venv_path / "lib" / version / "site-packages"
+
+
+def _link_validation_venv_to_host_sdk(venv_path: Path) -> None:
+    """Make the nested venv import neuracore from this job, not from PyPI.
+
+    Staging and dev jobs reinstall the branch SDK before they start. Installing
+    ``neuracore[ml]`` into a nested venv from PyPI discarded that SDK and
+    validated against the last published release, which can pin an older
+    ``neuracore-types`` and fail to import unreleased fixtures.
+    """
+    venv_site_packages = _venv_site_packages(venv_path)
+    venv_site_packages.mkdir(parents=True, exist_ok=True)
+    host_site_packages = _host_site_package_dirs()
+    pth_path = venv_site_packages / "neuracore-host.pth"
+    pth_path.write_text(
+        "\n".join(
+            f"import site; site.addsitedir({str(path)!r})"
+            for path in host_site_packages
+        )
+        + "\n"
+    )
+    logger.info(
+        "Linked validation venv to host site-packages: %s",
+        ", ".join(str(path) for path in host_site_packages),
+    )
+
+
 def run_in_venv(
     algorithm_folder: Path, storage_handler: AlgorithmStorageHandler | None = None
 ) -> tuple[AlgorithmCheck, str]:
     """Run algorithm validation in a temporary virtual environment.
 
-    Creates an isolated virtual environment, installs neuracore[ml], and
-    executes validation to ensure the algorithm meets all requirements.
+    Creates an isolated virtual environment that reuses the neuracore installed
+    on this job, then executes validation to ensure the algorithm meets all
+    requirements.
 
     Args:
         algorithm_folder: Path to the algorithm directory to validate
@@ -86,28 +127,15 @@ def run_in_venv(
 
         # Create virtual environment
         venv.create(venv_path, with_pip=True)
+        _link_validation_venv_to_host_sdk(venv_path)
 
         # Determine the python executable path
         if os.name == "nt":  # Windows
             python_exe = venv_path / "Scripts" / "python.exe"
-            pip_exe = venv_path / "Scripts" / "pip.exe"
         else:  # Unix-like
             python_exe = venv_path / "bin" / "python"
-            pip_exe = venv_path / "bin" / "pip"
 
         try:
-            # Install neuracore in the virtual environment
-            subprocess.run(
-                [
-                    str(pip_exe),
-                    "install",
-                    "neuracore[ml]",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
             logger.info(f"Created virtual environment at {venv_path}")
 
             validation_script = f"""
@@ -372,8 +400,7 @@ def _describe_exit_code(
             )
         case _:
             return (
-                f"Validation exited with code {returncode} before reporting "
-                "a result."
+                f"Validation exited with code {returncode} before reporting a result."
             )
 
 
@@ -492,8 +519,7 @@ def _parse_validation_results(
         )
     except Exception as e:
         error_msg = (
-            "Unexpected error parsing results: "
-            f"{e}. STDOUT: {stdout}, STDERR: {stderr}"
+            f"Unexpected error parsing results: {e}. STDOUT: {stdout}, STDERR: {stderr}"
         )
 
     return algo_check, error_msg
