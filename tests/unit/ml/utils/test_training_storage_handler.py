@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 import torch
 from neuracore_types import TrainingProgress
 
@@ -395,7 +396,7 @@ class TestSaveCheckpointConcurrencyGuard:
 
 
 class TestLoadCheckpoint:
-    def test_load_checkpoint_downloads_from_signed_url_then_loads_from_disk(
+    def test_load_checkpoint_loads_a_previously_downloaded_file(
         self, handler, requests_mock
     ):
         checkpoint_name = "checkpoint_latest.pt"
@@ -411,23 +412,10 @@ class TestLoadCheckpoint:
             status_code=200,
         )
 
+        handler.download_checkpoint(checkpoint_name)
         result = handler.load_checkpoint(checkpoint_name)
 
         assert result["epoch"] == 5
-
-    def test_load_checkpoint_raises_value_error_when_signed_url_download_fails(
-        self, handler, requests_mock, tmp_path
-    ):
-        checkpoint_name = "checkpoint_latest.pt"
-        requests_mock.get(
-            f"{BASE_JOB_URL}/checkpoint_url/{checkpoint_name}",
-            json={"url": SIGNED_URL},
-            status_code=200,
-        )
-        requests_mock.get(SIGNED_URL, status_code=403, text="Forbidden")
-
-        with pytest.raises(ValueError, match=checkpoint_name):
-            handler.load_checkpoint(checkpoint_name)
 
     def test_load_checkpoint_loads_directly_from_local_dir_without_cloud(
         self, local_handler, tmp_path
@@ -438,6 +426,66 @@ class TestLoadCheckpoint:
         result = local_handler.load_checkpoint(checkpoint_name)
 
         assert result["epoch"] == 3
+
+    def test_load_checkpoint_does_not_download_when_local_file_exists(
+        self, handler, requests_mock, tmp_path
+    ):
+        checkpoint_name = "checkpoint_latest.pt"
+        torch.save({"epoch": 7}, tmp_path / checkpoint_name)
+
+        result = handler.load_checkpoint(checkpoint_name)
+
+        assert result["epoch"] == 7
+        assert requests_mock.call_count == 1  # job-exists check in __init__
+
+    def test_download_checkpoint_replaces_destination_and_removes_staging_file(
+        self, handler, requests_mock, tmp_path
+    ):
+        checkpoint_name = "checkpoint_latest.pt"
+        checkpoint_data = {"epoch": 9, "model_state": {}}
+        requests_mock.get(
+            f"{BASE_JOB_URL}/checkpoint_url/{checkpoint_name}",
+            json={"url": SIGNED_URL},
+            status_code=200,
+        )
+        requests_mock.get(
+            SIGNED_URL,
+            content=_serialize_checkpoint(checkpoint_data),
+            status_code=200,
+        )
+
+        path = handler.download_checkpoint(checkpoint_name)
+
+        assert path == tmp_path / checkpoint_name
+        assert path.exists()
+        assert not list(tmp_path.glob("*.part"))
+        assert torch.load(path, weights_only=True)["epoch"] == 9
+
+    def test_download_checkpoint_raises_when_signed_url_download_fails(
+        self, handler, requests_mock, tmp_path
+    ):
+        checkpoint_name = "checkpoint_latest.pt"
+        requests_mock.get(
+            f"{BASE_JOB_URL}/checkpoint_url/{checkpoint_name}",
+            json={"url": SIGNED_URL},
+            status_code=200,
+        )
+        requests_mock.get(SIGNED_URL, status_code=403, text="Forbidden")
+
+        with pytest.raises(requests.HTTPError):
+            handler.download_checkpoint(checkpoint_name)
+        assert not (tmp_path / checkpoint_name).exists()
+        assert not list(tmp_path.glob("*.part"))
+
+    def test_download_checkpoint_is_a_no_op_without_cloud(
+        self, local_handler, tmp_path
+    ):
+        checkpoint_name = "checkpoint_latest.pt"
+
+        path = local_handler.download_checkpoint(checkpoint_name)
+
+        assert path == tmp_path / checkpoint_name
+        assert not path.exists()
 
 
 class TestDeleteCheckpoint:

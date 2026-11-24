@@ -641,8 +641,27 @@ class DistributedTrainer:
 
         logger.info("Checkpoint saved.")
 
+    def _any_rank_failed(self, local_failed: bool) -> bool:
+        """Return whether any rank reported a failure.
+
+        Every rank must enter this collective, so a failure on one rank
+        cannot leave the others running.
+
+        Args:
+            local_failed: Whether this rank failed.
+
+        Returns:
+            True if any rank failed.
+        """
+        flag = torch.tensor([int(local_failed)], dtype=torch.int32, device=self.device)
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        return bool(flag.item())
+
     def load_checkpoint(self, path: str) -> dict:
         """Load checkpoint and restore training state.
+
+        Rank 0 downloads the shared local file first. Every rank then waits
+        so no rank ``torch.load``s a file another rank is still writing.
 
         Args:
             path: Path to the checkpoint file
@@ -650,6 +669,24 @@ class DistributedTrainer:
         Returns:
             A dictionary containing the checkpoint data
         """
+        download_error: Exception | None = None
+        if self.rank == 0:
+            try:
+                self.storage_handler.download_checkpoint(path)
+            except Exception as exc:
+                download_error = exc
+        if self.world_size > 1:
+            some_rank_failed_to_download = self._any_rank_failed(
+                download_error is not None
+            )
+            if some_rank_failed_to_download and download_error is None:
+                raise RuntimeError(
+                    "Another rank failed to download the resume checkpoint "
+                    f"{path!r}."
+                )
+        if download_error is not None:
+            raise download_error
+
         checkpoint = self.storage_handler.load_checkpoint(path)
 
         # Handle model loading (different for DDP vs non-DDP models)

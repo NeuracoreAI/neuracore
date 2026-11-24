@@ -404,51 +404,22 @@ def _worker_context(num_workers: int) -> str | None:
     return "spawn" if num_workers > 0 else None
 
 
-def _any_rank_failed_to_load_checkpoint(
-    *,
-    local_failed: bool,
-    rank: int,
-    device: torch.device | None = None,
-) -> bool:
-    """Return whether any rank failed to load the resume checkpoint.
-
-    Every rank must enter this collective before training starts, so a load
-    failure on one rank cannot leave the others inside the training loop.
-
-    Args:
-        local_failed: Whether this rank failed to load the checkpoint.
-        rank: Rank of this process. Used to select a CUDA device when
-            ``device`` is omitted.
-        device: Device for the collective flag. Training uses this rank's
-            CUDA device so the flag matches the NCCL process group. Tests
-            pass CPU and use the gloo backend.
-
-    Returns:
-        True if any rank failed to load the checkpoint.
-    """
-    if device is None:
-        device = torch.device("cuda", rank)
-    flag = torch.tensor([int(local_failed)], dtype=torch.int32, device=device)
-    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
-    return bool(flag.item())
-
-
 def _load_resume_checkpoint(
     trainer: DistributedTrainer,
     checkpoint_path: str,
-    rank: int,
     world_size: int,
 ) -> int:
     """Load a resume checkpoint and return the epoch to start from.
 
-    A failed load aborts the run. With more than one rank, every rank enters
-    the failure collective before any rank raises, so one failure cannot leave
-    the others inside the training loop.
+    Rank 0 downloads the shared local file inside ``load_checkpoint``. Every
+    rank then waits so no rank ``torch.load``s a file another rank is still
+    writing. A failed load aborts the run. With more than one rank, every
+    rank enters the failure collective before any rank raises, so one
+    failure cannot leave the others inside the training loop.
 
     Args:
         trainer: Trainer that loads the checkpoint.
         checkpoint_path: Filesystem path of the checkpoint to resume from.
-        rank: Rank of this process.
         world_size: Number of processes in the training job.
 
     Returns:
@@ -468,10 +439,7 @@ def _load_resume_checkpoint(
 
     if world_size > 1:
         try:
-            any_rank_failed = _any_rank_failed_to_load_checkpoint(
-                local_failed=load_error is not None,
-                rank=rank,
-            )
+            any_rank_failed = trainer._any_rank_failed(load_error is not None)
         except Exception as collective_exc:
             if load_error is None:
                 raise RuntimeError(
@@ -693,7 +661,6 @@ def run_training(
             start_epoch = _load_resume_checkpoint(
                 trainer,
                 cfg.resume_checkpoint_path,
-                rank,
                 world_size,
             )
             logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
