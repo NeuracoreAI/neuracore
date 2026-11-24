@@ -15,6 +15,9 @@ class _DiskUsageTestImporter(NeuracoreDatasetImporter):
     def build_work_items(self):
         return [ImportItem(index=0)]
 
+    def item_key(self, item: ImportItem) -> str:
+        return str(item.index)
+
     def import_item(self, item: ImportItem) -> None:
         return None
 

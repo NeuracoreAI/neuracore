@@ -22,6 +22,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError, RobotArchivedError
 from neuracore.core.robot import Robot, list_organization_robots
+from neuracore.core.robot import resolve as resolve_robot
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -162,20 +163,21 @@ def _connect_import_robot(
     overwrite: bool,
     shared: bool,
 ) -> tuple[Robot, bool]:
-    """Connect to the import robot, unarchiving it if the server refuses it.
+    """Resolve the import robot, unarchiving it if the server refuses it.
 
     The importer archives the robots it creates, so importing into the same
-    robot again finds it archived.
+    robot again finds it archived. No robot instance is registered: workers
+    record through an import session instead.
 
     Returns:
-        The connected robot, and whether this call unarchived it.
+        The resolved robot, and whether this call unarchived it.
 
     Raises:
         RobotError: If the robot is archived and cannot be unarchived.
     """
 
     def connect() -> Robot:
-        return nc.connect_robot(
+        return resolve_robot(
             robot_name=robot_name,
             urdf_path=urdf_path,
             mjcf_path=mjcf_path,
@@ -187,7 +189,7 @@ def _connect_import_robot(
         return connect(), False
     except RobotArchivedError:
         logger.info("Robot '%s' is archived; unarchiving it to import.", robot_name)
-        Robot(robot_name=robot_name, instance=0, shared=shared).set_archived(False)
+        Robot(robot_name=robot_name, instance=None, shared=shared).set_archived(False)
         return connect(), True
 
 

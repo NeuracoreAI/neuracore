@@ -95,39 +95,32 @@ def test_rlds_import_item_logs_steps_on_a_microsecond_frequency_grid():
     importer._episode_iter = iter([{"steps": [{"v": 1}, {"v": 2}]}])
     importer.frequency = 30.0
     importer._worker_id = 0
-    importer._instance_base = 0
     importer.num_episodes = 1
     importer.robot_name = "test_robot"
     importer.dry_run = False
     importer.logger = MagicMock()
     importer._emit_progress = MagicMock()
     importer._record_step = MagicMock()
+    importer._start_recording = MagicMock()
+    importer._stop_recording = MagicMock()
+    item = _source_item(0, "train", 0)
 
-    with (
-        patch(
-            "neuracore.importer.rlds_tfds_importer.now_us",
-            return_value=1_000_000_000,
-        ),
-        patch(
-            "neuracore.importer.rlds_tfds_importer.nc.start_recording"
-        ) as start_recording,
-        patch(
-            "neuracore.importer.rlds_tfds_importer.nc.stop_recording"
-        ) as stop_recording,
+    with patch(
+        "neuracore.importer.rlds_tfds_importer.now_us",
+        return_value=1_000_000_000,
     ):
-        importer.import_item(ImportItem(index=0))
+        importer.import_item(item)
 
     step_timestamps = [call.args[1] for call in importer._record_step.call_args_list]
     assert [seconds_to_us(stamp) for stamp in step_timestamps] == [
         1_000_033_333,
         1_000_066_667,
     ]
-    start_recording.assert_called_once_with(
-        robot_name="test_robot",
-        instance=0,
-        timestamp=1_000_000_000 / MICROSECONDS_PER_SECOND,
+    importer._start_recording.assert_called_once_with(
+        item, 1_000_000_000 / MICROSECONDS_PER_SECOND
     )
-    assert seconds_to_us(stop_recording.call_args.kwargs["timestamp"]) == 1_000_100_000
+    stop_timestamp = importer._stop_recording.call_args.args[0]
+    assert seconds_to_us(stop_timestamp) == 1_000_100_000
 
 
 def test_rlds_work_items_are_keyed_by_concrete_split_and_index():

@@ -9,7 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import av
 import numpy as np
@@ -272,22 +272,23 @@ def test_mcap_importer_item_key_of_a_single_file_dataset_is_its_name(
 def test_mcap_importer_import_item_starts_and_stops_recording(
     monkeypatch, tmp_path: Path
 ):
-    calls: list[tuple[str, float]] = []
+    calls: list[tuple[str, object]] = []
 
     monkeypatch.setattr(
         "neuracore.importer.mcap.mcap_importer.now_us",
         lambda: 100_000_000,
     )
-    monkeypatch.setattr(
-        "neuracore.importer.mcap.mcap_importer.nc.start_recording",
-        lambda robot_name, instance, timestamp: calls.append(("start", timestamp)),
-    )
-    monkeypatch.setattr(
-        "neuracore.importer.mcap.mcap_importer.nc.stop_recording",
-        lambda robot_name, instance, wait, timestamp: calls.append(("stop", timestamp)),
-    )
-
     importer = _make_importer(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        importer,
+        "_start_recording",
+        lambda item, timestamp: calls.append(("start", item.index, timestamp)),
+    )
+    monkeypatch.setattr(
+        importer,
+        "_stop_recording",
+        lambda timestamp: calls.append(("stop", timestamp)),
+    )
 
     def _stream_episode_file(*_args, **kwargs):
         assert kwargs["recording_start_us"] == 100_000_000
@@ -297,21 +298,36 @@ def test_mcap_importer_import_item_starts_and_stops_recording(
 
     importer.import_item(importer.build_work_items()[0])
 
-    assert calls == [("start", 100.0), ("stop", 105.0)]
+    assert calls == [("start", 0, 100.0), ("stop", 105.0)]
+
+
+def test_mcap_importer_failed_stream_leaves_the_recording_to_be_cancelled(
+    monkeypatch, tmp_path: Path
+):
+    """The worker cancels a failed episode, so the importer must not stop it."""
+    importer = _make_importer(monkeypatch, tmp_path)
+    monkeypatch.setattr(importer, "_start_recording", lambda item, timestamp: None)
+    stop_recording = MagicMock()
+    monkeypatch.setattr(importer, "_stop_recording", stop_recording)
+
+    def _stream_episode_file(*_args, **_kwargs):
+        raise RuntimeError("corrupt chunk")
+
+    monkeypatch.setattr(importer, "_stream_episode_file", _stream_episode_file)
+
+    with pytest.raises(RuntimeError, match="corrupt chunk"):
+        importer.import_item(importer.build_work_items()[0])
+
+    stop_recording.assert_not_called()
 
 
 def test_mcap_importer_dry_run_skips_recording(monkeypatch, tmp_path: Path):
     def _unexpected(*_args, **_kwargs):
         raise AssertionError("dry-run must not call start/stop recording")
 
-    monkeypatch.setattr(
-        "neuracore.importer.mcap.mcap_importer.nc.start_recording", _unexpected
-    )
-    monkeypatch.setattr(
-        "neuracore.importer.mcap.mcap_importer.nc.stop_recording", _unexpected
-    )
-
     importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(importer, "_start_recording", _unexpected)
+    monkeypatch.setattr(importer, "_stop_recording", _unexpected)
     monkeypatch.setattr(
         importer,
         "_stream_episode_file",
