@@ -31,7 +31,6 @@ from neuracore_types.importer.data_config import (
 from neuracore_types.nc_data import DatasetImportConfig
 from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, now_us
 
-import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import (
     ImportItem,
@@ -84,7 +83,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector target poses
                 for debugging.
-            robot_id: Neuracore robot ID used for instance allocation/cleanup.
+            robot_id: ID of the Neuracore robot the workers record for.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -160,13 +159,12 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             item.index + 1,
             self.num_episodes,
         )
-        if not self.dry_run:
-            nc.start_recording(
-                robot_name=self.robot_name,
-                instance=self.robot_instance(self._worker_id),
-                timestamp=base_us / MICROSECONDS_PER_SECOND,
-            )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
+        if total_steps == 0:
+            # An empty recording would still count as the episode being saved.
+            raise ImportError(f"Episode {episode_id} has no frames.")
+        if not self.dry_run:
+            self._start_recording(item, base_us / MICROSECONDS_PER_SECOND)
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=str(episode_id)
         )
@@ -201,12 +199,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=str(episode_id),
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name,
-                instance=self.robot_instance(self._worker_id),
-                wait=True,
-                timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
-            )
+            self._stop_recording(recording_stop_us / MICROSECONDS_PER_SECOND)
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _convert_v21_to_v30(self) -> None:

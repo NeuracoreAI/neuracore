@@ -27,6 +27,9 @@ class _ConcreteImporter(NeuracoreDatasetImporter):
     def build_work_items(self):
         return []
 
+    def item_key(self, item):
+        return str(item.index)
+
     def import_item(self, item):
         return None
 
@@ -491,7 +494,6 @@ def test_log_transformed_data_logs_end_effector_target_pose(monkeypatch):
     importer.dry_run = False
     importer._worker_id = 0
     importer.dataset_config = SimpleNamespace(robot=SimpleNamespace(name="robot"))
-    importer.robot_instance = MagicMock(return_value=0)
     logged = MagicMock()
     monkeypatch.setattr(
         "neuracore.importer.core.base.nc",
@@ -509,8 +511,6 @@ def test_log_transformed_data_logs_end_effector_target_pose(monkeypatch):
     logged.assert_called_once_with(
         name="left_ee",
         pose=pose,
-        robot_name="robot",
-        instance=0,
         timestamp=1.5,
         dry_run=False,
     )

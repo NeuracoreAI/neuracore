@@ -25,7 +25,6 @@ from neuracore_types.importer.data_config import (
 from neuracore_types.nc_data import DatasetImportConfig
 from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, now_us
 
-import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import (
     ImportItem,
@@ -95,7 +94,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector target poses
                 for debugging.
-            robot_id: Neuracore robot ID used for instance allocation/cleanup.
+            robot_id: ID of the Neuracore robot the workers record for.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -225,11 +224,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         base_us = now_us()
         recording_stop_us = base_us
         if not self.dry_run:
-            nc.start_recording(
-                robot_name=self.robot_name,
-                instance=self.robot_instance(self._worker_id),
-                timestamp=base_us / MICROSECONDS_PER_SECOND,
-            )
+            self._start_recording(item, base_us / MICROSECONDS_PER_SECOND)
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
             if item.split is not None
@@ -268,12 +263,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 episode_label=episode_label,
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name,
-                instance=self.robot_instance(self._worker_id),
-                wait=True,
-                timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
-            )
+            self._stop_recording(recording_stop_us / MICROSECONDS_PER_SECOND)
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 
     def _handle_step_error(
@@ -624,7 +614,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector target poses
                 for debugging.
-            robot_id: Neuracore robot ID used for instance allocation/cleanup.
+            robot_id: ID of the Neuracore robot the workers record for.
         """
         super().__init__(
             input_dataset_name=input_dataset_name,

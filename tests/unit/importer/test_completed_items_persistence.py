@@ -1,10 +1,8 @@
-"""Tests resume file path, keys, loading, and append on NeuracoreDatasetImporter."""
+"""Tests the import state files and the completed file of earlier releases."""
 
 import logging
 import re
 from pathlib import Path
-
-import pytest
 
 from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
 
@@ -18,10 +16,14 @@ class _CompletedItemsTestImporter(NeuracoreDatasetImporter):
         self.logger = logging.getLogger(__name__)
         self.dry_run = False
         self.pre_check = False
-        self.completed_items_file = self._resolve_completed_items_file()
+        self.random_sample = None
+        self.completed_items_file = self._import_state_file("completed", "txt")
 
     def build_work_items(self):
         return [ImportItem(index=0)]
+
+    def item_key(self, item: ImportItem) -> str:
+        return str(item.index)
 
     def import_item(self, item: ImportItem) -> None:
         return None
@@ -37,8 +39,8 @@ class _CompletedItemsTestImporter(NeuracoreDatasetImporter):
         return source
 
 
-def test_resolve_completed_items_file_sanitizes_dataset_id(tmp_path):
-    """Resume path uses a safe filename suffix from the output dataset ID."""
+def test_import_state_file_sanitizes_dataset_id(tmp_path):
+    """State files use a safe filename suffix from the output dataset ID."""
     dataset_id = "my dataset/id:with?chars"
     importer = _CompletedItemsTestImporter(
         dataset_dir=tmp_path,
@@ -46,16 +48,35 @@ def test_resolve_completed_items_file_sanitizes_dataset_id(tmp_path):
     )
 
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset_id)
-    expected = tmp_path / f".neuracore_import_completed_{safe_id}.txt"
-    assert importer._resolve_completed_items_file() == expected
+    expected = tmp_path / f".neuracore_import_session_{safe_id}.json"
+    assert importer._import_state_file("session", "json") == expected
 
 
-def test_item_key_uses_split_and_index(tmp_path):
+def test_import_state_file_of_a_single_file_dataset_sits_beside_it(tmp_path):
+    dataset_file = tmp_path / "episode.mcap"
+    dataset_file.touch()
+    importer = _CompletedItemsTestImporter(dataset_file, "dataset")
+
+    assert importer.completed_items_file.parent == tmp_path
+
+
+def test_legacy_completed_item_key_uses_split_and_index(tmp_path):
     """Keys use split:index; None split is an empty prefix before the colon."""
     importer = _CompletedItemsTestImporter(tmp_path, "dataset")
 
-    assert importer._item_key(ImportItem(index=7, split="train")) == "train:7"
-    assert importer._item_key(ImportItem(index=3, split=None)) == ":3"
+    assert (
+        importer._legacy_completed_item_key(ImportItem(index=7, split="train"))
+        == "train:7"
+    )
+    assert importer._legacy_completed_item_key(ImportItem(index=3)) == ":3"
+
+
+def test_items_completed_by_an_earlier_release_are_not_selected(tmp_path):
+    importer = _CompletedItemsTestImporter(tmp_path, "dataset")
+    importer.completed_items_file.write_text("train:0\ntrain:2\n", encoding="utf-8")
+    items = [ImportItem(index=i, split="train") for i in range(3)]
+
+    assert importer._select_items(items) == [items[1]]
 
 
 def test_load_completed_item_keys_returns_empty_when_file_missing(tmp_path):
@@ -82,39 +103,3 @@ def test_load_completed_item_keys_returns_empty_on_read_error(tmp_path, monkeypa
 
     monkeypatch.setattr(Path, "open", raise_open)
     assert importer._load_completed_item_keys() == set()
-
-
-def test_append_completed_item_keys_writes_lines_and_creates_parent(tmp_path):
-    """Append creates parent dirs and writes one key per line."""
-    nested_root = tmp_path / "nested" / "dataset"
-    importer = _CompletedItemsTestImporter(nested_root, "dataset")
-
-    importer._append_completed_item_keys(["train:1", "val:2"])
-
-    assert importer.completed_items_file.exists()
-    assert (
-        importer.completed_items_file.read_text(encoding="utf-8") == "train:1\nval:2\n"
-    )
-
-
-@pytest.mark.parametrize("dry_run,pre_check", [(True, False), (False, True)])
-def test_append_completed_item_keys_skips_when_disabled_modes(
-    tmp_path, dry_run, pre_check
-):
-    """Dry run and pre-check do not write the resume file."""
-    importer = _CompletedItemsTestImporter(tmp_path, "dataset")
-    importer.dry_run = dry_run
-    importer.pre_check = pre_check
-
-    importer._append_completed_item_keys(["train:1"])
-
-    assert not importer.completed_items_file.exists()
-
-
-def test_append_completed_item_keys_skips_empty_input(tmp_path):
-    """No-op when the key list is empty."""
-    importer = _CompletedItemsTestImporter(tmp_path, "dataset")
-
-    importer._append_completed_item_keys([])
-
-    assert not importer.completed_items_file.exists()

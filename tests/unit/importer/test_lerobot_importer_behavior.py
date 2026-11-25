@@ -119,38 +119,37 @@ def _episode_item(index, episode_id):
     return ImportItem(index=index, metadata={"episode_id": episode_id})
 
 
-def test_lerobot_import_item_step_mode_skips_failing_steps():
-    """LeRobot importer should continue when a step fails in step mode."""
+def _step_importer(worker_id, skip_on_error):
     importer = object.__new__(LeRobotDatasetImporter)
     importer._dataset = object()
     importer.ik_init_config = None
     importer.frequency = 10.0
-    importer._worker_id = 2
+    importer._worker_id = worker_id
     importer.num_episodes = 1
-    importer.skip_on_error = "step"
+    importer.skip_on_error = skip_on_error
     importer.robot_name = "test_robot"
     importer.dry_run = False
     importer.logger = MagicMock()
     importer._error_queue = MagicMock()
     importer._log_worker_error = MagicMock()
     importer._emit_progress = MagicMock()
+    importer._start_recording = MagicMock()
+    importer._stop_recording = MagicMock()
+    return importer
+
+
+def test_lerobot_import_item_step_mode_skips_failing_steps():
+    """LeRobot importer should continue when a step fails in step mode."""
+    importer = _step_importer(worker_id=2, skip_on_error="step")
     importer._iter_episode_steps = MagicMock(
         return_value=(iter([{"v": 1}, {"v": 2}]), 2)
     )
     importer._record_step = MagicMock(side_effect=[ValueError("bad step"), None])
     item = _episode_item(0, 123)
 
-    with (
-        patch(
-            "neuracore.importer.lerobot_importer.now_us",
-            return_value=100_000_000,
-        ),
-        patch(
-            "neuracore.importer.lerobot_importer.nc.start_recording"
-        ) as start_recording,
-        patch(
-            "neuracore.importer.lerobot_importer.nc.stop_recording"
-        ) as stop_recording,
+    with patch(
+        "neuracore.importer.lerobot_importer.now_us",
+        return_value=100_000_000,
     ):
         importer.import_item(item)
 
@@ -173,48 +172,47 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         call(0, step=0, total_steps=2, episode_label="123"),
         call(0, step=2, total_steps=2, episode_label="123"),
     ])
-
-    start_recording.assert_called_once_with(
-        robot_name="test_robot",
-        instance=2,
-        timestamp=100_000_000 / MICROSECONDS_PER_SECOND,
+    importer._start_recording.assert_called_once_with(
+        item, 100_000_000 / MICROSECONDS_PER_SECOND
     )
-
-    stop_recording.assert_called_once()
-    stop_kwargs = stop_recording.call_args.kwargs
-    assert stop_kwargs["robot_name"] == "test_robot"
-    assert stop_kwargs["instance"] == 2
-    assert stop_kwargs["wait"] is True
-    assert stop_kwargs["timestamp"] == 100_300_000 / MICROSECONDS_PER_SECOND
+    importer._stop_recording.assert_called_once_with(
+        100_300_000 / MICROSECONDS_PER_SECOND
+    )
 
 
 def test_lerobot_import_item_non_step_mode_re_raises():
     """LeRobot importer should re-raise step errors when not in step mode."""
-    importer = object.__new__(LeRobotDatasetImporter)
-    importer._dataset = object()
-    importer.ik_init_config = None
-    importer.frequency = 10.0
-    importer._worker_id = 1
-    importer.num_episodes = 1
-    importer.skip_on_error = "episode"
-    importer.robot_name = "test_robot"
-    importer.dry_run = False
-    importer.logger = MagicMock()
-    importer._error_queue = MagicMock()
-    importer._log_worker_error = MagicMock()
-    importer._emit_progress = MagicMock()
+    importer = _step_importer(worker_id=1, skip_on_error="episode")
     importer._iter_episode_steps = MagicMock(return_value=(iter([{"v": 1}]), 1))
     importer._record_step = MagicMock(side_effect=RuntimeError("explode"))
 
-    with (
-        patch("neuracore.importer.lerobot_importer.nc.start_recording"),
-        patch("neuracore.importer.lerobot_importer.nc.stop_recording"),
-    ):
-        with pytest.raises(RuntimeError, match="explode"):
-            importer.import_item(_episode_item(0, 555))
+    with pytest.raises(RuntimeError, match="explode"):
+        importer.import_item(_episode_item(0, 555))
 
     importer._error_queue.put.assert_not_called()
     importer._log_worker_error.assert_not_called()
+    importer._stop_recording.assert_not_called()
+
+
+def test_lerobot_import_item_imports_the_episode_of_a_non_contiguous_item():
+    """Resumed chunks skip saved episodes, so items need not be contiguous."""
+    importer = _step_importer(worker_id=0, skip_on_error="episode")
+    importer._iter_episode_steps = MagicMock(return_value=(iter([{"v": 1}]), 1))
+    importer._record_step = MagicMock()
+
+    importer.import_item(_episode_item(5, 42))
+
+    importer._iter_episode_steps.assert_called_once_with(importer._dataset, 42)
+
+
+def test_lerobot_an_episode_without_frames_fails_before_recording():
+    importer = _step_importer(worker_id=0, skip_on_error="episode")
+    importer._iter_episode_steps = MagicMock(return_value=(iter([]), 0))
+
+    with pytest.raises(ImportError, match="Episode 7 has no frames"):
+        importer.import_item(_episode_item(0, 7))
+
+    importer._start_recording.assert_not_called()
 
 
 def test_lerobot_import_item_requires_initialized_worker_dataset():

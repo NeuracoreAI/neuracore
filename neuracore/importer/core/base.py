@@ -19,6 +19,7 @@ from queue import Empty
 from typing import Any
 
 import numpy as np
+from neuracore_types import IMPORT_SESSION_ITEM_KEY_MAX_LENGTH, ImportSessionItemState
 from neuracore_types.importer.config import (
     ActionSpaceConfig,
     ActionTypeConfig,
@@ -43,7 +44,8 @@ from rich.progress import (
 from scipy.spatial.transform import Rotation as R
 
 import neuracore as nc
-from neuracore.core.robot import JointInfo, Robot
+from neuracore.api.core import _attach_robot
+from neuracore.core.robot import JointInfo
 from neuracore.data_daemon.const import DEFAULT_RECORDING_ROOT_PATH
 from neuracore.importer.core.robot_utils import RobotUtils
 from neuracore.importer.core.validation import (
@@ -63,6 +65,14 @@ from .exceptions import (
     DataValidationWarning,
     ImporterError,
     ImportError,
+)
+from .import_session import (
+    ImportSessionManifest,
+    create_import_session,
+    get_import_session,
+    list_import_session_item_keys,
+    load_import_session_manifest,
+    save_import_session_manifest,
 )
 
 JOINT_TARGET_CHECK_TOLERANCE = 1e-6
@@ -112,7 +122,6 @@ class NeuracoreDatasetImporter(ABC):
     """Importer workflow that manages workers and Neuracore session setup."""
 
     DISK_CHECK_INTERVAL_SECS: float = 10.0
-    _instance_base: int = 0
 
     def __init__(
         self,
@@ -157,7 +166,7 @@ class NeuracoreDatasetImporter(ABC):
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector target poses
                 for debugging.
-            robot_id: Neuracore robot ID used for instance allocation/cleanup.
+            robot_id: ID of the Neuracore robot the workers record for.
         """
         self.dataset_dir = Path(dataset_dir)
         self.dataset_config = dataset_config
@@ -198,54 +207,40 @@ class NeuracoreDatasetImporter(ABC):
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int = -1
-        # Resolved in import_all before workers spawn (collision-safe allocation).
-        self._instance_base: int = 0
+        # Set in import_all before live workers spawn, so it is pickled to them.
+        self._import_session_id: str | None = None
+        self._recording_open = False
         self._error_queue: mp.Queue[WorkerError] | None = None
-        self.completed_items_file = self._resolve_completed_items_file()
+        self.completed_items_file = self._import_state_file("completed", "txt")
+        self.manifest_file = self._import_state_file("session", "json")
 
-    def robot_instance(self, worker_id: int) -> int:
-        """Robot instance for a worker, disjoint from other importer runs."""
-        return self._instance_base + max(0, worker_id)
-
-    def _api_robot(self) -> Robot:
-        """Build a Robot handle for instance list/delete API calls."""
-        if not self.robot_id:
-            raise ImporterError(
-                "robot_id is required for importer robot instance allocation/cleanup."
-            )
-        robot = Robot(self.robot_name, instance=0, shared=self.shared)
-        robot.id = self.robot_id
-        return robot
-
-    def _allocate_instance_base(self) -> None:
-        """Choose a worker instance base above existing instances and a floor."""
-        nc.login()
-        max_existing = self._api_robot().max_instance_id()
-        floor = max(max_existing, 100_000)
-        self._instance_base = random.randrange(floor + 1, floor + 100_000)
-        self.logger.info(
-            "Importer robot instance base=%d (floor=%d, max_existing=%d)",
-            self._instance_base,
-            floor,
-            max_existing,
+    def _start_recording(self, item: ImportItem, timestamp: float) -> None:
+        nc.start_recording(
+            timestamp=timestamp,
+            import_session_id=self._import_session_id,
+            item_key=self.item_key(item),
         )
+        self._recording_open = True
 
-    def _cleanup_worker_instances(self, max_workers_used: int) -> None:
-        """Best-effort delete of this run's worker instances."""
-        if self._instance_base <= 0 or max_workers_used <= 0:
-            return
-        robot = self._api_robot()
-        for instance in range(
-            self._instance_base, self._instance_base + max_workers_used
-        ):
-            try:
-                robot.remove_instance(instance)
-            except Exception as exc:  # noqa: BLE001 - never fail import on cleanup
-                self.logger.warning(
-                    "Failed to remove importer robot instance %s: %s",
-                    instance,
-                    exc,
-                )
+    def _stop_recording(self, timestamp: float) -> None:
+        """Stop the worker's recording, failing the episode if it never reached cloud.
+
+        Without a cloud recording ID the backend rejected or never saw the
+        recording start, so stopping would silently drop the episode. Failing it
+        instead gets the recording cancelled, and a resumed import retries the
+        episode unless the backend already saved it.
+        """
+        if not nc.get_cloud_recording_id():
+            raise ImportError(
+                "Recording was not registered with Neuracore, so the episode was "
+                "cancelled. The episode may already be saved in the import "
+                "session, or the session may no longer exist."
+            )
+        nc.stop_recording(
+            wait=True,
+            timestamp=timestamp,
+        )
+        self._recording_open = False
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -254,6 +249,15 @@ class NeuracoreDatasetImporter(ABC):
     @abstractmethod
     def import_item(self, item: ImportItem) -> None:
         """Perform the dataset-specific import for a single item."""
+
+    @abstractmethod
+    def item_key(self, item: ImportItem) -> str:
+        """Stable key that identifies the item within the source dataset.
+
+        The backend counts each key once towards the import session, and a
+        resumed import skips keys that are already saved, so the key must not
+        change between runs over the same dataset.
+        """
 
     @abstractmethod
     def _record_step(self, step: dict, timestamp: float) -> None:
@@ -867,15 +871,12 @@ class NeuracoreDatasetImporter(ABC):
         timestamp = self._strictly_increasing_timestamp(
             data_type=data_type, name=name, timestamp=timestamp
         )
-        instance = self.robot_instance(self._worker_id)
         if data_type == DataType.RGB_IMAGES:
             nc.log_rgb(
                 name=name,
                 rgb=transformed_data,
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -888,8 +889,6 @@ class NeuracoreDatasetImporter(ABC):
                 depth_scale_m=depth_scale_m,
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -899,8 +898,6 @@ class NeuracoreDatasetImporter(ABC):
                 points=transformed_data,
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -908,8 +905,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_language(
                 name=name,
                 language=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -919,8 +914,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_joint_position(
                 name=name,
                 position=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -928,8 +921,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_joint_velocity(
                 name=name,
                 velocity=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -937,8 +928,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_joint_torque(
                 name=name,
                 torque=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -949,8 +938,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_joint_target_position(
                 name=name,
                 target_position=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -958,8 +945,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_visual_joint_position(
                 name=name,
                 position=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -967,8 +952,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_parallel_gripper_open_amount(
                 name=name,
                 value=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -976,8 +959,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_parallel_gripper_target_open_amount(
                 name=name,
                 value=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -986,8 +967,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_end_effector_pose(
                 name=name,
                 pose=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -995,8 +974,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_end_effector_target_pose(
                 name=name,
                 pose=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -1004,8 +981,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_pose(
                 name=name,
                 pose=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -1013,8 +988,6 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_custom_1d(
                 name=name,
                 data=transformed_data,
-                robot_name=self.dataset_config.robot.name,
-                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -1023,12 +996,11 @@ class NeuracoreDatasetImporter(ABC):
         self, worker_id: int, chunk: Sequence[ImportItem] | None = None
     ) -> None:
         """Log in and connect to Neuracore dataset for the worker."""
+        if not self.robot_id:
+            raise ImporterError("robot_id is required to attach import workers.")
         nc.login()
-        nc.connect_robot(
-            self.robot_name,
-            instance=self.robot_instance(worker_id),
-            shared=self.shared,
-        )
+        nc.stop_live_data()
+        _attach_robot(self.robot_name, self.robot_id, self.shared)
         nc.get_dataset(id=self.output_dataset_id)
         if self.urdf_path is not None:
             urdf_packages_dir = os.path.dirname(self.urdf_path)
@@ -1051,44 +1023,65 @@ class NeuracoreDatasetImporter(ABC):
 
         High-level flow:
         1) Build the list of work items (episodes).
-        2) Dry-run pre-check for errors
-        3) Determine if joint target positions should be skipped
+        2) Select the items to import, or the unsaved items of an earlier import
+           when its manifest exists.
+        3) Dry-run pre-check for errors and decide whether joint target
+           positions should be skipped.
         4) Decide how many worker processes to spawn.
-        5) Spin up workers and a progress queue.
-        6) Listen for progress updates while workers run.
-        7) Collect and summarize any errors.
+        5) Unless dry-running, create the import session for a new import and
+           write its manifest.
+        6) Spin up workers, listen for progress, and summarize any errors.
         """
         items = list(self.build_work_items())
         if not items:
             self.logger.info("No import items found; nothing to do.")
             return
 
-        items = self._select_items(items)
-        if not items:
-            return
+        manifest = None if self.dry_run else self._load_manifest()
+        if manifest is None:
+            items = self._select_items(items)
+            if not items:
+                return
+            self._validate_item_keys(items)
+        else:
+            items = self._unsaved_manifest_items(manifest, items)
+            if not items:
+                return
 
         self.validate_work_items(items)
+        self._run_pre_check(items)
 
-        max_workers_used = 0
-        try:
-            self._allocate_instance_base()
-            # Pre-check always uses 1 worker; raise this before spawning so a
-            # failed allocate-to-precheck gap still cleans that instance range.
-            max_workers_used = 1
-            self._run_pre_check(items)
-
-            worker_count = self._resolve_worker_count(len(items))
-            max_workers_used = max(1, worker_count)
+        worker_count = self._resolve_worker_count(len(items))
+        if self.dry_run:
             self._import_items(items, worker_count)
-        finally:
-            self._cleanup_worker_instances(max_workers_used)
+            return
+
+        if manifest is None:
+            manifest = self._create_import_session(items)
+        self._import_session_id = manifest.import_session_id
+        self._import_items(items, worker_count)
+
+    def _load_manifest(self) -> ImportSessionManifest | None:
+        manifest = load_import_session_manifest(self.manifest_file)
+        if manifest is not None and (
+            manifest.robot_id != self.robot_id
+            or manifest.dataset_id != self.output_dataset_id
+        ):
+            raise ImporterError(
+                f"Import manifest '{self.manifest_file}' belongs to a different "
+                "robot or dataset. Delete it to start a new import."
+            )
+        return manifest
 
     def _select_items(self, items: list[ImportItem]) -> list[ImportItem]:
         original_count = len(items)
+        # Items completed by releases that tracked progress in a local file.
         completed_keys = self._load_completed_item_keys()
         if completed_keys:
             items = [
-                item for item in items if self._item_key(item) not in completed_keys
+                item
+                for item in items
+                if self._legacy_completed_item_key(item) not in completed_keys
             ]
             skipped_count = original_count - len(items)
             if skipped_count > 0:
@@ -1113,8 +1106,101 @@ class NeuracoreDatasetImporter(ABC):
                 n,
                 original_count,
             )
-
         return items
+
+    def _validate_item_keys(self, items: Sequence[ImportItem]) -> None:
+        seen: set[str] = set()
+        for item in items:
+            key = self.item_key(item)
+            if not key or len(key) > IMPORT_SESSION_ITEM_KEY_MAX_LENGTH:
+                raise ImporterError(
+                    f"Item {item.index} has key {key!r}; item keys must be "
+                    f"1 to {IMPORT_SESSION_ITEM_KEY_MAX_LENGTH} characters."
+                )
+            if key in seen:
+                raise ImporterError(
+                    f"More than one item has the key {key!r}; item keys must be "
+                    "unique within the dataset."
+                )
+            seen.add(key)
+
+    def _unsaved_manifest_items(
+        self, manifest: ImportSessionManifest, items: Sequence[ImportItem]
+    ) -> list[ImportItem]:
+        """Return the manifest's items that are neither saved nor uploading.
+
+        The backend is the authority on what is saved, so a recording that
+        failed to upload is imported again, while one that is still uploading
+        is left alone rather than imported twice.
+        """
+        items_by_key = {self.item_key(item): item for item in items}
+        missing = [key for key in manifest.item_keys if key not in items_by_key]
+        if missing:
+            raise ImporterError(
+                f"{len(missing)} item(s) in import manifest '{self.manifest_file}' "
+                f"are no longer in the dataset, such as {missing[0]!r}. Delete "
+                "the manifest to start a new import."
+            )
+
+        session = get_import_session(manifest.import_session_id)
+        if session.is_complete:
+            self.logger.info(
+                "Import session %s is complete: %s of %s episode(s) are saved. "
+                "Delete %s to import the dataset again.",
+                session.id,
+                session.recording_count,
+                session.expected_recording_count,
+                self.manifest_file,
+            )
+            return []
+
+        # In-flight keys are listed first so an upload finishing between the two
+        # requests still appears in the saved keys.
+        done_keys = list_import_session_item_keys(
+            session.id, ImportSessionItemState.IN_FLIGHT
+        )
+        done_keys |= list_import_session_item_keys(
+            session.id, ImportSessionItemState.SAVED
+        )
+        remaining = [
+            items_by_key[key] for key in manifest.item_keys if key not in done_keys
+        ]
+        if not remaining:
+            self.logger.info(
+                "Every episode of import session %s is saved or still "
+                "uploading; nothing to import.",
+                session.id,
+            )
+            return []
+        self.logger.info(
+            "Resuming import session %s: importing %s of %s episode(s).",
+            session.id,
+            len(remaining),
+            len(manifest.item_keys),
+        )
+        return remaining
+
+    def _create_import_session(
+        self, items: Sequence[ImportItem]
+    ) -> ImportSessionManifest:
+        if not self.robot_id:
+            raise ImporterError("robot_id is required to create an import session.")
+        session = create_import_session(
+            robot_id=self.robot_id,
+            dataset_id=self.output_dataset_id,
+            expected_recording_count=len(items),
+        )
+        manifest = ImportSessionManifest(
+            import_session_id=session.id,
+            robot_id=self.robot_id,
+            dataset_id=self.output_dataset_id,
+            item_keys=[self.item_key(item) for item in items],
+        )
+        save_import_session_manifest(self.manifest_file, manifest)
+        self.logger.info(
+            "Created import session %s for %s episode(s).", session.id, len(items)
+        )
+        return manifest
 
     def _run_pre_check(self, items: Sequence[ImportItem]) -> None:
         """Dry-run one item to surface errors before the import starts."""
@@ -1191,7 +1277,6 @@ class NeuracoreDatasetImporter(ABC):
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
         progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
-        completed_queue: mp.Queue[str] = ctx.Queue()
         pause_event = ctx.Event()  # when set, workers pause at next item boundary
         precheck_result_queue: mp.Queue[bool] | None = (
             ctx.Queue() if use_precheck_result_queue else None
@@ -1209,7 +1294,6 @@ class NeuracoreDatasetImporter(ABC):
                     worker_id,
                     error_queue,
                     progress_queue,
-                    completed_queue,
                     ready_barrier,
                     pause_event,
                     precheck_result_queue,
@@ -1218,16 +1302,12 @@ class NeuracoreDatasetImporter(ABC):
             process.start()
             processes.append(process)
 
-        self._monitor_progress(
-            processes, progress_queue, len(items), pause_event, completed_queue
-        )
+        self._monitor_progress(processes, progress_queue, len(items), pause_event)
 
         for process in processes:
             process.join()
         progress_queue.close()
         progress_queue.join_thread()
-        completed_queue.close()
-        completed_queue.join_thread()
 
         return (
             self._collect_errors(error_queue),
@@ -1270,7 +1350,6 @@ class NeuracoreDatasetImporter(ABC):
         worker_id: int,
         error_queue: mp.Queue,
         progress_queue: mp.Queue | None,
-        completed_queue: mp.Queue[str] | None,
         ready_barrier: mp.synchronize.Barrier | None = None,
         pause_event: mp.synchronize.Event | None = None,
         precheck_result_queue: mp.Queue[bool] | None = None,
@@ -1319,14 +1398,7 @@ class NeuracoreDatasetImporter(ABC):
             while pause_event is not None and pause_event.is_set():
                 time.sleep(1)
             try:
-                self._step(
-                    item,
-                    worker_id,
-                    idx,
-                    len(chunk),
-                    error_queue,
-                    completed_queue,
-                )
+                self._step(item, worker_id, idx, len(chunk), error_queue)
             except Exception as exc:  # noqa: BLE001 - keep traceback for summary
                 if error_queue:
                     tb = traceback.format_exc()
@@ -1364,18 +1436,17 @@ class NeuracoreDatasetImporter(ABC):
         local_index: int,
         chunk_length: int,
         error_queue: mp.Queue,
-        completed_queue: mp.Queue[str] | None,
     ) -> None:
         """Centralized step handler for progress and error capture."""
         self._error_queue = error_queue
         try:
             self.import_item(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
-            if not self.dry_run:
-                nc.cancel_recording(
-                    robot_name=self.robot_name,
-                    instance=self.robot_instance(worker_id),
-                )
+            # The handle stays bound to the previous item, whose recording
+            # may already be stopped.
+            if not self.dry_run and self._recording_open:
+                self._recording_open = False
+                nc.cancel_recording()
             tb = traceback.format_exc()
             if self.skip_on_error == "episode":
                 error_queue.put(
@@ -1392,11 +1463,6 @@ class NeuracoreDatasetImporter(ABC):
             self._log_worker_error(worker_id, item.index, str(exc))
             raise
 
-        if completed_queue is not None and not self.dry_run and not self.pre_check:
-            completed_queue.put(self._item_key(item))
-
-        # Progress bar already shows ongoing status; skip per-interval info logs.
-
     def _collect_errors(self, error_queue: mp.Queue) -> list[WorkerError]:
         """Drain the error queue after workers complete."""
         errors: list[WorkerError] = []
@@ -1407,16 +1473,16 @@ class NeuracoreDatasetImporter(ABC):
             pass
         return errors
 
-    def _resolve_completed_items_file(self) -> Path:
-        """Return the file path used to persist completed imports."""
+    def _import_state_file(self, kind: str, extension: str) -> Path:
+        """Return the file beside the dataset that keeps an import's progress."""
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.output_dataset_id)
         base_dir = (
             self.dataset_dir if self.dataset_dir.is_dir() else self.dataset_dir.parent
         )
-        return base_dir / f".neuracore_import_completed_{safe_id}.txt"
+        return base_dir / f".neuracore_import_{kind}_{safe_id}.{extension}"
 
-    def _item_key(self, item: ImportItem) -> str:
-        """Build a stable key for an import item."""
+    def _legacy_completed_item_key(self, item: ImportItem) -> str:
+        """Key that releases before import sessions wrote to the completed file."""
         split = item.split if item.split is not None else ""
         return f"{split}:{item.index}"
 
@@ -1434,21 +1500,6 @@ class NeuracoreDatasetImporter(ABC):
                 exc,
             )
             return set()
-
-    def _append_completed_item_keys(self, keys: Iterable[str]) -> None:
-        """Append completed item keys to disk immediately.
-
-        Used to periodically persist resume state while workers run.
-        """
-        if self.dry_run or self.pre_check:
-            return
-        keys = list(keys)
-        if not keys:
-            return
-        self.completed_items_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.completed_items_file.open("a", encoding="utf-8") as file:
-            for key in keys:
-                file.write(f"{key}\n")
 
     def _report_process_status(
         self, processes: Iterable[mp.context.SpawnProcess]
@@ -1569,13 +1620,11 @@ class NeuracoreDatasetImporter(ABC):
         progress_queue: mp.Queue[ProgressUpdate],
         total_items: int,
         pause_event: mp.synchronize.Event | None = None,
-        completed_queue: mp.Queue[str] | None = None,
     ) -> None:
         """Render a progress bar by aggregating all worker updates.
 
         Workers are paused when disk usage reaches storage_limit until
-        usage drops below it. Completed item keys from completed_queue
-        are appended to the resume file periodically.
+        usage drops below it.
         """
         if not processes:
             return
@@ -1584,18 +1633,6 @@ class NeuracoreDatasetImporter(ABC):
         worker_states: dict[int, ProgressUpdate] = {}
         last_disk_check = 0.0
         workers_paused = False
-
-        def flush_completed_queue() -> None:
-            if completed_queue is None:
-                return
-            batch: list[str] = []
-            try:
-                while True:
-                    batch.append(completed_queue.get_nowait())
-            except Empty:
-                pass
-            if batch:
-                self._append_completed_item_keys(batch)
 
         with Progress(
             SpinnerColumn(style="cyan"),
@@ -1611,8 +1648,6 @@ class NeuracoreDatasetImporter(ABC):
             overall_task = progress.add_task("Importing episodes", total=total_items)
 
             while True:
-                flush_completed_queue()
-
                 now = time.monotonic()
                 if now - last_disk_check >= self.DISK_CHECK_INTERVAL_SECS:
                     last_disk_check = now
@@ -1691,7 +1726,6 @@ class NeuracoreDatasetImporter(ABC):
                             worker_states,
                             update,
                         )
-                    flush_completed_queue()
                     progress.update(overall_task, completed=total_items)
                     return
 

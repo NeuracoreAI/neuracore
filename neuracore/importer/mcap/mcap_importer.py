@@ -14,7 +14,6 @@ from neuracore_types.timestamps import (
     now_us,
 )
 
-import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
 from neuracore.importer.core.exceptions import ImportError
@@ -190,7 +189,6 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             raise ImportError(f"MCAP file not found for item {item.index}.")
 
         label = item.description or file_path.name
-        instance = self.robot_instance(self._worker_id)
         self.logger.info(
             f"Importing MCAP file {label} ({item.index + 1}/{len(self.mcap_files)})"
         )
@@ -199,26 +197,15 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         recording_stop_us = recording_start_us
 
         if not self.dry_run:
-            nc.start_recording(
-                robot_name=self.robot_name,
-                instance=instance,
-                timestamp=recording_start_us / MICROSECONDS_PER_SECOND,
-            )
-        try:
-            message_count, recording_stop_us = self._stream_episode_file(
-                episode_file_path=file_path,
-                item=item,
-                label=label,
-                recording_start_us=recording_start_us,
-            )
-        finally:
-            if not self.dry_run:
-                nc.stop_recording(
-                    robot_name=self.robot_name,
-                    instance=instance,
-                    wait=True,
-                    timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
-                )
+            self._start_recording(item, recording_start_us / MICROSECONDS_PER_SECOND)
+        message_count, recording_stop_us = self._stream_episode_file(
+            episode_file_path=file_path,
+            item=item,
+            label=label,
+            recording_start_us=recording_start_us,
+        )
+        if not self.dry_run:
+            self._stop_recording(recording_stop_us / MICROSECONDS_PER_SECOND)
 
         self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
 
