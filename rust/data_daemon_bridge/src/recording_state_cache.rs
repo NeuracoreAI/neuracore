@@ -66,12 +66,9 @@ const REFRESH_REARM: Duration = Duration::from_secs(1);
 /// giving up early just leaves the entry stale for another interval.
 const REFRESH_TIMEOUT_S: f64 = 0.1;
 
-/// State nested `robot_id -> instance` rather than keyed on a
-/// `(String, i64)` tuple. A tuple key cannot be looked up by borrow, so every
-/// read would allocate a `String` purely to build one — on the log path, which
-/// the joint fast path was rewritten to keep allocation-free. Nesting costs a
-/// second lookup and allocates only when an entry is created.
-type Entries = HashMap<String, HashMap<i64, Entry>>;
+/// Keyed on the caller's own [`Source`], which every caller already holds, so a
+/// read on the log path looks up by reference and allocates nothing.
+type Entries = HashMap<Source, Entry>;
 
 /// Whether `found` is a different recording from `held`, rather than the same
 /// one seen in more detail.
@@ -90,6 +87,7 @@ fn is_other(held: &LiveRecording, found: &LiveRecording) -> bool {
     }
 }
 
+#[derive(Default)]
 struct Entry {
     /// The recording this source has open, or `None` for none.
     open: Option<LiveRecording>,
@@ -131,19 +129,16 @@ static REFRESH: LazyLock<Mutex<RefreshThread>> = LazyLock::new(|| {
 /// refresh. "Nothing has answered yet" reads the same as "not recording", so a
 /// caller gating on this under-enforces for the first refresh rather than
 /// acting on a recording that may not exist.
-pub(crate) fn epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
+pub(crate) fn epoch(source: &Source) -> Option<i64> {
     let (epoch, stale) = {
         let entries = ENTRIES.read().unwrap_or_else(|p| p.into_inner());
-        match entries
-            .get(robot_id)
-            .and_then(|instances| instances.get(&robot_instance))
-        {
+        match entries.get(source) {
             Some(entry) => (entry.open.as_ref().map(|_| entry.epoch), is_stale(entry)),
             None => (None, true),
         }
     };
     if stale {
-        schedule_refresh((robot_id.to_string(), robot_instance));
+        schedule_refresh(source);
     }
     epoch
 }
@@ -170,14 +165,10 @@ pub(crate) fn epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
 /// answers at once, so a plain read never spends the timeout. Re-reading at
 /// [`REFRESH_INTERVAL`] is as often as the entry can change: a waiter's own
 /// reads are what schedule the refreshes that bring the id in.
-pub(crate) fn display(
-    robot_id: &str,
-    robot_instance: i64,
-    timeout_s: f64,
-) -> Option<Option<LiveRecording>> {
+pub(crate) fn display(source: &Source, timeout_s: f64) -> Option<Option<LiveRecording>> {
     let deadline = Instant::now() + bounded_timeout(timeout_s);
     loop {
-        let open = read(robot_id, robot_instance)?;
+        let open = read(source)?;
         let awaiting_id = open
             .as_ref()
             .is_some_and(|recording| recording.recording_id.is_none());
@@ -190,13 +181,10 @@ pub(crate) fn display(
 }
 
 /// One read of the cache, blocking only on the first read for a source.
-fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
+fn read(source: &Source) -> Option<Option<LiveRecording>> {
     let (answered, open, stale) = {
         let entries = ENTRIES.read().unwrap_or_else(|p| p.into_inner());
-        match entries
-            .get(robot_id)
-            .and_then(|instances| instances.get(&robot_instance))
-        {
+        match entries.get(source) {
             Some(entry) => (
                 entry.written_at.is_some(),
                 entry.open.clone(),
@@ -206,7 +194,6 @@ fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
         }
     };
 
-    let source = (robot_id.to_string(), robot_instance);
     if answered {
         if stale {
             schedule_refresh(source);
@@ -217,11 +204,11 @@ fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
     // Nothing has ever answered for this source. Ask on this thread rather than
     // reporting "not recording" for the one read that has no cache to fall back
     // on — the caller cannot tell that apart from a real answer.
-    if !refresh_once(&source) {
+    if !refresh_once(source) {
         return None;
     }
     let entries = ENTRIES.read().unwrap_or_else(|p| p.into_inner());
-    Some(lookup(&entries, &source).and_then(|entry| entry.open.clone()))
+    Some(entries.get(source).and_then(|entry| entry.open.clone()))
 }
 
 /// Record the recording this process just opened for `source`.
@@ -229,9 +216,9 @@ fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
 /// `started_at_us` is `start_recording`'s return value, which is exactly what
 /// the daemon stores as the recording's start — so this entry already agrees
 /// with what a refresh would fetch, bar the ids the daemon has yet to mint.
-pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_us: i64) {
+pub(crate) fn note_local_start(source: &Source, started_at_us: i64) {
     let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-    let entry = entry_mut(&mut entries, robot_id, robot_instance);
+    let entry = entry_mut(&mut entries, source);
     // Unconditional, unlike a refresh: this call *is* a new recording, whatever
     // timestamp it carries, so a caller that reuses one still sees a boundary.
     entry.epoch = entry.epoch.wrapping_add(1);
@@ -245,27 +232,17 @@ pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_u
 }
 
 /// Record that this process just closed `source`'s recording (stop or cancel).
-pub(crate) fn note_local_end(robot_id: &str, robot_instance: i64) {
+pub(crate) fn note_local_end(source: &Source) {
     let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-    let entry = entry_mut(&mut entries, robot_id, robot_instance);
+    let entry = entry_mut(&mut entries, source);
     entry.open = None;
     entry.seq = entry.seq.wrapping_add(1);
     entry.written_at = Some(Instant::now());
 }
 
 /// The entry for a source, created empty if it has none.
-fn entry_mut<'a>(entries: &'a mut Entries, robot_id: &str, robot_instance: i64) -> &'a mut Entry {
-    entries
-        .entry(robot_id.to_string())
-        .or_default()
-        .entry(robot_instance)
-        .or_insert(Entry {
-            open: None,
-            epoch: 0,
-            seq: 0,
-            written_at: None,
-            refresh_scheduled_at: None,
-        })
+fn entry_mut<'a>(entries: &'a mut Entries, source: &Source) -> &'a mut Entry {
+    entries.entry(source.clone()).or_default()
 }
 
 fn is_stale(entry: &Entry) -> bool {
@@ -281,17 +258,17 @@ fn is_stale(entry: &Entry) -> bool {
 ///
 /// Re-checks staleness under the write lock so concurrent logging threads
 /// queue one refresh between them, not one each.
-fn schedule_refresh(source: Source) {
+fn schedule_refresh(source: &Source) {
     {
         let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-        let entry = entry_mut(&mut entries, &source.0, source.1);
+        let entry = entry_mut(&mut entries, source);
         if !is_stale(entry) {
             return;
         }
         entry.refresh_scheduled_at = Some(Instant::now());
     }
     if let Some(tx) = refresh_tx() {
-        let _ = tx.send(source);
+        let _ = tx.send(source.clone());
     }
 }
 
@@ -339,11 +316,10 @@ fn refresh_loop(rx: Receiver<Source>) {
 fn refresh_once(source: &Source) -> bool {
     let seq_before = {
         let entries = ENTRIES.read().unwrap_or_else(|p| p.into_inner());
-        lookup(&entries, source).map(|entry| entry.seq).unwrap_or(0)
+        entries.get(source).map(|entry| entry.seq).unwrap_or(0)
     };
     let query = RecordingStateQuery {
-        robot_id: source.0.clone(),
-        robot_instance: source.1,
+        source: source.clone(),
     };
     let Ok(bytes) = query.encode() else {
         clear_scheduled(source);
@@ -361,23 +337,17 @@ fn refresh_once(source: &Source) -> bool {
             false
         }
         Err(error) => {
-            tracing::debug!(%error, robot_id = source.0, "recording-state refresh failed");
+            tracing::debug!(%error, %source, "recording-state refresh failed");
             clear_scheduled(source);
             false
         }
     }
 }
 
-fn lookup<'a>(entries: &'a Entries, source: &Source) -> Option<&'a Entry> {
-    entries
-        .get(&source.0)
-        .and_then(|by_instance| by_instance.get(&source.1))
-}
-
 fn apply_refresh(source: &Source, seq_before: u64, found: Option<LiveRecording>) {
     let left = {
         let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-        let entry = entry_mut(&mut entries, &source.0, source.1);
+        let entry = entry_mut(&mut entries, source);
         entry.refresh_scheduled_at = None;
         if entry.seq != seq_before {
             // A local start or stop landed while this answer was in flight; it
@@ -395,7 +365,7 @@ fn apply_refresh(source: &Source, seq_before: u64, found: Option<LiveRecording>)
     };
     if left {
         // Outside the lock: every logging thread takes it per frame.
-        crate::writer::flush_source_detached(&source.0, source.1);
+        crate::writer::flush_source_detached(source);
     }
 }
 
@@ -430,10 +400,8 @@ fn left_a_recording(held: Option<&LiveRecording>, found: Option<&LiveRecording>)
 
 fn clear_scheduled(source: &Source) {
     let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-    if let Some(by_instance) = entries.get_mut(&source.0) {
-        if let Some(entry) = by_instance.get_mut(&source.1) {
-            entry.refresh_scheduled_at = None;
-        }
+    if let Some(entry) = entries.get_mut(source) {
+        entry.refresh_scheduled_at = None;
     }
 }
 
@@ -443,12 +411,12 @@ mod tests {
 
     /// This state is process-global, so every test uses its own source.
     fn source(name: &str) -> Source {
-        (name.to_string(), 0)
+        Source::robot_instance(name, 0)
     }
 
     fn seq_of(source: &Source) -> u64 {
         let entries = ENTRIES.read().unwrap();
-        lookup(&entries, source).map(|entry| entry.seq).unwrap_or(0)
+        entries.get(source).map(|entry| entry.seq).unwrap_or(0)
     }
 
     fn opened(recording_index: Option<i64>, started_at_us: i64) -> Option<LiveRecording> {
@@ -475,11 +443,12 @@ mod tests {
     fn a_locally_started_recording_is_known_without_asking_the_daemon() {
         // The whole point of seeding from `start_recording`: no daemon runs in
         // this test, and a read still has to answer.
-        note_local_start("boundary-local-start", 0, 4_200);
-        assert!(epoch("boundary-local-start", 0).is_some());
+        let source = source("boundary-local-start");
+        note_local_start(&source, 4_200);
+        assert!(epoch(&source).is_some());
 
-        note_local_end("boundary-local-start", 0);
-        assert_eq!(epoch("boundary-local-start", 0), None);
+        note_local_end(&source);
+        assert_eq!(epoch(&source), None);
     }
 
     #[test]
@@ -489,15 +458,15 @@ mod tests {
         // epoch for both would carry the first's timeline into the second and
         // refuse its opening frames.
         let source = source("boundary-repeated-start");
-        note_local_start(&source.0, source.1, 7_000);
-        let first = epoch(&source.0, source.1);
+        note_local_start(&source, 7_000);
+        let first = epoch(&source);
 
-        note_local_end(&source.0, source.1);
-        note_local_start(&source.0, source.1, 7_000);
+        note_local_end(&source);
+        note_local_start(&source, 7_000);
 
         assert!(first.is_some());
         assert_ne!(
-            epoch(&source.0, source.1),
+            epoch(&source),
             first,
             "a second recording is a second timeline, whatever its clock says"
         );
@@ -510,12 +479,12 @@ mod tests {
         // recording already held. Treating that as a new recording would clear
         // the timeline mid-recording and let a backwards timestamp through.
         let source = source("boundary-index-learned");
-        note_local_start(&source.0, source.1, 9_000);
-        let before = epoch(&source.0, source.1);
+        note_local_start(&source, 9_000);
+        let before = epoch(&source);
 
         apply_refresh(&source, seq_of(&source), opened(Some(42), 9_000));
 
-        assert_eq!(epoch(&source.0, source.1), before);
+        assert_eq!(epoch(&source), before);
     }
 
     #[test]
@@ -525,7 +494,7 @@ mod tests {
         // recording for exactly the same reason the index must not.
         let source = source("boundary-cloud-id-learned");
         apply_refresh(&source, seq_of(&source), opened(Some(3), 5_000));
-        let before = epoch(&source.0, source.1);
+        let before = epoch(&source);
 
         apply_refresh(
             &source,
@@ -533,7 +502,7 @@ mod tests {
             opened_with_id(Some(3), 5_000, "cloud-1"),
         );
 
-        assert_eq!(epoch(&source.0, source.1), before);
+        assert_eq!(epoch(&source), before);
     }
 
     #[test]
@@ -548,7 +517,7 @@ mod tests {
             opened_with_id(Some(9), 1_500, "cloud-9"),
         );
 
-        let shown = display(&source.0, source.1, 0.0).expect("the entry has been answered for");
+        let shown = display(&source, 0.0).expect("the entry has been answered for");
         assert_eq!(
             shown.and_then(|recording| recording.recording_id),
             Some("cloud-9".to_string())
@@ -561,10 +530,10 @@ mod tests {
         // needs it waits here rather than polling from Python — and the wait
         // still has to end for a recording that never gets one.
         let source = source("state-cloud-id-wait");
-        note_local_start(&source.0, source.1, 3_000);
+        note_local_start(&source, 3_000);
 
         let started = Instant::now();
-        let shown = display(&source.0, source.1, 0.05).expect("the entry has been answered for");
+        let shown = display(&source, 0.05).expect("the entry has been answered for");
 
         assert!(started.elapsed() >= Duration::from_millis(50));
         assert_eq!(shown.and_then(|recording| recording.recording_id), None);
@@ -574,10 +543,10 @@ mod tests {
     fn a_local_stop_displays_as_not_recording() {
         // `Some(None)` is a real answer and must stay distinct from `None`.
         let source = source("state-local-stop");
-        note_local_start(&source.0, source.1, 2_000);
-        note_local_end(&source.0, source.1);
+        note_local_start(&source, 2_000);
+        note_local_end(&source);
 
-        assert_eq!(display(&source.0, source.1, 0.0), Some(None));
+        assert_eq!(display(&source, 0.0), Some(None));
     }
 
     #[test]
@@ -588,7 +557,7 @@ mod tests {
         let source = source("state-never-answered");
 
         assert_eq!(
-            display(&source.0, source.1, 0.0),
+            display(&source, 0.0),
             None,
             "silence is unknown, never 'not recording'"
         );
@@ -599,14 +568,14 @@ mod tests {
         // The daemon's answer can be older than it looks: it is fetched off the
         // log path, and a stop published meanwhile is the newer truth.
         let source = source("boundary-stale-refresh");
-        note_local_start(&source.0, source.1, 1_000);
+        note_local_start(&source, 1_000);
         let seq_at_query = seq_of(&source);
 
-        note_local_end(&source.0, source.1);
+        note_local_end(&source);
         apply_refresh(&source, seq_at_query, opened(None, 1_000));
 
         assert_eq!(
-            epoch(&source.0, source.1),
+            epoch(&source),
             None,
             "the stop stands; the in-flight answer is discarded"
         );
@@ -617,22 +586,22 @@ mod tests {
         // A recording opened from the web or another process reaches this one
         // only here — nothing local ever wrote it.
         let source = source("boundary-remote-start");
-        assert_eq!(epoch(&source.0, source.1), None);
+        assert_eq!(epoch(&source), None);
 
         apply_refresh(&source, seq_of(&source), opened(Some(7), 7_700));
 
-        assert!(epoch(&source.0, source.1).is_some());
+        assert!(epoch(&source).is_some());
     }
 
     #[test]
     fn a_refresh_onto_a_different_recording_is_a_boundary() {
         let source = source("boundary-remote-boundary");
         apply_refresh(&source, seq_of(&source), opened(Some(1), 100));
-        let first = epoch(&source.0, source.1);
+        let first = epoch(&source);
 
         apply_refresh(&source, seq_of(&source), opened(Some(2), 200));
 
-        assert_ne!(epoch(&source.0, source.1), first);
+        assert_ne!(epoch(&source), first);
     }
 
     #[test]
@@ -667,11 +636,11 @@ mod tests {
     #[test]
     fn a_fresh_entry_is_not_refreshed_again() {
         let source = source("boundary-staleness");
-        note_local_start(&source.0, source.1, 1);
+        note_local_start(&source, 1);
 
         let entries = ENTRIES.read().unwrap();
         assert!(
-            !is_stale(lookup(&entries, &source).unwrap()),
+            !is_stale(entries.get(&source).unwrap()),
             "a just-written entry must not schedule a refresh"
         );
     }

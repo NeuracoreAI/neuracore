@@ -3,11 +3,12 @@
 //! The producer spools NUT chunks into a recording-independent inbox under the
 //! daemon's recordings root. The path helpers here mirror the daemon's
 //! `storage::paths` / `config::env` byte-for-byte so the daemon finds exactly
-//! what the producer wrote, and the `stream_key` helpers key the in-progress
-//! video-chunk registry by `(source, sensor)`.
+//! what the producer wrote.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+
+use data_daemon_shared::Source;
 
 /// Spool directory name — must match `storage::paths::SPOOL_DIRNAME` on the
 /// daemon side.
@@ -37,33 +38,6 @@ pub(crate) fn recordings_root() -> Result<&'static Path, &'static str> {
     }
 }
 
-/// Composite registry key for one `(source, sensor)` video stream. The NUL
-/// separators cannot occur in any component, so the join is unambiguous.
-pub(crate) fn stream_key(
-    robot_id: &str,
-    robot_instance: i64,
-    data_type: &str,
-    sensor_name: &str,
-) -> String {
-    format!("{robot_id}\u{0}{robot_instance}\u{0}{data_type}\u{0}{sensor_name}")
-}
-
-/// Prefix matching every video stream belonging to a source.
-pub(crate) fn source_prefix(robot_id: &str, robot_instance: i64) -> String {
-    format!("{robot_id}\u{0}{robot_instance}\u{0}")
-}
-
-/// Split a `stream_key` back into `(robot_id, robot_instance, data_type,
-/// sensor_name)`. An unparseable instance reads as `0`.
-pub(crate) fn split_stream_key(key: &str) -> (String, i64, String, String) {
-    let mut parts = key.splitn(4, '\u{0}');
-    let robot_id = parts.next().unwrap_or("").to_string();
-    let robot_instance = parts.next().unwrap_or("").parse().unwrap_or(0);
-    let data_type = parts.next().unwrap_or("").to_string();
-    let sensor_name = parts.next().unwrap_or("").to_string();
-    (robot_id, robot_instance, data_type, sensor_name)
-}
-
 /// Build the spool directory for a `(source, sensor)` stream, or `None` if the
 /// recordings root is unresolved. Mirrors `storage::paths::spool_dir` on the
 /// daemon side; the two must agree byte-for-byte so the daemon finds exactly
@@ -74,16 +48,10 @@ pub(crate) fn split_stream_key(key: &str) -> (String, i64, String, String) {
 /// returns `Option` rather than `.expect()`-ing, because a writer-thread panic
 /// would silently kill the thread (no more frames, no error surfaced) instead
 /// of being logged and recovered from.
-pub(crate) fn spool_dir(
-    robot_id: &str,
-    robot_instance: i64,
-    data_type: &str,
-    sensor_name: &str,
-) -> Option<PathBuf> {
+pub(crate) fn spool_dir(source: &Source, data_type: &str, sensor_name: &str) -> Option<PathBuf> {
     recordings_root().ok().map(|root| {
         root.join(SPOOL_DIRNAME)
-            .join(robot_id)
-            .join(robot_instance.to_string())
+            .join(source.spool_subdir())
             .join(data_type)
             .join(sensor_name)
     })

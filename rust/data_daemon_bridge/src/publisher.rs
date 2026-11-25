@@ -48,7 +48,7 @@ use data_daemon_shared::service_name::{
     MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION,
     VERSION_MAX_PAYLOAD_BYTES,
 };
-use data_daemon_shared::{microseconds_to_seconds, BatchedDataItem, Envelope};
+use data_daemon_shared::{microseconds_to_seconds, BatchedDataItem, Envelope, Source};
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::client::Client;
 use iceoryx2::port::publisher::Publisher;
@@ -125,8 +125,7 @@ pub(crate) enum PublishMsg {
     /// `BatchedData`. Serialisation happens on the publisher thread, off the
     /// caller.
     Joint {
-        robot_id: String,
-        robot_instance: i64,
+        source: Source,
         data_type: String,
         /// Joint names joined by `\0` (split + zipped with `values` here, off
         /// the caller's GIL-held path).
@@ -137,8 +136,7 @@ pub(crate) enum PublishMsg {
     },
     /// One JSON sample to publish as a `Data` envelope.
     Json {
-        robot_id: String,
-        robot_instance: i64,
+        source: Source,
         data_type: String,
         sensor_name: String,
         payload: Vec<u8>,
@@ -257,8 +255,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
     while let Ok(msg) = rx.recv() {
         let result = match msg {
             PublishMsg::Joint {
-                robot_id,
-                robot_instance,
+                source,
                 data_type,
                 joined_names,
                 values,
@@ -282,8 +279,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                     }
                 }
                 publish(&Envelope::BatchedData {
-                    robot_id,
-                    robot_instance,
+                    source,
                     data_type,
                     publish_timestamp_ns,
                     timestamp_us,
@@ -291,16 +287,14 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 })
             }
             PublishMsg::Json {
-                robot_id,
-                robot_instance,
+                source,
                 data_type,
                 sensor_name,
                 payload,
                 timestamp_us,
                 publish_timestamp_ns,
             } => publish(&Envelope::Data {
-                robot_id,
-                robot_instance,
+                source,
                 data_type,
                 sensor_name: Some(sensor_name),
                 publish_timestamp_ns,

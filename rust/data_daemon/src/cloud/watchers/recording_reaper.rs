@@ -142,6 +142,7 @@ async fn reclaim(
 mod tests {
     use super::*;
     use crate::state::RecordingTimestamp;
+    use data_daemon_shared::Source;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -158,10 +159,9 @@ mod tests {
         (store, dir)
     }
 
-    fn new_recording(instance: i64) -> NewRecording<'static> {
+    fn new_recording(source: &Source) -> NewRecording<'_> {
         NewRecording {
-            robot_id: Some("robot-1"),
-            robot_instance: Some(instance),
+            source: Some(source),
             dataset_id: Some("ds-1"),
             start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
         }
@@ -182,7 +182,7 @@ mod tests {
     /// has not yet been acknowledged by the backend.
     async fn seed_stopped_unreported(store: &SqliteStateStore, instance: i64) -> i64 {
         let index = store
-            .create_recording(new_recording(instance))
+            .create_recording(new_recording(&Source::robot_instance("robot-1", instance)))
             .await
             .unwrap()
             .recording_index;
@@ -257,7 +257,7 @@ mod tests {
     /// reaper is the single owner of removing its files.
     async fn seed_reclaimable_cancelled(store: &SqliteStateStore, instance: i64) -> i64 {
         let index = store
-            .create_recording(new_recording(instance))
+            .create_recording(new_recording(&Source::robot_instance("robot-1", instance)))
             .await
             .unwrap()
             .recording_index;
@@ -323,7 +323,7 @@ mod tests {
         let root_dir = TempDir::new().unwrap();
         let root = Arc::new(root_dir.path().to_path_buf());
         let index = store
-            .create_recording(new_recording(0))
+            .create_recording(new_recording(&Source::robot_instance("robot-1", 0)))
             .await
             .unwrap()
             .recording_index;

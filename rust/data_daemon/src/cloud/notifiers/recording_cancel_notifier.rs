@@ -90,6 +90,7 @@ pub fn spawn_recording_cancel_notifier(
 mod tests {
     use super::*;
     use crate::state::RecordingTimestamp;
+    use data_daemon_shared::Source;
 
     use std::time::Duration;
 
@@ -126,8 +127,7 @@ mod tests {
     ) -> i64 {
         let row = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
@@ -227,8 +227,7 @@ mod tests {
         // Cancelled first, with no cloud id yet — the start POST is in flight.
         let row = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
@@ -303,8 +302,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let row = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
@@ -538,8 +536,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let row = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
@@ -607,8 +604,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let row = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })
@@ -654,8 +650,7 @@ mod tests {
         // A recording that was cancelled before /start was ever notified.
         let row = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(0),
                 ..NewRecording::default()
             })

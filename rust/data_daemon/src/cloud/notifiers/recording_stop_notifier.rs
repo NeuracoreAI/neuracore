@@ -89,6 +89,7 @@ pub fn spawn_recording_stop_notifier(
 mod tests {
     use super::*;
     use crate::state::RecordingTimestamp;
+    use data_daemon_shared::Source;
 
     use std::time::Duration;
 
@@ -127,8 +128,7 @@ mod tests {
     async fn seed_notified_recording(store: &SqliteStateStore, recording_id: &str) -> i64 {
         let index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 dataset_id: Some("ds-1"),
                 start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })
@@ -455,8 +455,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let index = store
             .create_recording(NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
                 ..NewRecording::default()
             })

@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use data_daemon_shared::Source;
+
 /// Filename for the JSON-array trace data, written by both scalar traces and
 /// the video-trace sidecar. Matches `video_trace.py::TRACE_FILE` and the
 /// scalar `JsonTrace` writer's default.
@@ -36,22 +38,20 @@ pub const CHUNKS_DIRNAME: &str = "chunks";
 pub const SPOOL_DIRNAME: &str = ".rgb_spool";
 
 /// Resolve the producer's video spool directory for a `(source, sensor)`
-/// stream: `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
+/// stream: `{recordings_root}/.rgb_spool/{source spool subdir}/{data_type}/{sensor_name}/`.
 ///
 /// Both producer and daemon agree on this layout so the daemon can find and
 /// relink the producer's spooled NUTs. `sensor_name` is omitted from the path
 /// when absent.
 pub fn spool_dir(
     recordings_root: &Path,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &Source,
     data_type: &str,
     sensor_name: Option<&str>,
 ) -> PathBuf {
     let mut dir = recordings_root
         .join(SPOOL_DIRNAME)
-        .join(robot_id)
-        .join(robot_instance.to_string())
+        .join(source.spool_subdir())
         .join(data_type);
     if let Some(sensor_name) = sensor_name {
         dir = dir.join(sensor_name);
@@ -76,21 +76,14 @@ pub fn spool_chunk_filename(publish_ns: i64, thread_id: i64) -> String {
 /// Resolve the full spool path for one spooled chunk.
 pub fn spool_chunk_path(
     recordings_root: &Path,
-    robot_id: &str,
-    robot_instance: i64,
+    source: &Source,
     data_type: &str,
     sensor_name: Option<&str>,
     publish_ns: i64,
     thread_id: i64,
 ) -> PathBuf {
-    spool_dir(
-        recordings_root,
-        robot_id,
-        robot_instance,
-        data_type,
-        sensor_name,
-    )
-    .join(spool_chunk_filename(publish_ns, thread_id))
+    spool_dir(recordings_root, source, data_type, sensor_name)
+        .join(spool_chunk_filename(publish_ns, thread_id))
 }
 
 /// Resolve the top-level spool directory, whose stale chunks are reclaimed on daemon start.
@@ -274,7 +267,14 @@ mod tests {
     #[test]
     fn spool_chunk_path_lives_under_the_spool_dir() {
         let root = Path::new("/var/data/recordings");
-        let path = spool_chunk_path(root, "robot-1", 0, "RGB_IMAGES", Some("camera_0"), 150, 7);
+        let path = spool_chunk_path(
+            root,
+            &Source::robot_instance("robot-1", 0),
+            "RGB_IMAGES",
+            Some("camera_0"),
+            150,
+            7,
+        );
         assert_eq!(
             path,
             PathBuf::from(

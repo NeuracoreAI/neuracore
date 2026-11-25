@@ -188,17 +188,9 @@ pub struct DispatcherContext {
 pub struct RecordingState(Arc<DashMap<Source, AnnouncedRecording>>);
 
 impl RecordingState {
-    /// What `(robot_id, robot_instance)` currently has open, if anything.
-    pub async fn live(
-        &self,
-        store: &SqliteStateStore,
-        robot_id: &str,
-        robot_instance: i64,
-    ) -> Option<LiveRecording> {
-        let announced = self
-            .0
-            .get(&(robot_id.to_string(), robot_instance))
-            .map(|entry| entry.clone())?;
+    /// What `source` currently has open, if anything.
+    pub async fn live(&self, store: &SqliteStateStore, source: &Source) -> Option<LiveRecording> {
+        let announced = self.0.get(source).map(|entry| entry.clone())?;
         let recording_id = match (announced.recording_id, announced.recording_index) {
             (Some(recording_id), _) => Some(recording_id),
             (None, Some(recording_index)) => stored_recording_id(store, recording_index).await,
@@ -576,14 +568,12 @@ impl Dispatcher {
     async fn handle_inbound(&mut self, envelope: Envelope, recv_at: Instant) {
         match envelope {
             Envelope::StartRecording {
-                robot_id,
-                robot_instance,
+                source,
                 dataset_id,
                 publish_timestamp_ns,
                 timestamp_us,
                 ..
             } => {
-                let source = (robot_id, robot_instance);
                 self.announce_recording(
                     source.clone(),
                     dataset_id,
@@ -599,39 +589,28 @@ impl Dispatcher {
                     .await;
             }
             Envelope::StopRecording {
-                robot_id,
-                robot_instance,
+                source,
                 publish_timestamp_ns,
                 timestamp_us,
                 tags,
             } => {
-                self.handle_stop(
-                    (robot_id, robot_instance),
-                    publish_timestamp_ns,
-                    timestamp_us,
-                    &tags,
-                    recv_at,
-                )
-                .await;
-            }
-            Envelope::CancelRecording {
-                robot_id,
-                robot_instance,
-                timestamp_us,
-            } => {
-                self.handle_cancel((robot_id, robot_instance), timestamp_us)
+                self.handle_stop(source, publish_timestamp_ns, timestamp_us, &tags, recv_at)
                     .await;
             }
+            Envelope::CancelRecording {
+                source,
+                timestamp_us,
+            } => {
+                self.handle_cancel(source, timestamp_us).await;
+            }
             Envelope::Data {
-                robot_id,
-                robot_instance,
+                source,
                 data_type,
                 sensor_name,
                 publish_timestamp_ns,
                 timestamp_us,
                 payload,
             } => {
-                let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -646,14 +625,12 @@ impl Dispatcher {
                 });
             }
             Envelope::BatchedData {
-                robot_id,
-                robot_instance,
+                source,
                 data_type,
                 publish_timestamp_ns,
                 timestamp_us,
                 items,
             } => {
-                let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -667,8 +644,7 @@ impl Dispatcher {
                 });
             }
             Envelope::VideoChunkReady {
-                robot_id,
-                robot_instance,
+                source,
                 data_type,
                 sensor_name,
                 publish_timestamp_ns,
@@ -683,7 +659,6 @@ impl Dispatcher {
                 dtype,
                 frame_publish_offsets_us,
             } => {
-                let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -706,12 +681,10 @@ impl Dispatcher {
                 });
             }
             Envelope::SourceFlushed {
-                robot_id,
-                robot_instance,
+                source,
                 publish_timestamp_ns,
                 producer_pid,
             } => {
-                let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
                 self.held.push_back(Held {
                     source,
@@ -721,12 +694,10 @@ impl Dispatcher {
                 });
             }
             Envelope::VideoProducerActive {
-                robot_id,
-                robot_instance,
+                source,
                 publish_timestamp_ns,
                 producer_pid,
             } => {
-                let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
                 // Held for the same reason data is: the claim rides the
                 // producer's port, `StartRecording` the calling thread's.
@@ -794,7 +765,7 @@ impl Dispatcher {
             {
                 tracing::debug!(
                     recording_id,
-                    robot_id = source.0,
+                    %source,
                     "recording already known here; ignoring duplicate start"
                 );
                 return;
@@ -808,7 +779,7 @@ impl Dispatcher {
             start_timestamp_us: timestamp_us,
             recording_index: None,
         };
-        tracing::debug!(robot_id = source.0, "recording announced");
+        tracing::debug!(%source, "recording announced");
         self.announced.0.insert(source, announced);
     }
 
@@ -829,8 +800,7 @@ impl Dispatcher {
             .store
             .recording_index_for_known_recording(
                 recording_id,
-                &source.0,
-                source.1,
+                source,
                 start_timestamp_us,
                 ECHO_START_TOLERANCE_US,
             )
@@ -843,7 +813,7 @@ impl Dispatcher {
                 tracing::warn!(
                     %error,
                     recording_id,
-                    robot_id = source.0,
+                    %source,
                     "failed to check for an existing recording; ignoring the start"
                 );
                 true
@@ -901,19 +871,18 @@ impl Dispatcher {
         // gets as `start_time`, stored beside the start's publish time; the
         // window opens on the *publish* clock below.
         let new = NewRecording {
-            robot_id: Some(&source.0),
-            robot_instance: Some(source.1),
+            source: Some(&source),
             dataset_id: announced.dataset_id.as_deref(),
             start: caller_timestamp(announced.open_at_ns, announced.start_timestamp_us),
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
             Err(error) => {
-                tracing::warn!(%error, robot_id = source.0, "failed to create recording row");
+                tracing::warn!(%error, %source, "failed to create recording row");
                 return;
             }
         };
-        tracing::info!(recording_index, robot_id = source.0, "recording started");
+        tracing::info!(recording_index, %source, "recording started");
         if let Some(mut announcement) = self.announced.0.get_mut(&source) {
             announcement.recording_index = Some(recording_index);
         }
@@ -1025,7 +994,7 @@ impl Dispatcher {
                 start_timestamp_us,
             } => {
                 self.announce_recording(
-                    (robot_id, robot_instance),
+                    Source::robot_instance(robot_id, robot_instance),
                     dataset_id,
                     Some(recording_id),
                     start_timestamp_ns,
@@ -1047,7 +1016,7 @@ impl Dispatcher {
                 };
                 tracing::info!(
                     recording_id,
-                    robot_id = source.0,
+                    %source,
                     "closing a recording the backend reported stopped"
                 );
                 // Clock skew can put the backend's end where no window closes.
@@ -1118,7 +1087,7 @@ impl Dispatcher {
             let Some(live_start) = live_start else {
                 tracing::info!(
                     recording_id,
-                    robot_id = source.0,
+                    %source,
                     "dropping the announcement of a recording that stopped while \
                      disconnected from the backend's recording notifications"
                 );
@@ -1127,7 +1096,7 @@ impl Dispatcher {
             };
             tracing::warn!(
                 recording_id,
-                robot_id = source.0,
+                %source,
                 "closing recording {recording_id}: it stopped while this daemon was \
                  disconnected from the backend's recording notifications"
             );
@@ -1183,7 +1152,7 @@ impl Dispatcher {
         self.announced.0.remove(&source);
 
         let Some(entry) = self.windows.get_mut(&source) else {
-            tracing::debug!(robot_id = source.0, "stop for unknown source; ignoring");
+            tracing::debug!(%source, "stop for unknown source; ignoring");
             return;
         };
         entry.last_seen = Some(recv_at);
@@ -1251,7 +1220,7 @@ impl Dispatcher {
             window.awaiting_flush = true;
             window.flushed_producers.clear();
             tracing::warn!(
-                robot_id = source.0,
+                %source,
                 recording_index,
                 "stop arrived after a later recording started; refining the retired recording's stop"
             );
@@ -1276,7 +1245,7 @@ impl Dispatcher {
             recording_index
         } else {
             tracing::debug!(
-                robot_id = source.0,
+                %source,
                 publish_timestamp_ns,
                 "stop does not belong to any retained recording window; ignoring"
             );
@@ -1309,7 +1278,7 @@ impl Dispatcher {
             return;
         };
         let Some(window) = entry.live.take() else {
-            tracing::debug!(robot_id = source.0, "cancel with no live window; ignoring");
+            tracing::debug!(%source, "cancel with no live window; ignoring");
             return;
         };
         let cancelled_from_ns = window.started_at_ns;
@@ -1526,7 +1495,7 @@ impl Dispatcher {
         if window.awaiting_flush && !window.flush_markers_settled() {
             tracing::warn!(
                 recording_index = window.recording_index,
-                robot_id = source.0,
+                %source,
                 elapsed_s = elapsed.as_secs_f64(),
                 outstanding_producers = window
                     .video_producers
@@ -1574,7 +1543,7 @@ impl Dispatcher {
             .collect();
         for source in stale {
             tracing::warn!(
-                robot_id = source.0,
+                %source,
                 "source idle past reap horizon; force-closing window"
             );
             let Some(entry) = self.windows.get_mut(&source) else {
@@ -1835,8 +1804,7 @@ impl Dispatcher {
         // spool filename and the window routing below.
         let spool_nut = paths::spool_chunk_path(
             recordings_root.as_path(),
-            &source.0,
-            source.1,
+            source,
             &data_type,
             sensor_name.as_deref(),
             publish_ts,
@@ -2233,8 +2201,7 @@ mod tests {
     /// `publish_timestamp_ns`.
     fn start_timed(robot: &str, publish_timestamp_ns: i64, timestamp_us: i64) -> Envelope {
         Envelope::StartRecording {
-            robot_id: robot.into(),
-            robot_instance: 0,
+            source: Source::robot_instance(robot, 0),
             robot_name: None,
             dataset_id: None,
             dataset_name: None,
@@ -2245,8 +2212,7 @@ mod tests {
 
     fn stop(robot: &str, publish_timestamp_ns: i64) -> Envelope {
         Envelope::StopRecording {
-            robot_id: robot.into(),
-            robot_instance: 0,
+            source: Source::robot_instance(robot, 0),
             publish_timestamp_ns,
             timestamp_us: publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND,
             tags: Vec::new(),
@@ -2257,8 +2223,7 @@ mod tests {
     /// this source's just-stopped window.
     fn source_flushed(robot: &str, publish_timestamp_ns: i64, producer_pid: u32) -> Envelope {
         Envelope::SourceFlushed {
-            robot_id: robot.into(),
-            robot_instance: 0,
+            source: Source::robot_instance(robot, 0),
             publish_timestamp_ns,
             producer_pid,
         }
@@ -2268,8 +2233,7 @@ mod tests {
     /// (decoupled) capture timestamp.
     fn datum_full(robot: &str, publish_ts: i64, capture_us: i64, value: i64) -> Envelope {
         Envelope::Data {
-            robot_id: robot.into(),
-            robot_instance: 0,
+            source: Source::robot_instance(robot, 0),
             data_type: "joints".into(),
             sensor_name: Some("waist".into()),
             publish_timestamp_ns: publish_ts,
@@ -2399,7 +2363,10 @@ mod tests {
             .expect("dispatcher shut down in time");
 
         // Exactly one recording (index 1) with one written trace.
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let recording_index = recordings[0].recording_index;
         let traces = store
@@ -2443,7 +2410,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2);
         let first = recordings[0].recording_index;
         let second = recordings[1].recording_index;
@@ -2516,7 +2486,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2);
         let recording_a = &recordings[0];
         let recording_b = &recordings[1];
@@ -2741,7 +2714,7 @@ mod tests {
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store, context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let entry = dispatcher.windows.entry(source.clone()).or_default();
         for (recording_index, started_at_ns) in [(1, 100), (2, 200)] {
             let mut window = test_window(recording_index, started_at_ns);
@@ -2870,8 +2843,7 @@ mod tests {
         publish_offsets_us: &[u32],
     ) -> Envelope {
         Envelope::VideoChunkReady {
-            robot_id: robot.into(),
-            robot_instance: 0,
+            source: Source::robot_instance(robot, 0),
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_0".into()),
             publish_timestamp_ns: publish_ts,
@@ -2893,8 +2865,7 @@ mod tests {
     fn spool_placeholder_nut(recordings_root: &std::path::Path, publish_ts: i64, thread_id: i64) {
         let path = paths::spool_chunk_path(
             recordings_root,
-            "robot-1",
-            0,
+            &Source::robot_instance("robot-1", 0),
             "RGB_IMAGES",
             Some("camera_0"),
             publish_ts,
@@ -2932,7 +2903,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let traces = store
             .list_traces_for_recording(recordings[0].recording_index)
@@ -2946,8 +2920,7 @@ mod tests {
         );
         let spool_path = paths::spool_chunk_path(
             &recordings_root,
-            "robot-1",
-            0,
+            &Source::robot_instance("robot-1", 0),
             "RGB_IMAGES",
             Some("camera_0"),
             publish_ts,
@@ -2970,7 +2943,7 @@ mod tests {
         let context = test_context(recordings_root.clone(), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         // The chunk opens inside the window and its frames run past the stop.
         let stop_ns = 150 + 25 * 1_000;
@@ -3015,7 +2988,7 @@ mod tests {
         let context = test_context(recordings_root.clone(), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         let stop_ns = 150 + 25 * 1_000;
         dispatcher
@@ -3045,8 +3018,7 @@ mod tests {
         assert_eq!(dispatcher.orphan_drops, 1);
         let spool_path = paths::spool_chunk_path(
             &recordings_root,
-            "robot-1",
-            0,
+            &Source::robot_instance("robot-1", 0),
             "RGB_IMAGES",
             Some("camera_0"),
             publish_ts,
@@ -3084,7 +3056,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let traces = store
             .list_traces_for_recording(recordings[0].recording_index)
@@ -3125,7 +3100,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let traces = store
             .list_traces_for_recording(recordings[0].recording_index)
@@ -3155,7 +3133,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert!(recordings.is_empty(), "no recording should be created");
     }
 
@@ -3186,8 +3167,7 @@ mod tests {
         // producer has gone.
         let row = store
             .create_recording(crate::state::NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(100),
                 ..crate::state::NewRecording::default()
             })
@@ -3290,8 +3270,7 @@ mod tests {
         let (store, dir) = open_store().await;
         let row = store
             .create_recording(crate::state::NewRecording {
-                robot_id: Some("robot-1"),
-                robot_instance: Some(0),
+                source: Some(&Source::robot_instance("robot-1", 0)),
                 start: RecordingTimestamp::observed_at(100),
                 ..crate::state::NewRecording::default()
             })
@@ -3430,8 +3409,7 @@ mod tests {
         tx.send(start("robot-1", 100)).await.unwrap();
         tx.send(datum("robot-1", 110, 1)).await.unwrap();
         tx.send(Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
-            robot_instance: 0,
+            source: Source::robot_instance("robot-1", 0),
             timestamp_us: 120,
         })
         .await
@@ -3442,7 +3420,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         assert!(recordings[0].cancelled_at.is_some());
         assert!(
@@ -3476,8 +3457,7 @@ mod tests {
             .await
             .unwrap();
         tx.send(Envelope::StopRecording {
-            robot_id: "robot-1".into(),
-            robot_instance: 0,
+            source: Source::robot_instance("robot-1", 0),
             publish_timestamp_ns: PUBLISH_STOP_NS,
             timestamp_us: CALLER_STOP_US,
             tags: Vec::new(),
@@ -3490,7 +3470,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let recording = &recordings[0];
         assert_eq!(recording.start_timestamp_us, Some(CALLER_START_US));
@@ -3512,8 +3495,7 @@ mod tests {
             .await
             .unwrap();
         tx.send(Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
-            robot_instance: 0,
+            source: Source::robot_instance("robot-1", 0),
             timestamp_us: CALLER_STOP_US,
         })
         .await
@@ -3525,7 +3507,10 @@ mod tests {
             .expect("dispatcher shut down in time");
         let finished_at_ns = Utc::now().timestamp_nanos_opt().unwrap();
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let recording = &recordings[0];
         assert_eq!(recording.stop_timestamp_us, Some(CALLER_STOP_US));
@@ -3566,7 +3551,7 @@ mod tests {
             .await;
 
         assert!(store
-            .recordings_for_source("robot-9", 0)
+            .recordings_for_source(&Source::robot_instance("robot-9", 0))
             .await
             .unwrap()
             .is_empty());
@@ -3596,11 +3581,14 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         assert_eq!(recordings[0].recording_id, Some("rec-a".to_string()));
         assert_eq!(
-            dispatcher.windows[&("robot-1".to_string(), 0)]
+            dispatcher.windows[&Source::robot_instance("robot-1", 0)]
                 .live
                 .as_ref()
                 .unwrap()
@@ -3635,7 +3623,7 @@ mod tests {
         let (store, dir) = open_store().await;
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let now = Instant::now();
         open_announced(&mut dispatcher, now).await;
 
@@ -3645,7 +3633,10 @@ mod tests {
 
         assert!(dispatcher.windows[&source].live.is_none());
         assert!(dispatcher.announced.0.get(&source).is_none());
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert!(recordings[0].stopped_at.is_some(), "the stop is persisted");
     }
 
@@ -3655,7 +3646,7 @@ mod tests {
         let (store, dir) = open_store().await;
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let now = Instant::now();
         open_announced(&mut dispatcher, now).await;
 
@@ -3670,7 +3661,10 @@ mod tests {
             .await;
 
         assert!(dispatcher.windows[&source].live.is_none());
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert!(recordings[0].stopped_at.is_some(), "the stop is persisted");
     }
 
@@ -3687,7 +3681,7 @@ mod tests {
             .handle_recording_command(snapshot(&["rec-a"]), now)
             .await;
 
-        assert!(dispatcher.windows[&("robot-1".to_string(), 0)]
+        assert!(dispatcher.windows[&Source::robot_instance("robot-1", 0)]
             .live
             .is_some());
     }
@@ -3705,7 +3699,7 @@ mod tests {
             .handle_recording_command(snapshot(&[]), now)
             .await;
 
-        assert!(dispatcher.windows[&("robot-1".to_string(), 0)]
+        assert!(dispatcher.windows[&Source::robot_instance("robot-1", 0)]
             .live
             .is_some());
     }
@@ -3733,7 +3727,7 @@ mod tests {
 
         assert!(dispatcher.announced.0.is_empty());
         assert!(store
-            .recordings_for_source("robot-1", 0)
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
             .await
             .unwrap()
             .is_empty());
@@ -3769,9 +3763,12 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(2))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1, "the replay opened a second recording");
-        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        let entry = &dispatcher.windows[&Source::robot_instance("robot-1", 0)];
         assert!(
             entry.closing.is_empty(),
             "the replay retired the live window"
@@ -3804,7 +3801,7 @@ mod tests {
             .await;
 
         let live = recording_state
-            .live(&store, "robot-1", 0)
+            .live(&store, &Source::robot_instance("robot-1", 0))
             .await
             .expect("the recording the backend announced");
         assert_eq!(live.recording_id, Some("rec-a".to_string()));
@@ -3821,7 +3818,7 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
         let live = recording_state
-            .live(&store, "robot-1", 0)
+            .live(&store, &Source::robot_instance("robot-1", 0))
             .await
             .expect("still open");
         assert!(live.recording_index.is_some());
@@ -3829,7 +3826,10 @@ mod tests {
 
         dispatcher.handle_inbound(stop("robot-1", 120), now).await;
         assert!(
-            recording_state.live(&store, "robot-1", 0).await.is_none(),
+            recording_state
+                .live(&store, &Source::robot_instance("robot-1", 0))
+                .await
+                .is_none(),
             "a stopped recording is not open"
         );
     }
@@ -3854,7 +3854,7 @@ mod tests {
             .handle_inbound(start("robot-1", 100), Instant::now())
             .await;
         let live = recording_state
-            .live(&store, "robot-1", 0)
+            .live(&store, &Source::robot_instance("robot-1", 0))
             .await
             .expect("the recording started here");
         assert_eq!(live.recording_id, None);
@@ -3865,7 +3865,7 @@ mod tests {
             .await
             .unwrap();
         let live = recording_state
-            .live(&store, "robot-1", 0)
+            .live(&store, &Source::robot_instance("robot-1", 0))
             .await
             .expect("still open");
         assert_eq!(live.recording_id, Some("rec-a".to_string()));
@@ -3899,7 +3899,10 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1, "the echo opened a second recording");
         assert_eq!(
             recordings[0].recording_id, None,
@@ -3924,8 +3927,7 @@ mod tests {
         dispatcher
             .handle_inbound(
                 Envelope::CancelRecording {
-                    robot_id: "robot-1".into(),
-                    robot_instance: 0,
+                    source: Source::robot_instance("robot-1", 0),
                     timestamp_us: 211,
                 },
                 now,
@@ -3941,7 +3943,10 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2, "the echo opened a third recording");
         assert!(recordings[1].cancelled_at.is_some());
     }
@@ -3967,7 +3972,10 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1, "the echo opened a second recording");
     }
 
@@ -3993,7 +4001,7 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        let entry = &dispatcher.windows[&Source::robot_instance("robot-1", 0)];
         assert_eq!(
             entry.closing[0].stopped_at_ns,
             Some(200),
@@ -4024,7 +4032,7 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        let entry = &dispatcher.windows[&Source::robot_instance("robot-1", 0)];
         assert_eq!(
             entry.live.as_ref().unwrap().started_at_ns,
             5_000_000,
@@ -4058,7 +4066,7 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        let entry = &dispatcher.windows[&Source::robot_instance("robot-1", 0)];
         assert_eq!(entry.closing[0].stopped_at_ns, Some(3_000_000_000));
         assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 3_000_000_000);
     }
@@ -4084,7 +4092,10 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2);
         assert_eq!(recordings[1].recording_id, Some("rec-b".to_string()));
     }
@@ -4100,7 +4111,11 @@ mod tests {
 
         let now = Instant::now();
         dispatcher.handle_inbound(start("robot-1", 100), now).await;
-        let first = store.recordings_for_source("robot-1", 0).await.unwrap()[0].recording_index;
+        let first = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap()[0]
+            .recording_index;
         store
             .mark_recording_start_notified(first, "rec-a")
             .await
@@ -4116,7 +4131,10 @@ mod tests {
             .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2);
         assert_eq!(recordings[1].recording_id, Some("rec-b".to_string()));
     }
@@ -4138,8 +4156,11 @@ mod tests {
 
         let now = Instant::now();
         dispatcher.handle_inbound(start("robot-1", 100), now).await;
-        let recording_index =
-            store.recordings_for_source("robot-1", 0).await.unwrap()[0].recording_index;
+        let recording_index = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap()[0]
+            .recording_index;
         store
             .mark_recording_start_notified(recording_index, "rec-a")
             .await
@@ -4156,12 +4177,18 @@ mod tests {
             )
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert!(
             recordings[0].stopped_at.is_some(),
             "the stop left it running"
         );
-        assert!(recording_state.live(&store, "robot-1", 0).await.is_none());
+        assert!(recording_state
+            .live(&store, &Source::robot_instance("robot-1", 0))
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -4198,7 +4225,10 @@ mod tests {
             .release_due_holdback(released + dispatcher.holdback + Duration::from_millis(1))
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings[0].stop_publish_timestamp_ns, Some(150));
         assert_eq!(dispatcher.orphan_drops, 1);
     }
@@ -4233,7 +4263,10 @@ mod tests {
                 )
                 .await;
 
-            let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+            let recordings = store
+                .recordings_for_source(&Source::robot_instance("robot-1", 0))
+                .await
+                .unwrap();
             assert_eq!(
                 recordings[0].stop_publish_timestamp_ns,
                 Some(200),
@@ -4277,7 +4310,10 @@ mod tests {
             )
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2);
         assert!(recordings[0].stopped_at.is_some(), "A was stopped locally");
         assert!(
@@ -4285,7 +4321,7 @@ mod tests {
             "B must survive a stop naming its predecessor"
         );
         assert!(
-            dispatcher.windows[&("robot-1".to_string(), 0)]
+            dispatcher.windows[&Source::robot_instance("robot-1", 0)]
                 .live
                 .is_some(),
             "B's window must still be live"
@@ -4323,7 +4359,10 @@ mod tests {
             )
             .await;
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(
             recordings[0].stop_timestamp_us,
             Some(STOP_NS / NANOSECONDS_PER_MICROSECOND)
@@ -4352,8 +4391,7 @@ mod tests {
         tx.send(start("robot-1", 130)).await.unwrap();
         tx.send(datum("robot-1", 140, 2)).await.unwrap();
         tx.send(Envelope::CancelRecording {
-            robot_id: "robot-1".into(),
-            robot_instance: 0,
+            source: Source::robot_instance("robot-1", 0),
             timestamp_us: 150,
         })
         .await
@@ -4364,7 +4402,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 2);
         assert!(
             recordings[0].cancelled_at.is_none() && recordings[0].stopped_at.is_some(),
@@ -4401,7 +4442,7 @@ mod tests {
             },
         );
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4421,7 +4462,10 @@ mod tests {
             "the reaped window keeps an open upper bound for stragglers"
         );
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         assert!(
             recordings[0].stopped_at.is_some(),
@@ -4449,7 +4493,7 @@ mod tests {
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4480,8 +4524,7 @@ mod tests {
         dispatcher
             .handle_inbound(
                 Envelope::StopRecording {
-                    robot_id: "robot-1".into(),
-                    robot_instance: 0,
+                    source: Source::robot_instance("robot-1", 0),
                     publish_timestamp_ns: 200,
                     timestamp_us: 0,
                     tags: vec!["good-run".into()],
@@ -4508,7 +4551,7 @@ mod tests {
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4550,7 +4593,7 @@ mod tests {
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4596,7 +4639,7 @@ mod tests {
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4622,8 +4665,7 @@ mod tests {
     /// A producer's claim that it is logging video, before any chunk sealed.
     fn video_producer_active(robot: &str, publish_ts: i64, producer_pid: u32) -> Envelope {
         Envelope::VideoProducerActive {
-            robot_id: robot.into(),
-            robot_instance: 0,
+            source: Source::robot_instance(robot, 0),
             publish_timestamp_ns: publish_ts,
             producer_pid,
         }
@@ -4641,7 +4683,7 @@ mod tests {
         let context = test_context(recordings_root.clone(), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4712,7 +4754,7 @@ mod tests {
         let context = test_context(dir.path().join("recordings"), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4749,7 +4791,7 @@ mod tests {
         let context = test_context(recordings_root.clone(), store.clone());
         let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
 
-        let source = ("robot-1".to_string(), 0);
+        let source = Source::robot_instance("robot-1", 0);
         let opened_at = Instant::now();
         dispatcher
             .handle_inbound(start("robot-1", 100), opened_at)
@@ -4832,7 +4874,10 @@ mod tests {
             .await
             .expect("dispatcher shut down in time");
 
-        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let recordings = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
         assert_eq!(recordings.len(), 1);
         let traces = store
             .list_traces_for_recording(recordings[0].recording_index)
