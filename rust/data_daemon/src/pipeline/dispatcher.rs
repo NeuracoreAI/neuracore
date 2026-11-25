@@ -2135,7 +2135,7 @@ mod tests {
     use super::*;
     use crate::cloud::ConfigRefreshRequest;
     use crate::encoding::video_encoder::VideoEncoder;
-    use crate::state::{SqliteStateStore, TraceWriteStatus};
+    use crate::state::{ImportItem, RecordingRow, SqliteStateStore, TraceWriteStatus};
     use crate::storage::budget::{StorageBudget, StoragePolicy};
     use crate::storage::paths::TracePath;
     use std::path::PathBuf;
@@ -2232,8 +2232,17 @@ mod tests {
     /// A datum published at `publish_ts` with `capture_us` as its own
     /// (decoupled) capture timestamp.
     fn datum_full(robot: &str, publish_ts: i64, capture_us: i64, value: i64) -> Envelope {
+        datum_from(
+            Source::robot_instance(robot, 0),
+            publish_ts,
+            capture_us,
+            value,
+        )
+    }
+
+    fn datum_from(source: Source, publish_ts: i64, capture_us: i64, value: i64) -> Envelope {
         Envelope::Data {
-            source: Source::robot_instance(robot, 0),
+            source,
             data_type: "joints".into(),
             sensor_name: Some("waist".into()),
             publish_timestamp_ns: publish_ts,
@@ -3382,6 +3391,224 @@ mod tests {
         assert!(
             !matches!(sub.try_recv(), Ok(DaemonEvent::RecordingCancelled { .. })),
             "an unknown recording id must not cancel anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_imports_and_a_live_robot_keep_separate_recordings() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        let saved = Source::import_item("robot-1", "session-1", "episode-0");
+        let cancelled = Source::import_item("robot-1", "session-1", "episode-1");
+        let live = Source::robot_instance("robot-1", 0);
+        let start_of = |source: &Source, publish_timestamp_ns: i64| Envelope::StartRecording {
+            source: source.clone(),
+            robot_name: None,
+            dataset_id: Some("ds-1".into()),
+            dataset_name: None,
+            publish_timestamp_ns,
+            timestamp_us: publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND,
+        };
+        let datum_of = |source: &Source, publish_ts: i64, value: i64| {
+            datum_from(
+                source.clone(),
+                publish_ts,
+                publish_ts / NANOSECONDS_PER_MICROSECOND,
+                value,
+            )
+        };
+
+        tx.send(start_of(&saved, 100)).await.unwrap();
+        tx.send(start_of(&live, 105)).await.unwrap();
+        tx.send(start_of(&cancelled, 110)).await.unwrap();
+        for index in 0..3i64 {
+            tx.send(datum_of(&saved, 120 + index, index)).await.unwrap();
+            tx.send(datum_of(&cancelled, 120 + index, 50 + index))
+                .await
+                .unwrap();
+            tx.send(datum_of(&live, 120 + index, 100 + index))
+                .await
+                .unwrap();
+        }
+        tx.send(Envelope::CancelRecording {
+            source: cancelled.clone(),
+            timestamp_us: 150,
+        })
+        .await
+        .unwrap();
+        tx.send(Envelope::StopRecording {
+            source: saved.clone(),
+            publish_timestamp_ns: 200,
+            timestamp_us: 200 / NANOSECONDS_PER_MICROSECOND,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+        tx.send(Envelope::StopRecording {
+            source: live.clone(),
+            publish_timestamp_ns: 210,
+            timestamp_us: 210 / NANOSECONDS_PER_MICROSECOND,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let only_recording = |rows: Vec<RecordingRow>| {
+            assert_eq!(rows.len(), 1);
+            rows.into_iter().next().unwrap()
+        };
+        let saved_row = only_recording(store.recordings_for_source(&saved).await.unwrap());
+        let cancelled_row = only_recording(store.recordings_for_source(&cancelled).await.unwrap());
+        let live_row = only_recording(store.recordings_for_source(&live).await.unwrap());
+
+        assert_eq!(saved_row.robot_instance, None);
+        assert_eq!(
+            saved_row.import_item,
+            Some(ImportItem {
+                import_session_id: "session-1".into(),
+                item_key: "episode-0".into(),
+            })
+        );
+        assert!(saved_row.cancelled_at.is_none());
+        assert_eq!(cancelled_row.robot_instance, None);
+        assert_eq!(
+            cancelled_row.import_item,
+            Some(ImportItem {
+                import_session_id: "session-1".into(),
+                item_key: "episode-1".into(),
+            })
+        );
+        assert!(cancelled_row.cancelled_at.is_some());
+        assert_eq!(live_row.robot_instance, Some(0));
+        assert_eq!(live_row.import_item, None);
+        assert!(live_row.cancelled_at.is_none());
+
+        let trace_json = |recording_index: i64| {
+            let store = store.clone();
+            let root = context.recordings_root.clone();
+            async move {
+                let traces = store
+                    .list_traces_for_recording(recording_index)
+                    .await
+                    .unwrap();
+                assert_eq!(traces.len(), 1);
+                assert_eq!(traces[0].write_status, TraceWriteStatus::Written);
+                let trace_dir = TracePath::new(
+                    recording_index.to_string(),
+                    "joints",
+                    traces[0].trace_id.clone(),
+                )
+                .directory(root.as_path());
+                let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+        assert_eq!(
+            trace_json(saved_row.recording_index).await,
+            serde_json::json!([{"i": 0}, {"i": 1}, {"i": 2}])
+        );
+        assert_eq!(
+            trace_json(live_row.recording_index).await,
+            serde_json::json!([{"i": 100}, {"i": 101}, {"i": 102}])
+        );
+    }
+
+    #[tokio::test]
+    async fn two_import_sessions_on_one_robot_keep_their_data_and_lifecycles_apart() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        // The same item key in two sessions: only the session tells them apart.
+        let first = Source::import_item("robot-1", "session-1", "episode-0");
+        let second = Source::import_item("robot-1", "session-2", "episode-0");
+        for (source, publish_timestamp_ns) in [(&first, 100), (&second, 105)] {
+            tx.send(Envelope::StartRecording {
+                source: source.clone(),
+                robot_name: None,
+                dataset_id: Some("ds-1".into()),
+                dataset_name: None,
+                publish_timestamp_ns,
+                timestamp_us: publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND,
+            })
+            .await
+            .unwrap();
+        }
+        for index in 0..3i64 {
+            let publish_ts = 120 + index;
+            let capture_us = publish_ts / NANOSECONDS_PER_MICROSECOND;
+            tx.send(datum_from(first.clone(), publish_ts, capture_us, index))
+                .await
+                .unwrap();
+            tx.send(datum_from(
+                second.clone(),
+                publish_ts,
+                capture_us,
+                50 + index,
+            ))
+            .await
+            .unwrap();
+        }
+        tx.send(Envelope::CancelRecording {
+            source: second.clone(),
+            timestamp_us: 150,
+        })
+        .await
+        .unwrap();
+        tx.send(Envelope::StopRecording {
+            source: first.clone(),
+            publish_timestamp_ns: 200,
+            timestamp_us: 200 / NANOSECONDS_PER_MICROSECOND,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let only_recording = |rows: Vec<RecordingRow>| {
+            assert_eq!(rows.len(), 1);
+            rows.into_iter().next().unwrap()
+        };
+        let first_row = only_recording(store.recordings_for_source(&first).await.unwrap());
+        let second_row = only_recording(store.recordings_for_source(&second).await.unwrap());
+        assert_ne!(first_row.recording_index, second_row.recording_index);
+
+        assert!(first_row.cancelled_at.is_none());
+        assert_eq!(first_row.stop_publish_timestamp_ns, Some(200));
+        assert!(second_row.cancelled_at.is_some());
+        assert_ne!(second_row.stop_publish_timestamp_ns, Some(200));
+
+        let traces = store
+            .list_traces_for_recording(first_row.recording_index)
+            .await
+            .unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].write_status, TraceWriteStatus::Written);
+        let trace_dir = TracePath::new(
+            first_row.recording_index.to_string(),
+            "joints",
+            traces[0].trace_id.clone(),
+        )
+        .directory(context.recordings_root.as_path());
+        let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!([{"i": 0}, {"i": 1}, {"i": 2}])
         );
     }
 

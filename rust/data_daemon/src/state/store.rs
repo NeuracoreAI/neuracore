@@ -100,6 +100,38 @@ pub struct NewRecording<'a> {
     pub start: RecordingTimestamp,
 }
 
+/// The `recordings` columns that identify a source. An import item has no
+/// robot instance, and a robot instance has no import item.
+struct SourceColumns<'a> {
+    robot_id: &'a str,
+    robot_instance: Option<i64>,
+    import_session_id: Option<&'a str>,
+    item_key: Option<&'a str>,
+}
+
+impl<'a> SourceColumns<'a> {
+    fn of(source: &'a Source) -> Self {
+        match source {
+            Source::RobotInstance { robot_id, instance } => Self {
+                robot_id,
+                robot_instance: Some(*instance),
+                import_session_id: None,
+                item_key: None,
+            },
+            Source::ImportSession {
+                robot_id,
+                import_session_id,
+                item_key,
+            } => Self {
+                robot_id,
+                robot_instance: None,
+                import_session_id: Some(import_session_id),
+                item_key: Some(item_key),
+            },
+        }
+    }
+}
+
 /// Persistence interface for daemon state.
 ///
 /// Covers the operations the dispatcher, per-trace actors, and cloud
@@ -816,26 +848,29 @@ impl StateStore for SqliteStateStore {
         &self,
         new: NewRecording<'_>,
     ) -> Result<RecordingRow, StateStoreError> {
-        let (robot_id, robot_instance) = match new.source {
-            Some(Source::RobotInstance { robot_id, instance }) => (Some(robot_id), Some(*instance)),
-            None => (None, None),
-        };
+        let columns = new.source.map(SourceColumns::of);
         let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         let result = sqlx::query(
             "INSERT INTO recordings ( \
                  robot_id, robot_instance, dataset_id, \
                  start_timestamp_us, start_publish_timestamp_ns, \
-                 created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6)",
+                 created_at, last_updated, import_session_id, item_key \
+             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6, ?8, ?9)",
         )
-        .bind(robot_id)
-        .bind(robot_instance)
+        .bind(columns.as_ref().map(|columns| columns.robot_id))
+        .bind(columns.as_ref().and_then(|columns| columns.robot_instance))
         .bind(new.dataset_id)
         .bind(new.start.timestamp_us)
         .bind(new.start.publish_timestamp_ns)
         .bind(now)
         .bind(NANOSECONDS_PER_MICROSECOND)
+        .bind(
+            columns
+                .as_ref()
+                .and_then(|columns| columns.import_session_id),
+        )
+        .bind(columns.as_ref().and_then(|columns| columns.item_key))
         .execute(&mut *tx)
         .await?;
 
@@ -865,14 +900,17 @@ impl StateStore for SqliteStateStore {
         &self,
         source: &Source,
     ) -> Result<Vec<RecordingRow>, StateStoreError> {
-        let Source::RobotInstance { robot_id, instance } = source;
+        let columns = SourceColumns::of(source);
         let rows = sqlx::query(
             "SELECT * FROM recordings \
-              WHERE robot_id = ?1 AND robot_instance = ?2 \
+              WHERE robot_id = ?1 AND robot_instance IS ?2 \
+                AND import_session_id IS ?3 AND item_key IS ?4 \
            ORDER BY recording_index ASC",
         )
-        .bind(robot_id)
-        .bind(instance)
+        .bind(columns.robot_id)
+        .bind(columns.robot_instance)
+        .bind(columns.import_session_id)
+        .bind(columns.item_key)
         .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
@@ -925,18 +963,21 @@ impl StateStore for SqliteStateStore {
         start_timestamp_us: i64,
         tolerance_us: u64,
     ) -> Result<Option<i64>, StateStoreError> {
-        let Source::RobotInstance { robot_id, instance } = source;
+        let columns = SourceColumns::of(source);
         let recording_index = sqlx::query_scalar::<_, i64>(
             "SELECT recording_index FROM recordings \
               WHERE recording_id = ?1 \
                  OR (recording_id IS NULL \
-                     AND robot_id = ?2 AND robot_instance = ?3 \
-                     AND ABS(start_timestamp_us - ?4) <= ?5) \
+                     AND robot_id = ?2 AND robot_instance IS ?3 \
+                     AND import_session_id IS ?4 AND item_key IS ?5 \
+                     AND ABS(start_timestamp_us - ?6) <= ?7) \
               LIMIT 1",
         )
         .bind(recording_id)
-        .bind(robot_id)
-        .bind(instance)
+        .bind(columns.robot_id)
+        .bind(columns.robot_instance)
+        .bind(columns.import_session_id)
+        .bind(columns.item_key)
         .bind(start_timestamp_us)
         .bind(i64::try_from(tolerance_us).unwrap_or(i64::MAX))
         .fetch_optional(&self.read_pool)
@@ -1787,6 +1828,7 @@ impl StateStore for SqliteStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ImportItem;
     use tempfile::TempDir;
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -2019,6 +2061,104 @@ mod tests {
             .unwrap();
         let indices: Vec<i64> = rows.iter().map(|row| row.recording_index).collect();
         assert_eq!(indices, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn an_import_item_keeps_its_source_across_a_reopen() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("state.db");
+        let store = SqliteStateStore::open(&db_path).await.expect("open store");
+        let item = Source::import_item("robot-1", "session-1", "episode-0");
+        let item_index = store
+            .create_recording(NewRecording {
+                source: Some(&item),
+                dataset_id: Some("ds-1"),
+                start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
+            })
+            .await
+            .expect("create_recording")
+            .recording_index;
+        let robot_index = seed_recording(&store, 0).await;
+        store.close().await;
+
+        let reopened = SqliteStateStore::open(&db_path).await.expect("reopen");
+        let pending = reopened.recordings_pending_start_notify().await.unwrap();
+        let pending_item = pending
+            .iter()
+            .find(|row| row.recording_index == item_index)
+            .expect("the import is still pending its start notify");
+        assert_eq!(pending_item.robot_instance, None);
+        assert_eq!(
+            pending_item.import_item,
+            Some(ImportItem {
+                import_session_id: "session-1".into(),
+                item_key: "episode-0".into(),
+            })
+        );
+        let pending_robot = pending
+            .iter()
+            .find(|row| row.recording_index == robot_index)
+            .expect("the robot recording is still pending its start notify");
+        assert_eq!(pending_robot.robot_instance, Some(0));
+        assert_eq!(pending_robot.import_item, None);
+
+        let found: Vec<i64> = reopened
+            .recordings_for_source(&item)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.recording_index)
+            .collect();
+        assert_eq!(found, vec![item_index]);
+    }
+
+    #[tokio::test]
+    async fn import_items_and_robot_instances_of_one_robot_are_separate_sources() {
+        let (store, _tempdir) = open_store().await;
+        let first_item = Source::import_item("robot-1", "session-1", "episode-0");
+        let second_item = Source::import_item("robot-1", "session-1", "episode-1");
+        let other_session = Source::import_item("robot-1", "session-2", "episode-0");
+        let mut indices = std::collections::HashMap::new();
+        for source in [&first_item, &second_item, &other_session] {
+            let index = store
+                .create_recording(NewRecording {
+                    source: Some(source),
+                    dataset_id: Some("ds-1"),
+                    start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
+                })
+                .await
+                .expect("create_recording")
+                .recording_index;
+            indices.insert(source.clone(), index);
+        }
+        let robot = seed_recording(&store, 0).await;
+
+        for source in [&first_item, &second_item, &other_session] {
+            let rows = store.recordings_for_source(source).await.unwrap();
+            let found: Vec<i64> = rows.iter().map(|row| row.recording_index).collect();
+            assert_eq!(found, vec![indices[source]], "{source}");
+            assert_eq!(rows[0].robot_instance, None);
+        }
+        let robot_rows = store
+            .recordings_for_source(&Source::robot_instance("robot-1", 0))
+            .await
+            .unwrap();
+        let found: Vec<i64> = robot_rows.iter().map(|row| row.recording_index).collect();
+        assert_eq!(found, vec![robot]);
+        assert_eq!(robot_rows[0].import_item, None);
+
+        assert_eq!(
+            store
+                .recording_index_for_known_recording(
+                    "unknown",
+                    &second_item,
+                    1_700_000_000_000_000,
+                    1_000,
+                )
+                .await
+                .unwrap(),
+            Some(indices[&second_item])
+        );
     }
 
     #[tokio::test]
