@@ -651,21 +651,21 @@ def test_recording_lifecycle_passes_microseconds_to_the_daemon(
     nc.stop_recording(timestamp=timestamp)
     nc.cancel_recording(timestamp=timestamp)
 
-    assert recording_robot.start_recording.call_args.args[5] == expected_us
-    assert recording_robot.stop_recording.call_args.args[2] == expected_us
-    assert recording_robot.cancel_recording.call_args.args[2] == expected_us
+    assert recording_robot.start_recording.call_args.args[4] == expected_us
+    assert recording_robot.stop_recording.call_args.args[1] == expected_us
+    assert recording_robot.cancel_recording.call_args.args[1] == expected_us
 
 
 def test_stop_recording_sends_normalized_tags_to_the_daemon(recording_robot) -> None:
     nc.stop_recording(tags=[" Good Run", "good run", "Edge"])
 
-    assert recording_robot.stop_recording.call_args.args[3] == ["good-run", "edge"]
+    assert recording_robot.stop_recording.call_args.args[2] == ["good-run", "edge"]
 
 
 def test_stop_recording_without_tags_sends_an_empty_list(recording_robot) -> None:
     nc.stop_recording()
 
-    assert recording_robot.stop_recording.call_args.args[3] == []
+    assert recording_robot.stop_recording.call_args.args[2] == []
 
 
 @pytest.mark.parametrize("tags", [["ok", "a,b"], ["  "], "good-run", [None], ["ok", 1]])

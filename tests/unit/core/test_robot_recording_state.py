@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from neuracore.core.robot import Robot
-from neuracore.data_daemon.bridge import LiveRecording, RecordingStateUnavailableError
+from neuracore.data_daemon.bridge import (
+    LiveRecording,
+    RecordingStateUnavailableError,
+    RobotInstanceSource,
+)
 
 
 def test_is_recording_answers_from_the_daemon() -> None:
@@ -74,7 +78,9 @@ def test_the_cloud_id_wait_is_handed_to_the_bridge() -> None:
     ) as query_recording_state:
         assert robot.get_cloud_recording_id(timeout_s=1.0) == "cloud-1"
 
-    query_recording_state.assert_called_once_with("robot-id-1", 0, timeout_s=1.0)
+    query_recording_state.assert_called_once_with(
+        RobotInstanceSource("robot-id-1", 0), timeout_s=1.0
+    )
     robot.id = None
 
 
@@ -92,4 +98,31 @@ def test_a_cloud_id_that_never_arrives_gives_up() -> None:
     ):
         assert robot.get_cloud_recording_id(timeout_s=1.0) is None
 
+    robot.id = None
+
+
+@pytest.fixture
+def native(monkeypatch) -> MagicMock:
+    from neuracore.data_daemon import bridge
+
+    native_module = MagicMock()
+    monkeypatch.setattr(bridge, "_load_native", lambda: native_module)
+    monkeypatch.setattr(bridge, "ensure_daemon_running", lambda: None)
+    return native_module
+
+
+def test_an_ordinary_start_records_under_the_robot_instance(native) -> None:
+    robot = Robot("robot", instance=2, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    robot.start_recording("dataset-1", timestamp=12.5)
+
+    native.RecordingSource.robot_instance.assert_called_once_with("robot-id-1", 2)
+    native.start_recording.assert_called_once_with(
+        native.RecordingSource.robot_instance.return_value,
+        "robot",
+        "dataset-1",
+        None,
+        12_500_000,
+    )
     robot.id = None

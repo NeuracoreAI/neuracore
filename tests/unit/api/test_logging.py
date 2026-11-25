@@ -229,10 +229,10 @@ def test_log_depth_uint16_reaches_the_bridge_unchanged_with_its_scale(
     nc.log_depth("depth_u16", depth, depth_scale_m=0.001)
 
     call = native.log_frame.call_args
-    assert call.args[6] == "uint16"
-    recorded = np.frombuffer(bytes(call.args[7]), dtype="<u2").reshape(2, 2)
+    assert call.args[5] == "uint16"
+    recorded = np.frombuffer(bytes(call.args[6]), dtype="<u2").reshape(2, 2)
     np.testing.assert_array_equal(recorded, depth)
-    assert call.args[9] == 0.001
+    assert call.args[8] == 0.001
     latest = robot.get_data_stream(
         f"{DataType.DEPTH_IMAGES.value}:depth_u16"
     ).get_latest_data()
@@ -273,10 +273,10 @@ def test_log_rgb_forwards_camera_calibration_to_the_daemon(
     nc.log_rgb("uncalibrated", rgb)
 
     calibrated, uncalibrated = native.log_frame.call_args_list
-    assert calibrated.args[10] == intrinsics.reshape(-1).tolist()
-    assert calibrated.args[11] == extrinsics.reshape(-1).tolist()
+    assert calibrated.args[9] == intrinsics.reshape(-1).tolist()
+    assert calibrated.args[10] == extrinsics.reshape(-1).tolist()
+    assert uncalibrated.args[9] is None
     assert uncalibrated.args[10] is None
-    assert uncalibrated.args[11] is None
 
     depth = np.zeros((2, 2), dtype=np.uint16)
     nc.log_depth(
@@ -288,8 +288,8 @@ def test_log_rgb_forwards_camera_calibration_to_the_daemon(
     )
 
     depth_call = native.log_frame.call_args
-    assert depth_call.args[10] == intrinsics.reshape(-1).tolist()
-    assert depth_call.args[11] == extrinsics.reshape(-1).tolist()
+    assert depth_call.args[9] == intrinsics.reshape(-1).tolist()
+    assert depth_call.args[10] == extrinsics.reshape(-1).tolist()
 
 
 def test_log_frame_forwards_dtype_derived_from_the_array(
@@ -324,14 +324,14 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
 
     assert native.log_frame.call_count == 2
     calls_by_dtype = {
-        call.args[2]: call.args[6] for call in native.log_frame.call_args_list
+        call.args[1]: call.args[5] for call in native.log_frame.call_args_list
     }
     assert calls_by_dtype == {
         DataType.RGB_IMAGES.value: "uint8",
         DataType.DEPTH_IMAGES.value: "uint16",
     }
     rgb_call = native.log_frame.call_args_list[0]
-    assert rgb_call.args[8] == 12_500_000
+    assert rgb_call.args[7] == 12_500_000
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None
@@ -775,16 +775,16 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
     native.start_recording.assert_not_called()
     native.log_json.assert_called_once()
     args = native.log_json.call_args.args
-    assert args[:4] == (
-        "robot-from-sse",
-        3,
+    native.RecordingSource.robot_instance.assert_called_once_with("robot-from-sse", 3)
+    assert args[:3] == (
+        native.RecordingSource.robot_instance.return_value,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value,
         "secondary_gripper",
     )
-    payload = json.loads(args[4])
+    payload = json.loads(args[3])
     assert payload == sample.model_dump(mode="json")
     assert (payload["timestamp"], payload["timestamp_us"]) == (12.5, 12_500_000)
-    assert args[5:] == (12_500_000,)
+    assert args[4:] == (12_500_000,)
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None
@@ -815,7 +815,7 @@ def test_log_joints_rounds_seconds_to_the_nearest_microsecond(
     nc.log_joint_positions(positions={"vx300s_left/waist": 0.5}, timestamp=1.000001)
 
     native.log_joints.assert_called_once()
-    assert native.log_joints.call_args.args[5:] == (1_000_001,)
+    assert native.log_joints.call_args.args[4:] == (1_000_001,)
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None
@@ -839,8 +839,13 @@ def test_log_done_records_flag_to_daemon(monkeypatch, value, expected) -> None:
 
     native.log_json.assert_called_once()
     args = native.log_json.call_args.args
-    assert args[:4] == ("robot-id", 0, DataType.DONE.value, "done")
-    assert json.loads(args[4]) == DoneData(timestamp=12.5, done=expected).model_dump(
+    native.RecordingSource.robot_instance.assert_called_once_with("robot-id", 0)
+    assert args[:3] == (
+        native.RecordingSource.robot_instance.return_value,
+        DataType.DONE.value,
+        "done",
+    )
+    assert json.loads(args[3]) == DoneData(timestamp=12.5, done=expected).model_dump(
         mode="json"
     )
 
@@ -1043,7 +1048,7 @@ LOG_ENTRY_POINTS = [
 PATCHED_NOW_US = 42_000_000
 # The native log_frame takes calibration after the timestamp; the others end
 # with it.
-LOG_FRAME_TIMESTAMP_ARG = 8
+LOG_FRAME_TIMESTAMP_ARG = 7
 
 
 @pytest.fixture
@@ -1081,7 +1086,7 @@ def test_log_entry_points_pass_microseconds_to_the_daemon(
     timestamp_arg = LOG_FRAME_TIMESTAMP_ARG if native_method == "log_frame" else -1
     assert native_call.args[timestamp_arg] == expected_us
     if native_method == "log_json":
-        payload = json.loads(native_call.args[4])
+        payload = json.loads(native_call.args[3])
         assert payload["timestamp_us"] == expected_us
         assert payload["timestamp"] == expected_us / 1_000_000
 

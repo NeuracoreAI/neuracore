@@ -11,6 +11,7 @@ from neuracore.data_daemon import bridge
 TIMESTAMP_US = 12_500_000
 ROBOT_ID = "robot-1"
 ROBOT_INSTANCE = 2
+ROBOT_SOURCE = bridge.RobotInstanceSource(ROBOT_ID, ROBOT_INSTANCE)
 
 
 @pytest.fixture
@@ -22,27 +23,69 @@ def native(monkeypatch) -> MagicMock:
 
 
 def test_start_recording_sends_microseconds(native: MagicMock) -> None:
-    bridge.RecordingContext().start_recording(
-        ROBOT_ID, ROBOT_INSTANCE, timestamp_us=TIMESTAMP_US
-    )
+    bridge.RecordingContext().start_recording(ROBOT_SOURCE, timestamp_us=TIMESTAMP_US)
 
+    native.RecordingSource.robot_instance.assert_called_once_with(
+        ROBOT_ID, ROBOT_INSTANCE
+    )
     native.start_recording.assert_called_once_with(
-        ROBOT_ID, ROBOT_INSTANCE, None, None, None, TIMESTAMP_US
+        native.RecordingSource.robot_instance.return_value,
+        None,
+        None,
+        None,
+        TIMESTAMP_US,
     )
 
 
+@pytest.mark.parametrize("source", [ROBOT_SOURCE])
 @pytest.mark.parametrize(
     ("operation", "trailing_args"),
     [("stop_recording", ([],)), ("cancel_recording", ())],
 )
-def test_stop_and_cancel_send_microseconds(
-    native: MagicMock, operation: str, trailing_args: tuple
+def test_stop_and_cancel_send_microseconds_for_the_bound_source(
+    native: MagicMock,
+    operation: str,
+    trailing_args: tuple,
+    source: bridge.RecordingSource,
 ) -> None:
     context = bridge.RecordingContext()
-    context.bind_source(ROBOT_ID, ROBOT_INSTANCE)
+    context.bind_source(source)
 
     getattr(context, operation)(TIMESTAMP_US)
 
     getattr(native, operation).assert_called_once_with(
-        ROBOT_ID, ROBOT_INSTANCE, TIMESTAMP_US, *trailing_args
+        native.RecordingSource.robot_instance.return_value,
+        TIMESTAMP_US,
+        *trailing_args,
     )
+
+
+@pytest.mark.parametrize("operation", ["stop_recording", "cancel_recording"])
+def test_an_unbound_context_does_not_reach_the_daemon(
+    native: MagicMock, operation: str
+) -> None:
+    getattr(bridge.RecordingContext(), operation)(TIMESTAMP_US)
+
+    getattr(native, operation).assert_not_called()
+
+
+def test_rebinding_the_same_source_reuses_its_native_handle(
+    native: MagicMock,
+) -> None:
+    context = bridge.RecordingContext()
+    context.bind_source(bridge.RobotInstanceSource(ROBOT_ID, ROBOT_INSTANCE))
+    context.bind_source(bridge.RobotInstanceSource(ROBOT_ID, ROBOT_INSTANCE))
+
+    native.RecordingSource.robot_instance.assert_called_once()
+    assert context.source == ROBOT_SOURCE
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: bridge.RobotInstanceSource(""),
+    ],
+)
+def test_a_source_needs_every_identifier(build) -> None:
+    with pytest.raises(ValueError):
+        build()

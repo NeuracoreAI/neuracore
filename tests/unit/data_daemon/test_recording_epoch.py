@@ -13,10 +13,13 @@ def test_the_epoch_comes_from_the_bound_source(monkeypatch) -> None:
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
 
     context = recording_context.RecordingContext()
-    context.bind_source("robot-id-1", robot_instance=3)
+    context.bind_source(recording_context.RobotInstanceSource("robot-id-1", 3))
 
     assert context.recording_epoch() == 1_700
-    native.recording_epoch.assert_called_once_with("robot-id-1", 3)
+    native.RecordingSource.robot_instance.assert_called_once_with("robot-id-1", 3)
+    native.recording_epoch.assert_called_once_with(
+        native.RecordingSource.robot_instance.return_value
+    )
 
 
 def test_an_unbound_context_has_no_epoch(monkeypatch) -> None:
