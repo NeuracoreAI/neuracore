@@ -124,6 +124,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         builder = self._load_builder()
         self.split = self._pick_split(builder)
         self.num_episodes = self._count_episodes(builder, self.split)
+        self.source_episodes = self._list_source_episodes(builder, self.split)
 
         self._builder: tfds.core.DatasetBuilder | None = None
         self._episode_iter = None
@@ -148,8 +149,17 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
     def build_work_items(self) -> Sequence[ImportItem]:
         """Build work items for the dataset importer."""
         return [
-            ImportItem(index=i, split=str(self.split)) for i in range(self.num_episodes)
+            ImportItem(
+                index=i,
+                split=str(self.split),
+                metadata={"source_split": source_split, "source_index": source_index},
+            )
+            for i, (source_split, source_index) in enumerate(self.source_episodes)
         ]
+
+    def item_key(self, item: ImportItem) -> str:
+        """Key an item by its concrete split and its position in that split."""
+        return f"{item.metadata['source_split']}/{item.metadata['source_index']}"
 
     def prepare_worker(
         self, worker_id: int, chunk: Sequence[ImportItem] | None = None
@@ -158,7 +168,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         super().prepare_worker(worker_id, chunk)
         self._builder = self._load_builder()
 
-        sliced_split = self._build_sliced_split(chunk, self._builder)
+        sliced_split = self._build_sliced_split(chunk)
         self.logger.info(
             "[worker %s] Loading split=%s from %s",
             worker_id,
@@ -169,43 +179,32 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         dataset = self._load_dataset(self._builder, sliced_split)
         self._episode_iter = iter(dataset)
 
-    def _build_sliced_split(
-        self,
-        chunk: Sequence[ImportItem] | None,
-        builder: tfds.core.DatasetBuilder,
-    ) -> str:
-        """Build a TFDS split string that selects only this worker's range.
+    def _build_sliced_split(self, chunk: Sequence[ImportItem] | None) -> str:
+        """Build a TFDS split string that selects exactly this worker's episodes.
 
         Uses TFDS split slicing (e.g. ``"train[300:400]"``) so the reader
         can seek directly to the relevant shard offsets instead of reading
-        and discarding skipped episodes.
-
-        For the ``all`` pseudo-split, enumerates the concrete split names
-        from the builder info, maps the absolute ``[start, end)`` range
-        onto per-split slices, and joins them with ``+``.
+        and discarding skipped episodes. A resumed import leaves gaps in a
+        chunk, so each contiguous run of episodes within a concrete split
+        gets its own slice, and the slices are joined with ``+`` in chunk
+        order so the reader yields the episodes in the order of the chunk.
         """
         if not chunk:
             return str(self.split)
 
-        start = chunk[0].index
-        end = start + len(chunk)
-
-        if str(self.split).lower() != "all" and self.split != tfds.Split.ALL:
-            return f"{self.split}[{start}:{end}]"
-
         parts: list[str] = []
-        offset = 0
-        for name, info in builder.info.splits.items():
-            split_len = int(info.num_examples)
-            split_end = offset + split_len
-            if start < split_end and end > offset:
-                lo = max(start - offset, 0)
-                hi = min(end - offset, split_len)
-                parts.append(f"{name}[{lo}:{hi}]")
-            offset = split_end
-
-        if not parts:
-            return str(self.split)
+        run_split: str | None = None
+        run_start = run_end = 0
+        for item in chunk:
+            source_split = item.metadata["source_split"]
+            source_index = item.metadata["source_index"]
+            if source_split == run_split and source_index == run_end:
+                run_end += 1
+                continue
+            if run_split is not None:
+                parts.append(f"{run_split}[{run_start}:{run_end}]")
+            run_split, run_start, run_end = source_split, source_index, source_index + 1
+        parts.append(f"{run_split}[{run_start}:{run_end}]")
         return "+".join(parts)
 
     def import_item(self, item: ImportItem) -> None:
@@ -375,6 +374,23 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 f"'{self.builder_dir}'."
             )
         return tfds.Split.ALL
+
+    @staticmethod
+    def _list_source_episodes(
+        builder: tfds.core.DatasetBuilder, split: tfds.typing.SplitArg
+    ) -> list[tuple[str, int]]:
+        """List each episode's concrete split and index within that split."""
+        if split == tfds.Split.ALL or str(split).lower() == "all":
+            return [
+                (str(name), index)
+                for name, info in builder.info.splits.items()
+                for index in range(int(info.num_examples))
+            ]
+        try:
+            split_info = builder.info.splits[split]
+        except KeyError:
+            split_info = builder.info.splits[str(split)]
+        return [(str(split), index) for index in range(int(split_info.num_examples))]
 
     def _count_episodes(
         self, builder: tfds.core.DatasetBuilder, split: tfds.typing.SplitArg

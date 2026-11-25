@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 import traceback
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -109,22 +109,28 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
         meta = self._load_metadata()
         self.num_episodes = meta.total_episodes
+        self.episode_ids = self._metadata_episode_ids(meta)
         self.camera_keys = list(meta.camera_keys)
         self.frequency = self._resolve_frequency(meta.fps)
 
         self._dataset: LeRobotDataset | None = None
-        self._episode_iter: Iterator[int] | None = None
 
     def __getstate__(self) -> dict:
         """Drop worker-local handles when pickling for multiprocessing."""
         state = self.__dict__.copy()
         state.pop("_dataset", None)
-        state.pop("_episode_iter", None)
         return state
 
     def build_work_items(self) -> Sequence[ImportItem]:
         """Build work items for the dataset importer."""
-        return [ImportItem(index=i) for i in range(self.num_episodes)]
+        return [
+            ImportItem(index=i, metadata={"episode_id": episode_id})
+            for i, episode_id in enumerate(self.episode_ids)
+        ]
+
+    def item_key(self, item: ImportItem) -> str:
+        """Key an item by its LeRobot episode index."""
+        return str(item.metadata["episode_id"])
 
     def prepare_worker(
         self, worker_id: int, chunk: Sequence[ImportItem] | None = None
@@ -132,24 +138,13 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         """Prepare the worker for the dataset importer."""
         super().prepare_worker(worker_id, chunk)
         self._dataset = self._load_dataset()
-        episode_ids = self._collect_episode_ids(self._dataset)
-        start = chunk[0].index if chunk else 0
-        end = start + len(chunk) if chunk else len(episode_ids)
-        self._episode_iter = iter(episode_ids[start:end])
 
     def import_item(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
         self._reset_episode_state()
-        if self._dataset is None or self._episode_iter is None:
+        if self._dataset is None:
             raise ImportError("Worker dataset was not initialized.")
-
-        try:
-            episode_id = next(self._episode_iter)
-        except StopIteration as exc:  # noqa: PERF203
-            raise ImportError(
-                f"No episode available for index {item.index} "
-                f"(dataset has {self.num_episodes} episodes)."
-            ) from exc
+        episode_id = item.metadata["episode_id"]
 
         if self.frequency is None:
             raise ImportError("Frequency is required for importing episodes.")
@@ -290,9 +285,13 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 f"from '{self.dataset_root}': {exc}"
             ) from exc
 
-    def _collect_episode_ids(self, ds: LeRobotDataset) -> list[int]:
-        """Return sorted episode ids present in the dataset."""
-        return sorted({int(ep) for ep in ds.hf_dataset["episode_index"]})
+    @staticmethod
+    def _metadata_episode_ids(meta: LeRobotDatasetMetadata) -> list[int]:
+        """Return sorted episode ids listed in the dataset metadata."""
+        episodes = getattr(meta, "episodes", None)
+        if episodes is None:
+            return list(range(meta.total_episodes))
+        return sorted({int(ep) for ep in episodes["episode_index"]})
 
     def _iter_episode_steps(
         self, ds: LeRobotDataset, episode_id: int

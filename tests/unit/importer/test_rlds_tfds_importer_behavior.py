@@ -80,6 +80,14 @@ def test_rlds_handle_step_error_non_step_mode_returns_false():
     importer._log_worker_error.assert_not_called()
 
 
+def _source_item(index, source_split, source_index):
+    return ImportItem(
+        index=index,
+        split="all",
+        metadata={"source_split": source_split, "source_index": source_index},
+    )
+
+
 def test_rlds_import_item_logs_steps_on_a_microsecond_frequency_grid():
     """Steps are logged at microseconds on the dataset frequency grid."""
     importer = object.__new__(RLDSDatasetImporter)
@@ -120,6 +128,77 @@ def test_rlds_import_item_logs_steps_on_a_microsecond_frequency_grid():
         timestamp=1_000_000_000 / MICROSECONDS_PER_SECOND,
     )
     assert seconds_to_us(stop_recording.call_args.kwargs["timestamp"]) == 1_000_100_000
+
+
+def test_rlds_work_items_are_keyed_by_concrete_split_and_index():
+    importer = object.__new__(RLDSDatasetImporter)
+    importer.split = "all"
+    importer.source_episodes = [("test", 0), ("train", 0), ("train", 1)]
+
+    items = importer.build_work_items()
+
+    assert [importer.item_key(item) for item in items] == [
+        "test/0",
+        "train/0",
+        "train/1",
+    ]
+
+
+def _builder_with_splits(**num_examples):
+    splits = {
+        name: SimpleNamespace(num_examples=count)
+        for name, count in num_examples.items()
+    }
+    return SimpleNamespace(info=SimpleNamespace(splits=splits))
+
+
+def test_rlds_source_episodes_of_one_split():
+    builder = _builder_with_splits(train=3, test=1)
+
+    assert RLDSDatasetImporter._list_source_episodes(builder, "train") == [
+        ("train", 0),
+        ("train", 1),
+        ("train", 2),
+    ]
+
+
+def test_rlds_source_episodes_of_all_splits_name_each_concrete_split():
+    builder = _builder_with_splits(train=2, test=1)
+
+    assert RLDSDatasetImporter._list_source_episodes(builder, "all") == [
+        ("train", 0),
+        ("train", 1),
+        ("test", 0),
+    ]
+
+
+def test_rlds_sliced_split_without_a_chunk_is_the_whole_split():
+    importer = object.__new__(RLDSDatasetImporter)
+    importer.split = "train"
+
+    assert importer._build_sliced_split(None) == "train"
+
+
+def test_rlds_sliced_split_of_a_contiguous_chunk_is_one_slice():
+    importer = object.__new__(RLDSDatasetImporter)
+    importer.split = "train"
+    chunk = [_source_item(i, "train", 300 + i) for i in range(3)]
+
+    assert importer._build_sliced_split(chunk) == "train[300:303]"
+
+
+def test_rlds_sliced_split_selects_only_the_episodes_of_a_resumed_chunk():
+    """Saved episodes leave gaps, so slicing by position would re-read them."""
+    importer = object.__new__(RLDSDatasetImporter)
+    importer.split = "all"
+    chunk = [
+        _source_item(0, "train", 0),
+        _source_item(1, "train", 1),
+        _source_item(4, "train", 4),
+        _source_item(6, "test", 0),
+    ]
+
+    assert importer._build_sliced_split(chunk) == "train[0:2]+train[4:5]+test[0:1]"
 
 
 def test_rlds_record_step_supports_empty_source_path_for_language():

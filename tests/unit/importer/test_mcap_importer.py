@@ -247,6 +247,28 @@ def test_mcap_importer_build_work_items(monkeypatch, tmp_path: Path):
     assert items[0].metadata["path"].endswith("episode_001.mcap")
 
 
+def test_mcap_importer_item_key_is_the_dataset_relative_path(
+    monkeypatch, tmp_path: Path
+):
+    importer = _make_importer(monkeypatch, tmp_path)
+    nested = tmp_path / "day1" / "episode_002.mcap"
+
+    item = ImportItem(index=0, metadata={"path": str(nested)})
+
+    assert importer.item_key(item) == "day1/episode_002.mcap"
+
+
+def test_mcap_importer_item_key_of_a_single_file_dataset_is_its_name(
+    monkeypatch, tmp_path: Path
+):
+    importer = _make_importer(monkeypatch, tmp_path)
+    importer.dataset_dir = tmp_path / "episode_001.mcap"
+
+    item = importer.build_work_items()[0]
+
+    assert importer.item_key(item) == "episode_001.mcap"
+
+
 def test_mcap_importer_import_item_starts_and_stops_recording(
     monkeypatch, tmp_path: Path
 ):

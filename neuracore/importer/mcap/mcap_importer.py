@@ -116,6 +116,13 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             for i, path in enumerate(self.mcap_files)
         ]
 
+    def item_key(self, item: ImportItem) -> str:
+        """Key an item by its file path relative to the dataset directory."""
+        path = Path(item.metadata["path"])
+        if self.dataset_dir.is_file():
+            return path.name
+        return path.relative_to(self.dataset_dir).as_posix()
+
     def validate_work_items(self, items: Sequence[ImportItem]) -> None:
         """Reject a dataset whose episodes record different types on one topic.
 

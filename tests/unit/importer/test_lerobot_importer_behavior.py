@@ -60,19 +60,41 @@ def test_lerobot_getstate_drops_worker_local_handles():
     importer = object.__new__(LeRobotDatasetImporter)
     importer.dataset_name = "demo"
     importer._dataset = object()
-    importer._episode_iter = iter([1, 2, 3])
     importer.frequency = 30.0
 
     state = importer.__getstate__()
 
     assert "_dataset" not in state
-    assert "_episode_iter" not in state
     assert state["dataset_name"] == "demo"
     assert state["frequency"] == 30.0
 
 
-def test_lerobot_prepare_worker_uses_chunk_bounds(monkeypatch):
-    """Worker prep should initialize dataset and episode iterator for its chunk."""
+def test_lerobot_work_items_carry_their_episode_id():
+    """Work items should name their episode so any chunk imports the right one."""
+    importer = object.__new__(LeRobotDatasetImporter)
+    importer.episode_ids = [10, 20, 40]
+
+    items = importer.build_work_items()
+
+    assert [item.index for item in items] == [0, 1, 2]
+    assert [importer.item_key(item) for item in items] == ["10", "20", "40"]
+
+
+def test_lerobot_metadata_episode_ids_are_sorted_and_unique():
+    meta = SimpleNamespace(
+        total_episodes=4, episodes={"episode_index": [3, 1, 2, 3, 1]}
+    )
+
+    assert LeRobotDatasetImporter._metadata_episode_ids(meta) == [1, 2, 3]
+
+
+def test_lerobot_metadata_episode_ids_fall_back_to_the_episode_count():
+    meta = SimpleNamespace(total_episodes=3, episodes=None)
+
+    assert LeRobotDatasetImporter._metadata_episode_ids(meta) == [0, 1, 2]
+
+
+def test_lerobot_prepare_worker_loads_the_dataset(monkeypatch):
     importer = object.__new__(LeRobotDatasetImporter)
     base_calls = []
 
@@ -85,23 +107,22 @@ def test_lerobot_prepare_worker_uses_chunk_bounds(monkeypatch):
     )
     fake_dataset = object()
     importer._load_dataset = MagicMock(return_value=fake_dataset)
-    importer._collect_episode_ids = MagicMock(return_value=[10, 20, 30, 40, 50])
 
     chunk = [ImportItem(index=2), ImportItem(index=3)]
     importer.prepare_worker(worker_id=7, chunk=chunk)
 
     assert base_calls == [(7, chunk)]
-    importer._load_dataset.assert_called_once_with()
-    importer._collect_episode_ids.assert_called_once_with(fake_dataset)
     assert importer._dataset is fake_dataset
-    assert list(importer._episode_iter) == [30, 40]
+
+
+def _episode_item(index, episode_id):
+    return ImportItem(index=index, metadata={"episode_id": episode_id})
 
 
 def test_lerobot_import_item_step_mode_skips_failing_steps():
     """LeRobot importer should continue when a step fails in step mode."""
     importer = object.__new__(LeRobotDatasetImporter)
     importer._dataset = object()
-    importer._episode_iter = iter([123])
     importer.ik_init_config = None
     importer.frequency = 10.0
     importer._worker_id = 2
@@ -117,6 +138,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         return_value=(iter([{"v": 1}, {"v": 2}]), 2)
     )
     importer._record_step = MagicMock(side_effect=[ValueError("bad step"), None])
+    item = _episode_item(0, 123)
 
     with (
         patch(
@@ -130,8 +152,9 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
             "neuracore.importer.lerobot_importer.nc.stop_recording"
         ) as stop_recording,
     ):
-        importer.import_item(ImportItem(index=0))
+        importer.import_item(item)
 
+    importer._iter_episode_steps.assert_called_once_with(importer._dataset, 123)
     step_timestamps = [call.args[1] for call in importer._record_step.call_args_list]
     assert [seconds_to_us(stamp) for stamp in step_timestamps] == [
         100_100_000,
@@ -169,7 +192,6 @@ def test_lerobot_import_item_non_step_mode_re_raises():
     """LeRobot importer should re-raise step errors when not in step mode."""
     importer = object.__new__(LeRobotDatasetImporter)
     importer._dataset = object()
-    importer._episode_iter = iter([555])
     importer.ik_init_config = None
     importer.frequency = 10.0
     importer._worker_id = 1
@@ -189,7 +211,7 @@ def test_lerobot_import_item_non_step_mode_re_raises():
         patch("neuracore.importer.lerobot_importer.nc.stop_recording"),
     ):
         with pytest.raises(RuntimeError, match="explode"):
-            importer.import_item(ImportItem(index=0))
+            importer.import_item(_episode_item(0, 555))
 
     importer._error_queue.put.assert_not_called()
     importer._log_worker_error.assert_not_called()
@@ -199,37 +221,23 @@ def test_lerobot_import_item_requires_initialized_worker_dataset():
     """Importer should fail if worker-local dataset state is missing."""
     importer = object.__new__(LeRobotDatasetImporter)
     importer._dataset = None
-    importer._episode_iter = None
     importer.ik_init_config = None
 
     with pytest.raises(ImportError, match="Worker dataset was not initialized"):
-        importer.import_item(ImportItem(index=0))
-
-
-def test_lerobot_import_item_raises_when_episode_iterator_is_exhausted():
-    """Importer should fail when chunk has no remaining episodes."""
-    importer = object.__new__(LeRobotDatasetImporter)
-    importer._dataset = object()
-    importer._episode_iter = iter([])
-    importer.ik_init_config = None
-    importer.num_episodes = 3
-
-    with pytest.raises(ImportError, match="No episode available for index 4"):
-        importer.import_item(ImportItem(index=4))
+        importer.import_item(_episode_item(0, 1))
 
 
 def test_lerobot_import_item_requires_frequency():
     """Importer should require an explicit episode frequency before logging steps."""
     importer = object.__new__(LeRobotDatasetImporter)
     importer._dataset = object()
-    importer._episode_iter = iter([9])
     importer.ik_init_config = None
     importer.frequency = None
 
     with pytest.raises(
         ImportError, match="Frequency is required for importing episodes"
     ):
-        importer.import_item(ImportItem(index=0))
+        importer.import_item(_episode_item(0, 9))
 
 
 def test_lerobot_record_step_supports_empty_source_path_for_language():
@@ -540,16 +548,6 @@ def test_lerobot_resolve_frequency_raises_when_missing_everywhere():
         ImportError, match="Frequency not provided in config and missing from metadata"
     ):
         importer._resolve_frequency(meta_frequency=None)
-
-
-def test_lerobot_collect_episode_ids_returns_sorted_unique_ids():
-    """Episode IDs should be sorted and deduplicated."""
-    importer = object.__new__(LeRobotDatasetImporter)
-    dataset = SimpleNamespace(hf_dataset={"episode_index": [3, 1, 2, 3, 1]})
-
-    episode_ids = importer._collect_episode_ids(dataset)
-
-    assert episode_ids == [1, 2, 3]
 
 
 def test_lerobot_iter_episode_steps_uses_dataset_indices_when_available():
