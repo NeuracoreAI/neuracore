@@ -62,14 +62,42 @@ class RobotInstanceSource:
         return f"{self.robot_id} instance {self.instance}"
 
 
-RecordingSource = RobotInstanceSource
+@dataclass(frozen=True)
+class ImportItemSource:
+    """One item of an import session, recording under the importing robot.
+
+    Each item is its own source, so concurrent imports of one robot sharing a
+    daemon never share a recording.
+    """
+
+    robot_id: str
+    import_session_id: str
+    item_key: str
+
+    def __post_init__(self) -> None:
+        """Reject a source the daemon could not key."""
+        if not (self.robot_id and self.import_session_id and self.item_key):
+            raise ValueError(
+                "robot_id, import_session_id and item_key are required for an "
+                "import recording source."
+            )
+
+    def __str__(self) -> str:
+        """Describe the source for errors and logs."""
+        return f"{self.robot_id} import {self.import_session_id} item {self.item_key}"
+
+
+RecordingSource = RobotInstanceSource | ImportItemSource
 
 
 def _native_source(source: RecordingSource) -> Any:
     """Convert a source to the bridge's ``RecordingSource``."""
-    return _load_native().RecordingSource.robot_instance(
-        source.robot_id, source.instance
-    )
+    native = _load_native().RecordingSource
+    if isinstance(source, ImportItemSource):
+        return native.import_item(
+            source.robot_id, source.import_session_id, source.item_key
+        )
+    return native.robot_instance(source.robot_id, source.instance)
 
 
 class LiveRecording(NamedTuple):
@@ -203,7 +231,8 @@ class RecordingContext:
         """Announce a recording to the daemon for a source.
 
         Publishes one ``StartRecording`` envelope tagged with ``source`` and
-        binds the context to it. The daemon gets the cloud id from the backend.
+        binds the context to it. The daemon gets the cloud id from the backend,
+        registering an :class:`ImportItemSource` under its import session.
 
         ``timestamp_us`` is the recording's start in microseconds on the
         caller's capture clock, stored and returned as this recording's start

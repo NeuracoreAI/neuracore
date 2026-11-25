@@ -25,7 +25,9 @@ from neuracore.data_daemon.daemon_control import ensure_daemon_running
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
 from ..core.exceptions import DatasetError, RobotError
-from ..core.robot import Robot, get_robot
+from ..core.robot import Robot
+from ..core.robot import attach as _attach_local_robot
+from ..core.robot import get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
@@ -176,11 +178,26 @@ def connect_robot(
         DaemonLifecycleError: If the data daemon could not be started.
     """
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
+    return _activate_robot(robot)
+
+
+def _attach_robot(robot_name: str, robot_id: str, shared: bool) -> Robot:
+    """Make a handle for an existing robot active to record import items.
+
+    Unlike connect_robot, the handle has no robot instance: it registers none
+    on the server and shares no live data.
+    """
+    robot = _attach_local_robot(robot_name, robot_id, shared)
+    return _activate_robot(robot)
+
+
+def _activate_robot(robot: Robot) -> Robot:
     GlobalSingleton()._active_robot = robot
     # Initialize push update managers
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
+    if robot.instance is not None:
+        StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     # Only the daemon hears a recording started from the web.
     ensure_daemon_running()
     return robot
@@ -256,6 +273,9 @@ def start_recording(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    *,
+    import_session_id: str | None = None,
+    item_key: str | None = None,
 ) -> None:
     """Start recording data for a specific robot.
 
@@ -270,6 +290,9 @@ def start_recording(
         timestamp: Optional capture time (Unix seconds) for the recording's
             start, matching the ``log_*`` methods. When omitted, the current
             time is captured.
+        import_session_id: Import session the recording belongs to, used by
+            the dataset importer. Given together with ``item_key``.
+        item_key: Stable key of the imported item within the import session.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided,
@@ -302,7 +325,12 @@ def start_recording(
                 "shared robot, ensure connect_robot(shared=True) succeeded. "
                 f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
             )
-    robot.start_recording(active_dataset_id, timestamp=timestamp)
+    robot.start_recording(
+        active_dataset_id,
+        timestamp=timestamp,
+        import_session_id=import_session_id,
+        item_key=item_key,
+    )
 
 
 def _normalize_stop_tags(tags: list[str] | None) -> list[str]:
@@ -423,7 +451,8 @@ def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
     robot = _get_robot(robot_name, instance)
     if not robot.id:
         raise RobotError("Robot not initialized. Call init() first.")
-    StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
+    if robot.instance is not None:
+        StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
 
 
 def cancel_recording(

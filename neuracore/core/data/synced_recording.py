@@ -117,7 +117,7 @@ class SynchronizedRecording:
         recording_id: str,
         recording_name: str | None,
         robot_id: str,
-        instance: int,
+        instance: int | None,
         synchronization_details: SynchronizationDetails,
         prefetch_videos: bool = False,
         synced_episode: SerializedSynchronizedEpisode | None = None,
@@ -130,6 +130,7 @@ class SynchronizedRecording:
             recording_name: Recording Name string.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
+                None for an imported recording.
             synchronization_details: The full synchronization parameters. The
                 server keys stored synchronized data on all of them, so these
                 must match the parameters the data was synchronized with or the
