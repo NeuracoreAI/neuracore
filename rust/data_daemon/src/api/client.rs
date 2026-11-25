@@ -55,6 +55,18 @@ impl ApiClientOptions {
     }
 }
 
+/// What a started recording records, as the backend identifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingStartSource<'a> {
+    /// A live recording of one instance of the robot.
+    RobotInstance(i64),
+    /// One item of an import session.
+    ImportItem {
+        import_session_id: &'a str,
+        item_key: &'a str,
+    },
+}
+
 /// Errors raised by the API client.
 #[derive(Debug, Error)]
 pub enum ApiClientError {
@@ -416,25 +428,52 @@ impl ApiClient {
         &self,
         org_id: &str,
         robot_id: &str,
-        instance: i64,
+        source: RecordingStartSource<'_>,
         dataset_id: &str,
         start_timestamp_us: i64,
     ) -> Result<String, ApiClientError> {
         let path = format!("/org/{org_id}/recording/start");
         #[derive(Serialize)]
+        #[serde(tag = "type", rename = "import_session")]
+        struct ImportSessionSource<'a> {
+            import_session_id: &'a str,
+            item_key: &'a str,
+        }
+        // A robot start keeps the top-level instance so a backend that
+        // predates import sessions still accepts it.
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Origin<'a> {
+            RobotInstance { instance: i64 },
+            ImportItem { source: ImportSessionSource<'a> },
+        }
+        #[derive(Serialize)]
         struct Body<'a> {
             robot_id: &'a str,
-            instance: i64,
             dataset_id: &'a str,
             start_time: f64,
             start_timestamp_us: i64,
+            #[serde(flatten)]
+            origin: Origin<'a>,
         }
+        let origin = match source {
+            RecordingStartSource::RobotInstance(instance) => Origin::RobotInstance { instance },
+            RecordingStartSource::ImportItem {
+                import_session_id,
+                item_key,
+            } => Origin::ImportItem {
+                source: ImportSessionSource {
+                    import_session_id,
+                    item_key,
+                },
+            },
+        };
         let body = Body {
             robot_id,
-            instance,
             dataset_id,
             start_time: microseconds_to_seconds(start_timestamp_us),
             start_timestamp_us,
+            origin,
         };
         let response = self
             .send_with_retry(Method::POST, &path, |builder| builder.json(&body))

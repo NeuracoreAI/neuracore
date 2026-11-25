@@ -12,7 +12,7 @@ pub mod models;
 #[allow(unused_imports)]
 pub use auth::{AuthError, AuthProvider, FileAuthProvider};
 #[allow(unused_imports)]
-pub use client::{ApiClient, ApiClientError, ApiClientOptions};
+pub use client::{ApiClient, ApiClientError, ApiClientOptions, RecordingStartSource};
 #[allow(unused_imports)]
 pub use models::{
     BatchRegisterResponse, CloudFile, RegisterTraceRequest, ResumableUploadUrlResponse,
