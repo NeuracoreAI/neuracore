@@ -30,6 +30,7 @@ atfork
 attns
 autocast
 Autoencoders
+autograd
 autoregressively
 autoset
 autouse
@@ -69,6 +70,8 @@ childbody
 childinertia
 chonk
 chrono
+chunker
+chunker's
 CLIPMLP
 clippy
 CLOEXEC
@@ -122,6 +125,9 @@ demuxers
 demuxes
 denoise
 denoised
+denoiser
+denoiser's
+denoisers
 denoising
 Deque
 descheduled
@@ -149,6 +155,10 @@ Emika
 ENOENT
 enoexec
 ENOTDIR
+ensembled
+ensembler
+Ensembler
+ensembling
 EPERM
 EPIPE
 eprintln
@@ -204,6 +214,7 @@ frontright
 frozenset
 fspath
 ftruncate
+Galliker
 gdown
 geglu
 gelu
@@ -248,6 +259,7 @@ imshow
 inertiafromgeom
 inertiagrouprange
 initargs
+inpainting
 inproc
 inspectable
 ipynb
@@ -280,6 +292,9 @@ layernorm
 lecun
 LEROBOT
 lerobot
+lerp
+Lerp
+lerps
 levelname
 libav
 libavformat
@@ -388,6 +403,8 @@ outut
 overfit
 packb
 paligemma
+parameterisation
+parameterised
 parentbody
 parentid
 patchelf
@@ -457,6 +474,8 @@ reannounce
 rels
 renice
 renicing
+Replanner
+replanner
 reqwest
 reraises
 respawns
