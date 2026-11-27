@@ -50,8 +50,10 @@ def _export_dataset(
         ConfigError,
         DatasetError,
         SynchronizationError,
-    ) as exc:
-        typer.echo(f"Export failed: {exc}", err=True)
+    ):
+        # The error text can hold request URLs, which may be signed storage
+        # URLs, so it is not printed.
+        typer.echo("Export failed.", err=True)
         raise typer.Exit(1) from None
     typer.echo(f"Export complete: {manifest}")
 

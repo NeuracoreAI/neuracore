@@ -41,7 +41,8 @@ def test_cli_reports_failures(command, stage, tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "login", Mock())
     monkeypatch.setattr(cli, "get_dataset", Mock(return_value=[]))
     error = AuthenticationError if stage == "login" else SynchronizationError
-    monkeypatch.setattr(cli, stage, Mock(side_effect=error("unavailable")))
+    signed_url = "https://storage.example.com/trace.json?X-Goog-Signature=secret"
+    monkeypatch.setattr(cli, stage, Mock(side_effect=error(f"GET {signed_url}")))
     output = tmp_path / "out"
 
     result = CliRunner().invoke(
@@ -49,7 +50,8 @@ def test_cli_reports_failures(command, stage, tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "Export failed: unavailable" in result.output
+    assert "Export failed." in result.output
+    assert "X-Goog-Signature" not in result.output
     assert "Export complete" not in result.output
     assert not output.exists()
 
@@ -63,5 +65,5 @@ def test_cli_reports_invalid_fps_before_login(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "fps must be positive" in result.output
+    assert "Export failed." in result.output
     login.assert_not_called()
