@@ -97,9 +97,11 @@ pub struct StatusSources {
     pub client: Option<Arc<ApiClient>>,
 }
 
-/// How long a status query waits for the backend to name organisations. The
-/// query is answered within a few hundred milliseconds either way, so a slow
-/// answer leaves the ids rather than holding the reply.
+/// How long a status query waits for the backend to name organisations. A
+/// status request waits for its reply for
+/// [`STATUS_RESPONSE_WAIT_MS`](data_daemon_shared::service_name::STATUS_RESPONSE_WAIT_MS)
+/// before the SDK asks again, and a reply sent later is lost, so the lookup
+/// gives up well before: a slow answer leaves the ids.
 const ORG_NAME_LOOKUP_TIMEOUT: Duration = Duration::from_millis(150);
 
 /// A status query the daemon has received.
@@ -1108,6 +1110,19 @@ mod tests {
 
     mod org_names {
         use super::*;
+
+        #[test]
+        fn a_name_lookup_ends_before_the_sdk_stops_waiting() {
+            // The listener picks a query up at most one idle poll after it
+            // arrives, then reads the store; the lookup's time starts after
+            // that, and the reply goes out at most one idle poll after the
+            // lookup gives up. A margin covers the store read.
+            let sdk_wait =
+                Duration::from_millis(data_daemon_shared::service_name::STATUS_RESPONSE_WAIT_MS);
+            let margin = Duration::from_millis(25);
+            assert!(ORG_NAME_LOOKUP_TIMEOUT + 2 * IDLE_POLL_INTERVAL + margin < sdk_wait);
+        }
+
         use crate::api::auth::StaticAuthProvider;
         use crate::api::ApiClientOptions;
         use crate::state::{NewRecording, SqliteStateStore};
