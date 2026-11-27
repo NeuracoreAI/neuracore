@@ -14,7 +14,7 @@
 //! promotion (and its write-behind-lag safety-net role). Registration failures
 //! roll the status back to `Pending` so the next tick re-claims them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::api::models::{CloudFile, FileUpload, RegisterTraceRequest};
+use crate::api::models::{FileUpload, RegisterTraceRequest};
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::{cloud_file_list, is_video_family};
 use crate::cloud::{ConfigRx, OrgIdRx};
@@ -381,35 +381,6 @@ fn uploads_by_filepath(uploads: Vec<FileUpload>) -> MultipartUploads {
             )
         })
         .collect()
-}
-
-/// Fetch an upload link for each requested file the backend returned none for.
-#[expect(dead_code)]
-async fn fetch_missing_upload_links(
-    client: &ApiClient,
-    org_id: &str,
-    cloud_id: &str,
-    cloud_files: &[CloudFile],
-    uris: &mut BTreeMap<String, String>,
-) -> Result<(), String> {
-    for file in cloud_files {
-        if uris.contains_key(&file.filepath) {
-            continue;
-        }
-        tracing::warn!(
-            recording_id = cloud_id,
-            filepath = file.filepath,
-            "backend returned no upload link; fetching one"
-        );
-        let uri = client
-            .fetch_resumable_upload_url(org_id, cloud_id, &file.filepath, &file.content_type)
-            .await
-            .map_err(|error| {
-                format!("failed to fetch upload link for {}: {error}", file.filepath)
-            })?;
-        uris.insert(file.filepath.clone(), uri);
-    }
-    Ok(())
 }
 
 /// Promote any traces that are now both registered and written to `queued` and

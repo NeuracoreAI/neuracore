@@ -4,7 +4,7 @@
 //! reads are modelled, so a schema change on a field the daemon ignores does
 //! not break the client.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ use crate::encoding::video_encoder::LossyVideoCodec;
 
 /// One file the backend should expect for a trace registration request.
 ///
-/// Matches the body of `POST /org/{org}/recording/traces/batch-register`,
+/// Matches the body of `POST /v2/org/{org}/recording/traces/batch-register`,
 /// `traces[].cloud_files[]`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CloudFile {
@@ -45,11 +45,10 @@ pub struct RegisterTraceRequest {
     pub daemon_id: String,
 }
 
-/// Backend response payload for `POST /traces/batch-register`.
+/// Backend response payload for `POST /v2/org/{org}/recording/traces/batch-register`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct BatchRegisterResponse {
-    /// Traces the backend accepted, with a multipart upload for each file, or
-    /// with the GCS resumable session URIs the daemon should PUT chunks to.
+    /// Traces the backend accepted, with a multipart upload for each file.
     #[serde(default)]
     pub registered_traces: Vec<RegisteredTrace>,
     /// Traces the backend rejected, with a per-trace error message.
@@ -62,11 +61,6 @@ pub struct BatchRegisterResponse {
 pub struct RegisteredTrace {
     /// Trace identifier accepted by the backend.
     pub trace_id: String,
-    /// Map of `cloud_file.filepath → resumable session URI`. Optional because
-    /// the backend may omit the field when the trace has no upload targets
-    /// (e.g. a metadata-only trace).
-    #[serde(default)]
-    pub upload_session_uris: BTreeMap<String, String>,
     /// The multipart upload started for each of the trace's files.
     #[serde(default)]
     pub uploads: Vec<FileUpload>,
@@ -96,13 +90,6 @@ pub struct FailedTrace {
     /// Optional human-readable error message.
     #[serde(default)]
     pub error: Option<String>,
-}
-
-/// Response for `GET /recording/{rec}/resumable_upload_url`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResumableUploadUrlResponse {
-    /// Fresh resumable session URI.
-    pub url: String,
 }
 
 /// Parts of one upload to sign, in a `POST /v2/org/{org}/uploads/parts` body.
@@ -280,31 +267,6 @@ mod tests {
             HashMap::from([(1, "https://storage.test/part-1".to_string())])
         );
         assert_eq!(upload.complete_url, "https://storage.test/complete");
-        assert_eq!(response.failed_traces[0].trace_id, "trace-2");
-    }
-
-    #[test]
-    fn batch_register_response_reads_resumable_session_uris() {
-        let body = serde_json::json!({
-            "registered_traces": [{
-                "trace_id": "trace-1",
-                "upload_session_uris": {"rgb/cam_0/lossy.mp4": "https://upload.example/1"}
-            }],
-            "failed_traces": [{
-                "trace_id": "trace-2",
-                "error": "bad cloud file"
-            }]
-        });
-        let response: BatchRegisterResponse = serde_json::from_value(body).unwrap();
-        assert_eq!(response.registered_traces.len(), 1);
-        assert_eq!(response.registered_traces[0].trace_id, "trace-1");
-        assert_eq!(
-            response.registered_traces[0]
-                .upload_session_uris
-                .get("rgb/cam_0/lossy.mp4")
-                .map(String::as_str),
-            Some("https://upload.example/1")
-        );
         assert_eq!(response.failed_traces[0].trace_id, "trace-2");
     }
 

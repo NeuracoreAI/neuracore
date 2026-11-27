@@ -276,10 +276,6 @@ pub struct TraceRecord {
     pub error_code: Option<TraceErrorCode>,
     /// Latest error message, if any.
     pub error_message: Option<String>,
-    /// JSON-encoded `{filepath: session_uri}` map populated by the
-    /// registration coordinator. The uploader reads this back on
-    /// `ReadyForUpload` and dispatches one resumable upload per entry.
-    pub upload_session_uris: Option<String>,
     /// When the status coordinator's `UPLOAD_COMPLETE` PUT for this trace
     /// was acknowledged by the backend. `NULL` until then; the reaper only
     /// reclaims recordings whose traces are all stamped (or have exhausted
@@ -326,7 +322,6 @@ impl TraceRecord {
             bytes_uploaded: row.try_get("bytes_uploaded")?,
             error_code,
             error_message: row.try_get("error_message")?,
-            upload_session_uris: row.try_get("upload_session_uris")?,
             completion_reported_at: row.try_get("completion_reported_at")?,
             completion_report_attempts: row.try_get("completion_report_attempts")?,
             upload_restarts: row.try_get("upload_restarts")?,
