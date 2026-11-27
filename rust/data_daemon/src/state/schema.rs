@@ -4,6 +4,7 @@
 //! constants in `tests/integration/platform/data_daemon/shared/db_constants.py`
 //! pin the string columns, so the stored spellings must stay stable.
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use chrono::NaiveDateTime;
@@ -290,6 +291,8 @@ pub struct TraceRecord {
     /// How many times the reconcile pass has re-driven this trace's
     /// completion PUT; reclaim opens once the attempts are exhausted.
     pub completion_report_attempts: i64,
+    /// How many times the uploader restarted this trace's uploads.
+    pub upload_restarts: i64,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -326,11 +329,49 @@ impl TraceRecord {
             upload_session_uris: row.try_get("upload_session_uris")?,
             completion_reported_at: row.try_get("completion_reported_at")?,
             completion_report_attempts: row.try_get("completion_report_attempts")?,
+            upload_restarts: row.try_get("upload_restarts")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })
     }
 }
+
+/// One file's S3 multipart upload, a row of the `trace_uploads` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartUpload {
+    /// Backend ID of the upload.
+    pub upload_id: String,
+    /// Size of every part except the last.
+    pub part_size_bytes: u64,
+    /// Presigned PUT URL of the next part to send, when it is known.
+    pub active_part_url: Option<String>,
+    /// Presigned POST URL that completes the upload.
+    pub complete_url: String,
+    /// Whether the store completed the upload with the file's CRC32C.
+    pub completed: bool,
+}
+
+impl MultipartUpload {
+    /// Decode a `trace_uploads` row into its filepath and upload.
+    pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<(String, Self), sqlx::Error> {
+        Ok((
+            row.try_get("filepath")?,
+            MultipartUpload {
+                upload_id: row.try_get("upload_id")?,
+                part_size_bytes: row.try_get("part_size_bytes")?,
+                active_part_url: row.try_get("active_part_url")?,
+                complete_url: row.try_get("complete_url")?,
+                completed: row.try_get("completed")?,
+            },
+        ))
+    }
+}
+
+/// A trace's multipart uploads, keyed by cloud filepath.
+pub type MultipartUploads = BTreeMap<String, MultipartUpload>;
+
+/// The ETag of each part the store accepted for one upload, by part number.
+pub type UploadedParts = BTreeMap<u32, String>;
 
 fn parse_column<T>(row: &sqlx::sqlite::SqliteRow, column: &'static str) -> Result<T, sqlx::Error>
 where

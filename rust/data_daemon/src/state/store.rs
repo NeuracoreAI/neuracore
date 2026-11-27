@@ -15,8 +15,8 @@ use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
 
 use crate::state::schema::{
-    ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
-    TraceUploadStatus, TraceWriteStatus,
+    MultipartUpload, MultipartUploads, ProgressReportStatus, RecordingRow, TraceErrorCode,
+    TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus, UploadedParts,
 };
 
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
@@ -110,6 +110,7 @@ pub struct NewRecording<'a> {
 /// `recording_index` the store allocates; the cloud `recording_id` is a
 /// separate, nullable column filled asynchronously.
 #[async_trait]
+#[cfg_attr(not(test), expect(dead_code))]
 pub trait StateStore: Send + Sync {
     /// Insert a new recording row, allocating its `recording_index`, and
     /// return it. Each `StartRecording` envelope opens a distinct recording,
@@ -196,6 +197,43 @@ pub trait StateStore: Send + Sync {
 
     /// Fetch a trace by ID, returning `None` when absent.
     async fn get_trace(&self, trace_id: &str) -> Result<Option<TraceRecord>, StateStoreError>;
+
+    /// Mark a trace registered and store the multipart upload of each of its
+    /// files in place of any it had, with no uploaded parts.
+    async fn mark_trace_registered(
+        &self,
+        trace_id: &str,
+        uploads: &MultipartUploads,
+    ) -> Result<(), StateStoreError>;
+
+    /// Return the multipart uploads of a trace's files, keyed by cloud
+    /// filepath. Empty before the trace is registered.
+    async fn get_trace_uploads(&self, trace_id: &str) -> Result<MultipartUploads, StateStoreError>;
+
+    /// Return the parts of a file's upload that the store accepted.
+    async fn get_uploaded_parts(
+        &self,
+        trace_id: &str,
+        filepath: &str,
+    ) -> Result<UploadedParts, StateStoreError>;
+
+    /// In one transaction, store the ETag of a part the store accepted and set
+    /// the file's `active_part_url` to `next_part_url`.
+    async fn save_uploaded_part(
+        &self,
+        trace_id: &str,
+        filepath: &str,
+        part_number: u32,
+        etag: &str,
+        next_part_url: Option<&str>,
+    ) -> Result<(), StateStoreError>;
+
+    /// Mark a file's upload completed and clear its `active_part_url`.
+    async fn mark_trace_upload_completed(
+        &self,
+        trace_id: &str,
+        filepath: &str,
+    ) -> Result<(), StateStoreError>;
 
     /// Return all traces for the given recording, ordered by `created_at`.
     async fn list_traces_for_recording(
@@ -438,6 +476,11 @@ pub trait StateStore: Send + Sync {
     /// reaper's all-uploaded gate. Idempotent. Returns the number of traces
     /// whose upload was failed.
     async fn mark_recording_not_found(&self, recording_index: i64) -> Result<u64, StateStoreError>;
+
+    /// Send an uploading trace back to registration with no uploads and count
+    /// the restart in `upload_restarts`. Returns whether the trace was
+    /// restarted.
+    async fn restart_trace_uploads(&self, trace_id: &str) -> Result<bool, StateStoreError>;
 
     /// Delete a recording and all of its trace rows in a single transaction.
     ///
@@ -814,6 +857,23 @@ fn stop_tags_json(tags: &[String]) -> Result<Option<String>, StateStoreError> {
         .map_err(|error| sqlx::Error::Encode(Box::new(error)).into())
 }
 
+/// Tables that hold a trace's uploads, keyed by `trace_id`.
+const TRACE_UPLOAD_TABLES: [&str; 2] = ["trace_upload_parts", "trace_uploads"];
+
+/// Delete a trace's uploads and their uploaded parts.
+async fn delete_trace_uploads(
+    connection: &mut SqliteConnection,
+    trace_id: &str,
+) -> Result<(), sqlx::Error> {
+    for table in TRACE_UPLOAD_TABLES {
+        sqlx::query(&format!("DELETE FROM {table} WHERE trace_id = ?1"))
+            .bind(trace_id)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl StateStore for SqliteStateStore {
     async fn create_recording(
@@ -1095,6 +1155,118 @@ impl StateStore for SqliteStateStore {
             Some(row) => Some(TraceRecord::from_row(&row)?),
             None => None,
         })
+    }
+
+    async fn mark_trace_registered(
+        &self,
+        trace_id: &str,
+        uploads: &MultipartUploads,
+    ) -> Result<(), StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        delete_trace_uploads(&mut tx, trace_id).await?;
+        for (filepath, upload) in uploads {
+            let part_size_bytes = i64::try_from(upload.part_size_bytes)
+                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+            sqlx::query(
+                "INSERT INTO trace_uploads \
+                     (trace_id, filepath, upload_id, part_size_bytes, active_part_url, \
+                      complete_url, completed) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(trace_id)
+            .bind(filepath)
+            .bind(&upload.upload_id)
+            .bind(part_size_bytes)
+            .bind(upload.active_part_url.as_deref())
+            .bind(&upload.complete_url)
+            .bind(upload.completed)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE traces SET registration_status = ?1, last_updated = ?2 WHERE trace_id = ?3",
+        )
+        .bind(TraceRegistrationStatus::Registered.as_str())
+        .bind(Utc::now().naive_utc())
+        .bind(trace_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_trace_uploads(&self, trace_id: &str) -> Result<MultipartUploads, StateStoreError> {
+        let rows = sqlx::query("SELECT * FROM trace_uploads WHERE trace_id = ?1")
+            .bind(trace_id)
+            .fetch_all(&self.read_pool)
+            .await?;
+        rows.iter()
+            .map(MultipartUpload::from_row)
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn get_uploaded_parts(
+        &self,
+        trace_id: &str,
+        filepath: &str,
+    ) -> Result<UploadedParts, StateStoreError> {
+        let rows = sqlx::query_as::<_, (u32, String)>(
+            "SELECT part_number, etag FROM trace_upload_parts \
+              WHERE trace_id = ?1 AND filepath = ?2",
+        )
+        .bind(trace_id)
+        .bind(filepath)
+        .fetch_all(&self.read_pool)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn save_uploaded_part(
+        &self,
+        trace_id: &str,
+        filepath: &str,
+        part_number: u32,
+        etag: &str,
+        next_part_url: Option<&str>,
+    ) -> Result<(), StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO trace_upload_parts (trace_id, filepath, part_number, etag) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(trace_id)
+        .bind(filepath)
+        .bind(part_number)
+        .bind(etag)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE trace_uploads SET active_part_url = ?1 WHERE trace_id = ?2 AND filepath = ?3",
+        )
+        .bind(next_part_url)
+        .bind(trace_id)
+        .bind(filepath)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn mark_trace_upload_completed(
+        &self,
+        trace_id: &str,
+        filepath: &str,
+    ) -> Result<(), StateStoreError> {
+        sqlx::query(
+            "UPDATE trace_uploads SET completed = 1, active_part_url = NULL \
+              WHERE trace_id = ?1 AND filepath = ?2",
+        )
+        .bind(trace_id)
+        .bind(filepath)
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
     }
 
     async fn list_traces_for_recording(
@@ -1768,8 +1940,43 @@ impl StateStore for SqliteStateStore {
         Ok(failed.rows_affected())
     }
 
+    async fn restart_trace_uploads(&self, trace_id: &str) -> Result<bool, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE traces \
+                SET registration_status = ?1, \
+                    upload_status = ?2, \
+                    bytes_uploaded = 0, \
+                    upload_restarts = upload_restarts + 1, \
+                    last_updated = ?3 \
+              WHERE trace_id = ?4 AND upload_status = ?5",
+        )
+        .bind(TraceRegistrationStatus::Pending.as_str())
+        .bind(TraceUploadStatus::Pending.as_str())
+        .bind(Utc::now().naive_utc())
+        .bind(trace_id)
+        .bind(TraceUploadStatus::Uploading.as_str())
+        .execute(&mut *tx)
+        .await?;
+        let restarted = result.rows_affected() > 0;
+        if restarted {
+            delete_trace_uploads(&mut tx, trace_id).await?;
+        }
+        tx.commit().await?;
+        Ok(restarted)
+    }
+
     async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
+        for table in TRACE_UPLOAD_TABLES {
+            sqlx::query(&format!(
+                "DELETE FROM {table} WHERE trace_id IN \
+                     (SELECT trace_id FROM traces WHERE recording_index = ?1)"
+            ))
+            .bind(recording_index)
+            .execute(&mut *tx)
+            .await?;
+        }
         let traces_deleted = sqlx::query("DELETE FROM traces WHERE recording_index = ?1")
             .bind(recording_index)
             .execute(&mut *tx)
@@ -1849,6 +2056,228 @@ mod tests {
             (row.stop_timestamp_us, row.stop_publish_timestamp_ns),
             (Some(1_700_000_005_123_456), Some(1_700_000_005_123_456_789))
         );
+    }
+
+    const JSON_FILEPATH: &str = "JOINT_POSITIONS/arm/trace.json";
+
+    fn json_uploads(upload_id: &str) -> MultipartUploads {
+        MultipartUploads::from([(
+            JSON_FILEPATH.to_string(),
+            MultipartUpload {
+                upload_id: upload_id.to_string(),
+                part_size_bytes: 16 * 1024 * 1024,
+                active_part_url: Some("https://storage.example/part-1".to_string()),
+                complete_url: "https://storage.example/complete".to_string(),
+                completed: false,
+            },
+        )])
+    }
+
+    async fn upload_part_rows(store: &SqliteStateStore) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM trace_upload_parts")
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn registration_stores_one_upload_per_file_in_place_of_the_old_ones() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        store
+            .create_trace(index, "trace-1", Some("RGB_IMAGES"), None)
+            .await
+            .unwrap();
+        assert!(store.get_trace_uploads("trace-1").await.unwrap().is_empty());
+
+        store
+            .mark_trace_registered("trace-1", &json_uploads("upload-old"))
+            .await
+            .unwrap();
+        store
+            .save_uploaded_part("trace-1", JSON_FILEPATH, 1, "\"etag-1\"", None)
+            .await
+            .unwrap();
+        let mut uploads = json_uploads("upload-json");
+        uploads.insert(
+            "RGB_IMAGES/cam0/lossy.mp4".to_string(),
+            MultipartUpload {
+                upload_id: "upload-lossy".to_string(),
+                part_size_bytes: 32 * 1024 * 1024,
+                active_part_url: None,
+                complete_url: "https://storage.example/complete-lossy".to_string(),
+                completed: false,
+            },
+        );
+        store
+            .mark_trace_registered("trace-1", &uploads)
+            .await
+            .unwrap();
+
+        assert_eq!(store.get_trace_uploads("trace-1").await.unwrap(), uploads);
+        assert!(
+            store
+                .get_uploaded_parts("trace-1", JSON_FILEPATH)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the parts of the old upload are dropped"
+        );
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.registration_status,
+            TraceRegistrationStatus::Registered
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_part_moves_the_active_part_url_of_its_file_only() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        for trace_id in ["trace-1", "trace-2"] {
+            store
+                .create_trace(index, trace_id, Some("JOINT_POSITIONS"), None)
+                .await
+                .unwrap();
+            store
+                .mark_trace_registered(trace_id, &json_uploads("upload-1"))
+                .await
+                .unwrap();
+        }
+
+        store
+            .save_uploaded_part(
+                "trace-1",
+                JSON_FILEPATH,
+                1,
+                "\"etag-1\"",
+                Some("https://storage.example/part-2"),
+            )
+            .await
+            .unwrap();
+        store
+            .save_uploaded_part("trace-1", JSON_FILEPATH, 2, "\"etag-2\"", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_uploaded_parts("trace-1", JSON_FILEPATH)
+                .await
+                .unwrap(),
+            UploadedParts::from([(1, "\"etag-1\"".to_string()), (2, "\"etag-2\"".to_string())])
+        );
+        let upload = &store.get_trace_uploads("trace-1").await.unwrap()[JSON_FILEPATH];
+        assert_eq!(upload.active_part_url, None);
+        assert!(!upload.completed);
+        assert_eq!(
+            store.get_trace_uploads("trace-2").await.unwrap(),
+            json_uploads("upload-1"),
+            "the other trace keeps its upload"
+        );
+        assert!(store
+            .get_uploaded_parts("trace-2", JSON_FILEPATH)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_completed_upload_drops_its_part_url_and_keeps_its_parts() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        store
+            .create_trace(index, "trace-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .mark_trace_registered("trace-1", &json_uploads("upload-1"))
+            .await
+            .unwrap();
+        store
+            .save_uploaded_part(
+                "trace-1",
+                JSON_FILEPATH,
+                1,
+                "\"etag-1\"",
+                Some("https://storage.example/part-2"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .mark_trace_upload_completed("trace-1", JSON_FILEPATH)
+            .await
+            .unwrap();
+
+        let upload = &store.get_trace_uploads("trace-1").await.unwrap()[JSON_FILEPATH];
+        assert!(upload.completed);
+        assert_eq!(upload.active_part_url, None);
+        assert_eq!(upload_part_rows(&store).await, 1);
+    }
+
+    #[tokio::test]
+    async fn restarting_a_trace_clears_its_uploads_only_from_the_expected_status() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        store
+            .create_trace(index, "trace-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .mark_trace_registered("trace-1", &json_uploads("upload-1"))
+            .await
+            .unwrap();
+        store
+            .save_uploaded_part("trace-1", JSON_FILEPATH, 1, "\"etag-1\"", None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Uploading),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Uploaded),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        let restarted = store.restart_trace_uploads("trace-1").await.unwrap();
+        assert!(!restarted);
+        assert_eq!(store.get_trace_uploads("trace-1").await.unwrap().len(), 1);
+        assert_eq!(upload_part_rows(&store).await, 1);
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_restarts, 0);
+
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Uploading),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        let restarted = store.restart_trace_uploads("trace-1").await.unwrap();
+        assert!(restarted);
+        assert!(store.get_trace_uploads("trace-1").await.unwrap().is_empty());
+        assert_eq!(upload_part_rows(&store).await, 0);
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
+        assert_eq!(trace.upload_status, TraceUploadStatus::Pending);
+        assert_eq!(trace.upload_restarts, 1);
     }
 
     #[tokio::test]
@@ -3007,11 +3436,27 @@ mod tests {
                 .create_trace(index, trace_id, Some("JOINT_POSITIONS"), None)
                 .await
                 .unwrap();
+            store
+                .mark_trace_registered(trace_id, &json_uploads(trace_id))
+                .await
+                .unwrap();
+            store
+                .save_uploaded_part(trace_id, JSON_FILEPATH, 1, "\"etag-1\"", None)
+                .await
+                .unwrap();
         }
         // A sibling recording + trace must survive the cascade.
         let other = seed_recording(&store, 9).await;
         store
             .create_trace(other, "keep", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .mark_trace_registered("keep", &json_uploads("keep"))
+            .await
+            .unwrap();
+        store
+            .save_uploaded_part("keep", JSON_FILEPATH, 1, "\"etag-1\"", None)
             .await
             .unwrap();
 
@@ -3021,9 +3466,20 @@ mod tests {
         assert!(store.get_recording(index).await.unwrap().is_none());
         assert!(store.get_trace("t-1").await.unwrap().is_none());
         assert!(store.get_trace("t-2").await.unwrap().is_none());
+        let upload_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trace_uploads")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(upload_rows, 1, "only the sibling's upload is left");
+        assert_eq!(
+            upload_part_rows(&store).await,
+            1,
+            "only the sibling's part is left"
+        );
 
         // Sibling untouched.
         assert!(store.get_recording(other).await.unwrap().is_some());
         assert!(store.get_trace("keep").await.unwrap().is_some());
+        assert_eq!(store.get_trace_uploads("keep").await.unwrap().len(), 1);
     }
 }

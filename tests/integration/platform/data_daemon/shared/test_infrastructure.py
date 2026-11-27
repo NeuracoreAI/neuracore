@@ -218,7 +218,12 @@ def apply_storage_state_action(storage_state_action: str) -> None:
         if db_path.exists():
             connection = sqlite3.connect(str(db_path))
             try:
-                for table in ("traces", "recordings"):
+                for table in (
+                    "trace_upload_parts",
+                    "trace_uploads",
+                    "traces",
+                    "recordings",
+                ):
                     try:
                         connection.execute(f"DELETE FROM {table}")
                     except sqlite3.OperationalError:
