@@ -18,7 +18,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
 use super::status::StatusUpdate;
-use super::upload_transfer::{upload_one_file, UploadFileError, UploadFileOutcome};
+use super::upload_transfer::{upload_one_file_resumable, ResumableUploadError, UploadFileOutcome};
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::content_type_for_filename;
 use crate::cloud::OrgIdRx;
@@ -515,7 +515,7 @@ async fn upload_single(
         // used (`cloud_files::content_type_for_filename`) so the refresh can't
         // disagree with what was originally registered.
         let content_type = content_type_for_filename(&filename);
-        let outcome = upload_one_file(
+        let outcome = upload_one_file_resumable(
             client,
             trace_writer,
             bus,
@@ -543,7 +543,7 @@ async fn upload_single(
                     persist_session_uris(store, trace_id, &session_uris).await;
                 }
             }
-            Err(UploadFileError::RecordingCancelled) => {
+            Err(ResumableUploadError::RecordingCancelled) => {
                 emit_upload_failed(
                     &trace,
                     &filename,
@@ -556,7 +556,7 @@ async fn upload_single(
                 super::discard_recording_locally(store, bus, trace.recording_index).await;
                 return;
             }
-            Err(UploadFileError::RecordingNotFound) => {
+            Err(ResumableUploadError::RecordingNotFound) => {
                 emit_upload_failed(
                     &trace,
                     &filename,
@@ -573,7 +573,7 @@ async fn upload_single(
                 .await;
                 return;
             }
-            Err(UploadFileError::Retry(error)) => {
+            Err(ResumableUploadError::Retry(error)) => {
                 tracing::warn!(%error, trace_id, "upload failed; rolling back to retrying");
                 crate::perf_events::emit(
                     "upload",
@@ -1853,7 +1853,7 @@ mod tests {
     #[tokio::test]
     async fn hard_4xx_chunk_error_rolls_trace_to_retrying() {
         // A non-retryable 4xx is a hard error: put_chunk returns Failed,
-        // upload_one_file errors, and the uploader rolls the trace to Retrying
+        // upload_one_file_resumable errors, and the uploader rolls the trace to Retrying
         // for the registration recovery sweep to re-arm.
         let server = MockServer::start().await;
         Mock::given(method("PUT"))

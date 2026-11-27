@@ -20,7 +20,7 @@ use tokio::time::sleep;
 use crate::api::auth::{AuthError, AuthProvider};
 use crate::api::models::{
     BatchRegisterResponse, RecordingStartResponse, RegisterTraceRequest,
-    ResumableUploadUrlResponse, TraceStatusUpdate,
+    ResumableUploadUrlResponse, TraceStatusUpdate, UploadPartsRequest, UploadPartsResponse,
 };
 
 /// Retry policy constants — match `const.py::BACKEND_API_*`.
@@ -242,8 +242,28 @@ impl ApiClient {
         Ok(response.status().as_u16() < 500)
     }
 
-    /// `POST /org/{org}/recording/traces/batch-register`.
+    /// `POST /v2/org/{org}/recording/traces/batch-register`.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub async fn batch_register(
+        &self,
+        org_id: &str,
+        traces: &[RegisterTraceRequest],
+    ) -> Result<BatchRegisterResponse, ApiClientError> {
+        let path = format!("/v2/org/{org_id}/recording/traces/batch-register");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            traces: &'a [RegisterTraceRequest],
+        }
+        let body = Body { traces };
+        let response = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        let bytes = response.bytes().await?;
+        serde_json::from_slice::<BatchRegisterResponse>(&bytes).map_err(ApiClientError::Decode)
+    }
+
+    /// `POST /org/{org}/recording/traces/batch-register`.
+    pub async fn batch_register_v1(
         &self,
         org_id: &str,
         traces: &[RegisterTraceRequest],
@@ -259,6 +279,25 @@ impl ApiClient {
             .await?;
         let bytes = response.bytes().await?;
         serde_json::from_slice::<BatchRegisterResponse>(&bytes).map_err(ApiClientError::Decode)
+    }
+
+    /// `POST /v2/org/{org}/uploads/parts`.
+    pub async fn upload_parts(
+        &self,
+        org_id: &str,
+        uploads: &[UploadPartsRequest],
+    ) -> Result<UploadPartsResponse, ApiClientError> {
+        let path = format!("/v2/org/{org_id}/uploads/parts");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            uploads: &'a [UploadPartsRequest],
+        }
+        let body = Body { uploads };
+        let response = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        let bytes = response.bytes().await?;
+        serde_json::from_slice::<UploadPartsResponse>(&bytes).map_err(ApiClientError::Decode)
     }
 
     /// `GET /org/{org}/recording/{rec}/resumable_upload_url`.
@@ -665,11 +704,16 @@ mod tests {
     async fn batch_register_round_trips_response() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [{
                     "trace_id": "trace-1",
-                    "upload_session_uris": {"rgb/cam_0/lossy.mp4": "https://upload.example/1"}
+                    "uploads": [{
+                        "filepath": "rgb/cam_0/lossy.mp4",
+                        "upload_id": "upload-1",
+                        "part_size_bytes": 16_777_216,
+                        "complete_url": "https://upload.example/complete"
+                    }]
                 }],
                 "failed_traces": []
             })))
@@ -716,13 +760,13 @@ mod tests {
     async fn retry_on_5xx_until_success() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(503))
             .up_to_n_times(2)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "registered_traces": [], "failed_traces": []
             })))
@@ -738,16 +782,16 @@ mod tests {
     #[tokio::test]
     async fn reloads_auth_on_401() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
+        Mock::given(method("POST"))
+            .and(path("/v2/org/org-1/uploads/parts"))
             .respond_with(ResponseTemplate::new(401))
             .up_to_n_times(1)
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
+        Mock::given(method("POST"))
+            .and(path("/v2/org/org-1/uploads/parts"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "url": "https://upload.example/abc"
+                "uploads": [], "missing_upload_ids": ["upload-1"]
             })))
             .expect(1)
             .mount(&server)
@@ -771,11 +815,17 @@ mod tests {
             calls: Arc::clone(&calls),
         });
         let client = ApiClient::new(options(server.uri()), auth).unwrap();
-        let url = client
-            .fetch_resumable_upload_url("org-1", "rec-1", "path", "application/json")
+        let response = client
+            .upload_parts(
+                "org-1",
+                &[UploadPartsRequest {
+                    upload_id: "upload-1".to_string(),
+                    part_numbers: vec![1],
+                }],
+            )
             .await
             .unwrap();
-        assert_eq!(url, "https://upload.example/abc");
+        assert_eq!(response.missing_upload_ids, vec!["upload-1"]);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -786,7 +836,7 @@ mod tests {
         // retrying forever. `expect(3)` pins the bounded attempt count.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(503))
             .expect(3)
             .mount(&server)
@@ -808,7 +858,7 @@ mod tests {
         // error instead of looping forever on reload + retry.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
@@ -883,7 +933,7 @@ mod tests {
     async fn non_retryable_status_surfaces_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/org/org-1/recording/traces/batch-register"))
+            .and(path("/v2/org/org-1/recording/traces/batch-register"))
             .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
             .expect(1)
             .mount(&server)

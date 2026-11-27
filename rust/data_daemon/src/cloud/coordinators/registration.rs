@@ -254,7 +254,7 @@ async fn submit_batch(
             None,
             serde_json::json!({"trace_count": payload.len()}),
         );
-        match client.batch_register(&org_id, &payload).await {
+        match client.batch_register_v1(&org_id, &payload).await {
             Ok(response) => {
                 crate::perf_events::emit(
                     "trace_registration",
