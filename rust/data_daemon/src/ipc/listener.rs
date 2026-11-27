@@ -388,6 +388,9 @@ async fn answer_registry_request(
                     instance = spec.instance,
                     "robot connected"
                 );
+                bus.publish(DaemonEvent::RobotConnected {
+                    robot_index: connected.robot_index,
+                });
                 RegistryReply::Index(connected.robot_index)
             })
         }

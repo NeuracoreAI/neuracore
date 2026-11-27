@@ -159,7 +159,6 @@ pub trait StateStore: Send + Sync {
 
     /// The robot rows the server is due to confirm at `now`: `pending`, with
     /// no wait running.
-    #[allow(dead_code)] // Used by the robot resolver.
     async fn robots_to_resolve(&self, now: NaiveDateTime)
         -> Result<Vec<RobotRow>, StateStoreError>;
 
@@ -173,7 +172,6 @@ pub trait StateStore: Send + Sync {
     /// The earliest time a `pending` robot row may be asked about again:
     /// `now` for one that may be asked about already, `None` when no row is
     /// pending.
-    #[allow(dead_code)] // Used by the robot resolver.
     async fn next_robot_attempt_at(
         &self,
         now: NaiveDateTime,
@@ -190,7 +188,6 @@ pub trait StateStore: Send + Sync {
     /// not needed). The row is `done` only if no new package was saved for it
     /// meanwhile; otherwise it stays `pending` with the id, so the new package
     /// is sent too. Returns whether the row is `done`.
-    #[allow(dead_code)] // Used by the robot resolver.
     async fn resolve_robot(
         &self,
         robot_index: i64,
@@ -208,7 +205,6 @@ pub trait StateStore: Send + Sync {
     /// Keep a `pending` robot row waiting until `until`, with `reason` when
     /// the user must fix something. Without a reason the earlier one stays:
     /// an outage does not show the user fixed it.
-    #[allow(dead_code)] // Used by the robot resolver.
     async fn hold_robot(
         &self,
         robot_index: i64,
@@ -234,7 +230,7 @@ pub trait StateStore: Send + Sync {
 
     /// The start notifier's periodic set, oldest first: recordings not yet
     /// started on the server that are cancelled (to settle), or whose start
-    /// was never sent and whose dataset row, if any, is confirmed.
+    /// was never sent and whose robot and dataset rows, if any, are confirmed.
     async fn recordings_for_start_resweep(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Stamp that the start notifier is sending the recording's start, so a
@@ -242,7 +238,6 @@ pub trait StateStore: Send + Sync {
     async fn mark_start_sent(&self, recording_index: i64) -> Result<(), StateStoreError>;
 
     /// Mark a `pending` robot row refused for good, with `reason`.
-    #[allow(dead_code)] // Used by the robot resolver.
     async fn fail_robot(
         &self,
         robot_index: i64,
@@ -1369,6 +1364,10 @@ impl StateStore for SqliteStateStore {
               WHERE r.recording_id IS NULL AND r.backend_start_notified_at IS NULL \
                 AND (r.cancelled_at IS NOT NULL \
                      OR (r.start_sent_at IS NULL \
+                         AND (r.robot_index IS NULL \
+                              OR EXISTS (SELECT 1 FROM robots rb \
+                                          WHERE rb.robot_index = r.robot_index \
+                                            AND rb.status = 'done')) \
                          AND (r.dataset_index IS NULL \
                               OR EXISTS (SELECT 1 FROM datasets d \
                                           WHERE d.dataset_index = r.dataset_index \
