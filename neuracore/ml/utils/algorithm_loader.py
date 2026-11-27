@@ -370,17 +370,44 @@ class AlgorithmLoader:
         package_name = self.algorithm_dir.name
 
         try:
-            # Add the parent directory to sys.path
+            # Put the parent directory first on sys.path, so the package name
+            # resolves to this directory rather than one loaded earlier.
             parent_dir = str(self.algorithm_dir.parent)
-            if parent_dir not in sys.path:
-                sys.path.insert(0, parent_dir)
-                logger.info(f"Added {parent_dir} to sys.path")
+            if parent_dir in sys.path:
+                sys.path.remove(parent_dir)
+            sys.path.insert(0, parent_dir)
+            logger.info(f"Added {parent_dir} to the front of sys.path")
         except Exception as e:
             error_msg = f"Failed to modify sys.path: {e}"
             logger.error(error_msg)
             raise PackageSetupError(error_msg) from e
 
         return package_name
+
+    def _clear_cached_package(self, package_name: str) -> None:
+        """Forget modules a previously loaded algorithm imported under this name.
+
+        Every archive extracts its algorithm to a directory of the same name
+        (``algorithm``), so without this a second load in the same process
+        would get the first algorithm's cached modules. Models already loaded
+        keep working: their classes hold references to their own modules.
+
+        Args:
+            package_name: Name the algorithm package is imported under.
+        """
+        # ``algorithm``, its submodules, and the ``algorithm_<file>`` names the
+        # spec-based fallback import registers.
+        prefixes = (f"{package_name}.", f"{package_name}_")
+        stale = [
+            name
+            for name in sys.modules
+            if name == package_name or name.startswith(prefixes)
+        ]
+        for name in stale:
+            del sys.modules[name]
+        if stale:
+            logger.info(f"Cleared {len(stale)} cached module(s) for {package_name}")
+        importlib.invalidate_caches()
 
     def _find_model_in_module(
         self, module: types.ModuleType, module_name: str
@@ -572,6 +599,7 @@ class AlgorithmLoader:
 
         # Set up package environment
         package_name = self._setup_package_environment()
+        self._clear_cached_package(package_name)
 
         # Try importing the entire package first
         try:

@@ -1,5 +1,6 @@
 import importlib.metadata
 import subprocess
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -149,3 +150,56 @@ def test_packaged_install_runs_once_per_algorithm(loader_class):
     install_packaged_algorithm_requirements(target)
 
     loader_class.return_value.install_requirements.assert_called_once_with()
+
+
+def _write_algorithm(root, class_name):
+    """Write an archive-style ``algorithm`` package whose model uses a relative import.
+
+    Returns:
+        The ``algorithm`` directory.
+    """
+    algorithm_dir = root / "algorithm"
+    algorithm_dir.mkdir(parents=True)
+    (algorithm_dir / "modules.py").write_text(f'NAME = "{class_name}"\n')
+    (algorithm_dir / "model.py").write_text(
+        "from neuracore.ml.core.neuracore_model import NeuracoreModel\n"
+        "from .modules import NAME\n\n\n"
+        f"class {class_name}(NeuracoreModel):\n"
+        "    def name(self):\n"
+        "        return NAME\n"
+    )
+    (algorithm_dir / "__init__.py").write_text(f"from .model import {class_name}\n")
+    return algorithm_dir
+
+
+@pytest.fixture
+def restore_algorithm_modules():
+    """Drop the test ``algorithm`` packages from sys.modules and sys.path afterwards."""
+    path = list(sys.path)
+    yield
+    sys.path[:] = path
+    for name in [n for n in sys.modules if n.startswith("algorithm")]:
+        del sys.modules[name]
+
+
+def test_second_algorithm_in_one_process_loads_its_own_code(
+    tmp_path, restore_algorithm_modules
+):
+    first = AlgorithmLoader(_write_algorithm(tmp_path / "a", "ModelA")).load_model()
+    second = AlgorithmLoader(_write_algorithm(tmp_path / "b", "ModelB")).load_model()
+
+    assert first.__name__ == "ModelA"
+    assert second.__name__ == "ModelB"
+    # The first model still runs its own code after the second one loads.
+    assert first.name(None) == "ModelA"
+    assert second.name(None) == "ModelB"
+
+
+def test_reloading_an_earlier_algorithm_loads_it_again(
+    tmp_path, restore_algorithm_modules
+):
+    dir_a = _write_algorithm(tmp_path / "a", "ModelA")
+    AlgorithmLoader(dir_a).load_model()
+    AlgorithmLoader(_write_algorithm(tmp_path / "b", "ModelB")).load_model()
+
+    assert AlgorithmLoader(dir_a).load_model().__name__ == "ModelA"
