@@ -228,6 +228,9 @@ pub trait StateStore: Send + Sync {
         recording_index: i64,
     ) -> Result<Option<String>, StateStoreError>;
 
+    /// Every saved robot package a robot row names, waiting to be sent.
+    async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError>;
+
     /// The start notifier's periodic set, oldest first: recordings not yet
     /// started on the server that are cancelled (to settle), or whose start
     /// was never sent and whose robot and dataset rows, if any, are confirmed.
@@ -1356,6 +1359,14 @@ impl StateStore for SqliteStateStore {
         .fetch_optional(&self.read_pool)
         .await?;
         Ok(org.flatten())
+    }
+
+    async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError> {
+        let paths =
+            sqlx::query_scalar("SELECT package_path FROM robots WHERE package_path IS NOT NULL")
+                .fetch_all(&self.read_pool)
+                .await?;
+        Ok(paths)
     }
 
     async fn recordings_for_start_resweep(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
