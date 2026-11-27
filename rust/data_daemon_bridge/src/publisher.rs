@@ -45,8 +45,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, HEALTH, HEALTH_MAX_PAYLOAD_BYTES,
     LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE, MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE,
-    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION,
-    VERSION_MAX_PAYLOAD_BYTES,
+    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, REGISTRY,
+    REGISTRY_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
 };
 use data_daemon_shared::{microseconds_to_seconds, BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -107,6 +107,11 @@ pub(crate) struct ProducerState {
     /// Request-response client used to ask the daemon which recording, if any,
     /// a source currently has open.
     pub(crate) recording_state_client: Client<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the registry client.
+    _registry_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response client used to connect robots and select datasets
+    /// through the daemon, and to read their state.
+    pub(crate) registry_client: Client<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the health client so port discovery doesn't
     /// race the handle going out of scope.
     _health_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
@@ -363,6 +368,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
 
     let (recording_state_service, recording_state_client) =
         open_query_client(&node, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES)?;
+    let (registry_service, registry_client) =
+        open_query_client(&node, REGISTRY, REGISTRY_MAX_PAYLOAD_BYTES)?;
     let (health_service, health_client) =
         open_query_client(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
     let (version_service, version_client) =
@@ -374,6 +381,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         commands_publisher,
         _recording_state_service: recording_state_service,
         recording_state_client,
+        _registry_service: registry_service,
+        registry_client,
         _health_service: health_service,
         health_client,
         _version_service: version_service,

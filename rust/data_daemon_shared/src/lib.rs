@@ -415,6 +415,17 @@ pub mod service_name {
     /// generous.
     pub const RECORDING_STATE_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
+    /// Request-response service the SDK uses to connect robots and select
+    /// datasets through the daemon, and to read whether the server has
+    /// confirmed them.
+    ///
+    /// See [`crate::RegistryRequest`] / [`crate::RegistryReply`].
+    pub const REGISTRY: &str = "neuracore/data_daemon/registry";
+
+    /// Maximum size of a single `registry` service sample. A request carries a
+    /// robot or dataset name, a dataset description and tags, and a file path.
+    pub const REGISTRY_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+
     /// Maximum number of concurrent request-response clients. Mirrors
     /// [`MAX_PUBLISHERS_PER_SERVICE`]: the data bridge parks one client port
     /// per OS thread (iceoryx2 ports are `!Sync`), so the cap must cover the
@@ -843,6 +854,81 @@ pub struct RecordingStateReply {
     pub recording: Option<LiveRecording>,
 }
 
+/// A robot instance to connect, as `nc.connect_robot` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobotSpec {
+    /// The organization to connect it in.
+    pub org_id: String,
+    pub name: String,
+    pub shared: bool,
+    pub instance: i64,
+    /// Overwrite the server's URDF with this package.
+    pub overwrite_urdf: bool,
+    /// The URDF package the SDK saved for the server, if the robot has one.
+    /// The daemon deletes the file once the server has it.
+    pub package_path: Option<String>,
+}
+
+/// A dataset to record into, as `nc.create_dataset` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetSpec {
+    /// The organization to find or create it in.
+    pub org_id: String,
+    pub name: String,
+    pub shared: bool,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// Request sent over [`service_name::REGISTRY`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegistryRequest {
+    /// Find or create the robot's row and have the server confirm it.
+    /// Answered with [`RegistryReply::Index`].
+    ConnectRobot(RobotSpec),
+    /// Find or create the dataset's row and have the server confirm it.
+    /// Answered with [`RegistryReply::Index`].
+    SelectDataset(DatasetSpec),
+    /// Answered with [`RegistryReply::State`].
+    RobotState { robot_index: i64 },
+    /// Answered with [`RegistryReply::State`].
+    DatasetState { dataset_index: i64 },
+}
+
+/// Whether the server has confirmed a robot or dataset row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowStatus {
+    /// Not confirmed yet; `reason` says why it is held, if it is.
+    Pending,
+    /// Confirmed; `cloud_id` is the server's id.
+    Done,
+    /// Refused for good; `reason` says why.
+    Failed,
+}
+
+/// A robot or dataset row as the daemon holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowState {
+    pub status: RowStatus,
+    /// The server's id, once the row is confirmed.
+    pub cloud_id: Option<String>,
+    /// Why a pending row is held, or why the row failed, as a reason code.
+    pub reason: Option<String>,
+}
+
+/// Reply to a [`RegistryRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegistryReply {
+    /// The row's index.
+    Index(i64),
+    /// The row's state.
+    State(RowState),
+    /// No row has that index.
+    Unknown,
+    /// The daemon refused the request, and why.
+    Refused(String),
+}
+
 /// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthRequest {
@@ -874,6 +960,30 @@ pub struct VersionReply {
     pub nonce: u64,
     /// The neuracore version the answering daemon was built from.
     pub version: String,
+}
+
+impl RegistryRequest {
+    /// Encode as a postcard byte vector for a `registry` request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `registry` request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl RegistryReply {
+    /// Encode as a postcard byte vector for a `registry` response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `registry` response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
 }
 
 impl RecordingStateQuery {
@@ -976,6 +1086,53 @@ mod tests {
             HealthReply::decode(&reply.encode().unwrap()).unwrap(),
             reply
         );
+    }
+
+    #[test]
+    fn registry_requests_and_replies_round_trip() {
+        let requests = [
+            RegistryRequest::ConnectRobot(RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 7,
+                overwrite_urdf: true,
+                package_path: Some("/tmp/package.zip".into()),
+            }),
+            RegistryRequest::SelectDataset(DatasetSpec {
+                org_id: "org-1".into(),
+                name: "warehouse".into(),
+                shared: true,
+                description: Some("pick and place".into()),
+                tags: vec!["shelf-a".into()],
+            }),
+            RegistryRequest::RobotState { robot_index: 3 },
+            RegistryRequest::DatasetState { dataset_index: 4 },
+        ];
+        for request in requests {
+            let bytes = request.encode().unwrap();
+            assert_eq!(RegistryRequest::decode(&bytes).unwrap(), request);
+        }
+        let replies = [
+            RegistryReply::Index(12),
+            RegistryReply::State(RowState {
+                status: RowStatus::Pending,
+                cloud_id: None,
+                reason: Some("robot_archived".into()),
+            }),
+            RegistryReply::State(RowState {
+                status: RowStatus::Done,
+                cloud_id: Some("cloud-robot-1".into()),
+                reason: None,
+            }),
+            RegistryReply::Unknown,
+            RegistryReply::Refused("no organization".into()),
+        ];
+        for reply in replies {
+            let bytes = reply.encode().unwrap();
+            assert_eq!(RegistryReply::decode(&bytes).unwrap(), reply);
+            assert!(bytes.len() <= service_name::REGISTRY_MAX_PAYLOAD_BYTES);
+        }
     }
 
     #[test]

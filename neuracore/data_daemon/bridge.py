@@ -9,9 +9,11 @@ for the native side.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib import import_module
 from types import ModuleType
-from typing import NamedTuple
+from typing import Literal, NamedTuple, Protocol, cast
 
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
@@ -112,6 +114,239 @@ def query_recording_state(
         cloud_recording_id=live["cloud_recording_id"],
         start_timestamp_us=live["start_timestamp_us"],
     )
+
+
+# How long one robot or dataset request waits for the daemon to answer. The
+# daemon answers from its own state store, so only a stalled daemon is slow.
+REGISTRY_TIMEOUT_S = 5.0
+
+
+class RegistryUnavailableError(RuntimeError):
+    """The daemon did not answer a robot or dataset request in time."""
+
+
+class RegistryRefusedError(RuntimeError):
+    """The daemon refused to connect a robot or select a dataset."""
+
+
+RowStatus = Literal["pending", "done", "failed"]
+
+
+class RowState(NamedTuple):
+    """A robot or dataset row as the daemon holds it.
+
+    Attributes:
+        status: ``"pending"`` until the server confirms the row, ``"done"``
+            once it has, ``"failed"`` once the server refused it for good.
+        cloud_id: The server's id, once the row is ``"done"``.
+        reason: Why a pending row is held, or why the row failed, as a reason
+            code such as ``"robot_archived"``.
+    """
+
+    status: RowStatus
+    cloud_id: str | None
+    reason: str | None
+
+
+class _NativeRowState(Protocol):
+    """A row's state as the native bridge returns it."""
+
+    @property
+    def status(self) -> str: ...
+
+    @property
+    def cloud_id(self) -> str | None: ...
+
+    @property
+    def reason(self) -> str | None: ...
+
+
+class _NativeRegistry(Protocol):
+    """The robot and dataset registry calls of the ``_data_bridge`` extension.
+
+    Every argument is keyword-only on the native side, so a call cannot pass
+    one in the wrong place.
+    """
+
+    RegistryUnavailableError: type[Exception]
+    RegistryRefusedError: type[Exception]
+
+    def connect_robot(
+        self,
+        *,
+        org_id: str,
+        name: str,
+        shared: bool,
+        instance: int,
+        overwrite_urdf: bool,
+        package_path: str | None,
+        timeout_s: float,
+    ) -> int: ...
+
+    def select_dataset(
+        self,
+        *,
+        org_id: str,
+        name: str,
+        shared: bool,
+        description: str | None,
+        tags: list[str],
+        timeout_s: float,
+    ) -> int: ...
+
+    def robot_state(
+        self, *, robot_index: int, timeout_s: float
+    ) -> _NativeRowState | None: ...
+
+    def dataset_state(
+        self, *, dataset_index: int, timeout_s: float
+    ) -> _NativeRowState | None: ...
+
+
+def _registry() -> _NativeRegistry:
+    """The native bridge's registry calls."""
+    return cast(_NativeRegistry, _load_native())
+
+
+@contextmanager
+def _registry_errors(native: _NativeRegistry) -> Iterator[None]:
+    """Raise the native bridge's registry errors as the SDK's own."""
+    try:
+        yield
+    except native.RegistryUnavailableError as error:
+        raise RegistryUnavailableError(str(error)) from error
+    except native.RegistryRefusedError as error:
+        raise RegistryRefusedError(str(error)) from error
+
+
+def _row_state(state: _NativeRowState | None) -> RowState | None:
+    if state is None:
+        return None
+    return RowState(
+        status=cast(RowStatus, state.status),
+        cloud_id=state.cloud_id,
+        reason=state.reason,
+    )
+
+
+def connect_robot_row(
+    *,
+    org_id: str,
+    name: str,
+    shared: bool,
+    instance: int,
+    overwrite_urdf: bool,
+    package_path: str | None,
+) -> int:
+    """Connect a robot instance through the daemon and return its row's index.
+
+    Starts the daemon if it is not running. The daemon finds or creates the
+    row and has the server confirm it in the background, so this returns
+    without waiting on the network.
+
+    Args:
+        org_id: The organization to connect the robot in.
+        name: The robot's name.
+        shared: Whether the robot is shared.
+        instance: The robot instance.
+        overwrite_urdf: Whether the saved package replaces the server's URDF.
+        package_path: The URDF package saved for the server, if any. The
+            daemon deletes it once the server has it.
+
+    Returns:
+        The robot row's index.
+
+    Raises:
+        RegistryUnavailableError: the daemon did not answer.
+        RegistryRefusedError: the daemon refused the request.
+    """
+    ensure_daemon_running()
+    native = _registry()
+    with _registry_errors(native):
+        return native.connect_robot(
+            org_id=org_id,
+            name=name,
+            shared=shared,
+            instance=instance,
+            overwrite_urdf=overwrite_urdf,
+            package_path=package_path,
+            timeout_s=REGISTRY_TIMEOUT_S,
+        )
+
+
+def select_dataset_row(
+    *,
+    org_id: str,
+    name: str,
+    shared: bool,
+    description: str | None,
+    tags: list[str],
+) -> int:
+    """Select a dataset through the daemon and return its row's index.
+
+    Starts the daemon if it is not running. The daemon finds or creates the
+    row and has the server find the dataset, or create it if it has none of
+    that name, in the background, so this returns without waiting on the
+    network.
+
+    Args:
+        org_id: The organization to find or create the dataset in.
+        name: The dataset's name.
+        shared: Whether the dataset is shared.
+        description: The description to create the dataset with.
+        tags: The tags to create the dataset with.
+
+    Returns:
+        The dataset row's index.
+
+    Raises:
+        RegistryUnavailableError: the daemon did not answer.
+        RegistryRefusedError: the daemon refused the request.
+    """
+    ensure_daemon_running()
+    native = _registry()
+    with _registry_errors(native):
+        return native.select_dataset(
+            org_id=org_id,
+            name=name,
+            shared=shared,
+            description=description,
+            tags=tags,
+            timeout_s=REGISTRY_TIMEOUT_S,
+        )
+
+
+def robot_row_state(robot_index: int) -> RowState | None:
+    """The state of a robot row, or ``None`` when the daemon has no such row.
+
+    Never starts the daemon: a caller may poll this, and the row only exists
+    if the daemon ran.
+
+    Raises:
+        RegistryUnavailableError: the daemon did not answer.
+        RegistryRefusedError: the daemon could not read the row.
+    """
+    native = _registry()
+    with _registry_errors(native):
+        state = native.robot_state(
+            robot_index=robot_index, timeout_s=REGISTRY_TIMEOUT_S
+        )
+    return _row_state(state)
+
+
+def dataset_row_state(dataset_index: int) -> RowState | None:
+    """The state of a dataset row, as :func:`robot_row_state`.
+
+    Raises:
+        RegistryUnavailableError: the daemon did not answer.
+        RegistryRefusedError: the daemon could not read the row.
+    """
+    native = _registry()
+    with _registry_errors(native):
+        state = native.dataset_state(
+            dataset_index=dataset_index, timeout_s=REGISTRY_TIMEOUT_S
+        )
+    return _row_state(state)
 
 
 class LoggingStalledError(RuntimeError):

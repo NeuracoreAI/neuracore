@@ -425,6 +425,7 @@ pthread
 pyarrow
 pyav
 pycache
+pyclass
 pydantic
 pyee
 pyfunction

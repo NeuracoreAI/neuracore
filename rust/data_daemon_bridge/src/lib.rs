@@ -52,7 +52,10 @@ mod query;
 mod recording_state_cache;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameCalibration, FrameDtype, NANOSECONDS_PER_MICROSECOND};
+use data_daemon_shared::{
+    DatasetSpec, Envelope, FrameCalibration, FrameDtype, RegistryReply, RegistryRequest, RobotSpec,
+    RowState, RowStatus, NANOSECONDS_PER_MICROSECOND,
+};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -60,7 +63,8 @@ use pyo3::types::PyDict;
 
 use crate::publisher::{flush_published_data, now_ns, publish, publisher_tx, PublishMsg};
 use crate::query::{
-    daemon_version as daemon_version_impl, wait_until_ready as wait_until_ready_impl,
+    daemon_version as daemon_version_impl, registry as registry_impl,
+    wait_until_ready as wait_until_ready_impl,
 };
 use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 
@@ -635,6 +639,164 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
     })
 }
 
+pyo3::create_exception!(
+    _data_bridge,
+    RegistryRefusedError,
+    PyRuntimeError,
+    "The daemon refused to connect the robot or select the dataset."
+);
+
+pyo3::create_exception!(
+    _data_bridge,
+    RegistryUnavailableError,
+    PyRuntimeError,
+    "The daemon did not answer a robot or dataset request in time."
+);
+
+/// Send `request` to the daemon's registry service with the GIL released.
+///
+/// Raises `RegistryUnavailableError` when nothing answers within `timeout_s`
+/// and `RegistryRefusedError` when the daemon refuses the request.
+fn ask_registry(
+    py: Python<'_>,
+    request: RegistryRequest,
+    timeout_s: f64,
+) -> PyResult<RegistryReply> {
+    match py.detach(|| registry_impl(&request, timeout_s))? {
+        None => Err(RegistryUnavailableError::new_err(
+            "the data daemon did not answer in time",
+        )),
+        Some(RegistryReply::Refused(why)) => Err(RegistryRefusedError::new_err(why)),
+        Some(reply) => Ok(reply),
+    }
+}
+
+fn expect_index(reply: RegistryReply) -> PyResult<i64> {
+    match reply {
+        RegistryReply::Index(index) => Ok(index),
+        other => Err(PyRuntimeError::new_err(format!(
+            "unexpected registry reply: {other:?}"
+        ))),
+    }
+}
+
+/// A robot or dataset row as the daemon holds it, as Python sees it.
+#[pyclass(name = "RowState", frozen, get_all)]
+struct PyRowState {
+    /// `"pending"`, `"done"` or `"failed"`.
+    status: &'static str,
+    /// The server's id, once the row is done.
+    cloud_id: Option<String>,
+    /// Why a pending row is held, or why the row failed, as a reason code.
+    reason: Option<String>,
+}
+
+/// A row's state, or `None` when the daemon has no row with that index.
+fn row_state(reply: RegistryReply) -> PyResult<Option<PyRowState>> {
+    let RowState {
+        status,
+        cloud_id,
+        reason,
+    } = match reply {
+        RegistryReply::State(state) => state,
+        RegistryReply::Unknown => return Ok(None),
+        other => {
+            return Err(PyRuntimeError::new_err(format!(
+                "unexpected registry reply: {other:?}"
+            )))
+        }
+    };
+    let status = match status {
+        RowStatus::Pending => "pending",
+        RowStatus::Done => "done",
+        RowStatus::Failed => "failed",
+    };
+    Ok(Some(PyRowState {
+        status,
+        cloud_id,
+        reason,
+    }))
+}
+
+/// Connect a robot instance through the daemon: the daemon finds or creates
+/// its row and has the server confirm it in the background. Returns the
+/// row's index, which identifies the robot instance from then on.
+#[pyfunction]
+#[pyo3(signature = (*, org_id, name, shared, instance, overwrite_urdf, package_path, timeout_s))]
+#[allow(clippy::too_many_arguments)]
+fn connect_robot(
+    py: Python<'_>,
+    org_id: String,
+    name: String,
+    shared: bool,
+    instance: i64,
+    overwrite_urdf: bool,
+    package_path: Option<String>,
+    timeout_s: f64,
+) -> PyResult<i64> {
+    let request = RegistryRequest::ConnectRobot(RobotSpec {
+        org_id,
+        name,
+        shared,
+        instance,
+        overwrite_urdf,
+        package_path,
+    });
+    expect_index(ask_registry(py, request, timeout_s)?)
+}
+
+/// Select a dataset to record into through the daemon: the daemon finds or
+/// creates its row and has the server find or create the dataset in the
+/// background. Returns the row's index.
+#[pyfunction]
+#[pyo3(signature = (*, org_id, name, shared, description, tags, timeout_s))]
+#[allow(clippy::too_many_arguments)]
+fn select_dataset(
+    py: Python<'_>,
+    org_id: String,
+    name: String,
+    shared: bool,
+    description: Option<String>,
+    tags: Vec<String>,
+    timeout_s: f64,
+) -> PyResult<i64> {
+    let request = RegistryRequest::SelectDataset(DatasetSpec {
+        org_id,
+        name,
+        shared,
+        description,
+        tags,
+    });
+    expect_index(ask_registry(py, request, timeout_s)?)
+}
+
+/// The state of a robot row: whether the server has confirmed it, its server
+/// id, and why it is held or failed. `None` when no row has that index.
+#[pyfunction]
+#[pyo3(signature = (*, robot_index, timeout_s))]
+fn robot_state(py: Python<'_>, robot_index: i64, timeout_s: f64) -> PyResult<Option<PyRowState>> {
+    row_state(ask_registry(
+        py,
+        RegistryRequest::RobotState { robot_index },
+        timeout_s,
+    )?)
+}
+
+/// The state of a dataset row, as [`robot_state`].
+#[pyfunction]
+#[pyo3(signature = (*, dataset_index, timeout_s))]
+fn dataset_state(
+    py: Python<'_>,
+    dataset_index: i64,
+    timeout_s: f64,
+) -> PyResult<Option<PyRowState>> {
+    row_state(ask_registry(
+        py,
+        RegistryRequest::DatasetState { dataset_index },
+        timeout_s,
+    )?)
+}
+
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -650,6 +812,19 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
+    module.add_function(wrap_pyfunction!(connect_robot, module)?)?;
+    module.add_function(wrap_pyfunction!(select_dataset, module)?)?;
+    module.add_function(wrap_pyfunction!(robot_state, module)?)?;
+    module.add_function(wrap_pyfunction!(dataset_state, module)?)?;
+    module.add_class::<PyRowState>()?;
+    module.add(
+        "RegistryRefusedError",
+        module.py().get_type::<RegistryRefusedError>(),
+    )?;
+    module.add(
+        "RegistryUnavailableError",
+        module.py().get_type::<RegistryUnavailableError>(),
+    )?;
     module.add(
         "LoggingStalledError",
         module.py().get_type::<LoggingStalledError>(),
