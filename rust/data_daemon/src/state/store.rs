@@ -371,7 +371,7 @@ pub trait StateStore: Send + Sync {
     #[allow(dead_code)]
     async fn recordings_for_source(
         &self,
-        robot_id: &str,
+        robot_index: i64,
         robot_instance: i64,
     ) -> Result<Vec<RecordingRow>, StateStoreError>;
 
@@ -398,7 +398,7 @@ pub trait StateStore: Send + Sync {
     async fn recording_index_for_known_recording(
         &self,
         recording_id: &str,
-        robot_id: &str,
+        robot_index: i64,
         robot_instance: i64,
         start_timestamp_us: i64,
         tolerance_us: u64,
@@ -1854,15 +1854,15 @@ impl StateStore for SqliteStateStore {
 
     async fn recordings_for_source(
         &self,
-        robot_id: &str,
+        robot_index: i64,
         robot_instance: i64,
     ) -> Result<Vec<RecordingRow>, StateStoreError> {
         let rows = sqlx::query(
             "SELECT * FROM recordings \
-              WHERE robot_id = ?1 AND robot_instance = ?2 \
+              WHERE robot_index = ?1 AND robot_instance = ?2 \
            ORDER BY recording_index ASC",
         )
-        .bind(robot_id)
+        .bind(robot_index)
         .bind(robot_instance)
         .fetch_all(&self.read_pool)
         .await?;
@@ -1912,7 +1912,7 @@ impl StateStore for SqliteStateStore {
     async fn recording_index_for_known_recording(
         &self,
         recording_id: &str,
-        robot_id: &str,
+        robot_index: i64,
         robot_instance: i64,
         start_timestamp_us: i64,
         tolerance_us: u64,
@@ -1921,12 +1921,12 @@ impl StateStore for SqliteStateStore {
             "SELECT recording_index FROM recordings \
               WHERE recording_id = ?1 \
                  OR (recording_id IS NULL \
-                     AND robot_id = ?2 AND robot_instance = ?3 \
+                     AND robot_index = ?2 AND robot_instance = ?3 \
                      AND ABS(start_timestamp_us - ?4) <= ?5) \
               LIMIT 1",
         )
         .bind(recording_id)
-        .bind(robot_id)
+        .bind(robot_index)
         .bind(robot_instance)
         .bind(start_timestamp_us)
         .bind(i64::try_from(tolerance_us).unwrap_or(i64::MAX))
@@ -3310,9 +3310,22 @@ mod tests {
 
     /// Insert a recording for `(robot-1, instance)` and return its index.
     async fn seed_recording(store: &SqliteStateStore, instance: i64) -> i64 {
+        // The robot it records: row 1 in a fresh store.
+        let robot_index = store
+            .connect_robot(&RobotSpec {
+                org_id: "org-1".into(),
+                name: "robot-1".into(),
+                shared: false,
+                instance: 0,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .expect("connect robot")
+            .robot_index;
         store
             .create_recording(NewRecording {
-                robot_index: None,
+                robot_index: Some(robot_index),
                 dataset_index: None,
                 robot_id: Some("robot-1"),
                 robot_instance: Some(instance),
@@ -3440,7 +3453,7 @@ mod tests {
         // A different instance must not be returned.
         seed_recording(&store, 9).await;
 
-        let rows = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let rows = store.recordings_for_source(1, 0).await.unwrap();
         let indices: Vec<i64> = rows.iter().map(|row| row.recording_index).collect();
         assert_eq!(indices, vec![first, second]);
     }
@@ -3457,7 +3470,7 @@ mod tests {
                 store
                     .recording_index_for_known_recording(
                         recording_id,
-                        "robot-1",
+                        1,
                         instance,
                         start_us,
                         TOLERANCE_US,

@@ -367,7 +367,7 @@ async fn serve_recording_state_queries(
 
         let reply = RecordingStateReply {
             recording: recording_state
-                .live(store, &query.robot_id, query.robot_instance)
+                .live(store, query.robot_index, query.robot_instance)
                 .await,
         };
 

@@ -234,7 +234,7 @@ def test_cancel_recording_produces_no_data(
                     # first datum. Resolve its row only after publishing data;
                     # waiting before that deadlocks the remote-control case.
                     recording_index = wait_for_recording_index_for_source(
-                        str(robot.id),
+                        robot.robot_index,
                         int(robot.instance),
                     )
                     _await_materialized_recording(recording_index)

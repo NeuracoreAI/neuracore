@@ -330,7 +330,7 @@ class Robot:
         """
         timestamp_us = resolve_timestamp_us(timestamp)
         self._get_daemon_recording_context().start_recording(
-            robot_id=str(self.robot_index),
+            robot_index=self.robot_index,
             robot_instance=self.instance,
             robot_name=self.name,
             dataset_index=dataset_index,
@@ -409,9 +409,7 @@ class Robot:
                 started says nothing about a recording opened elsewhere.
         """
         return (
-            recording_context.query_recording_state(
-                str(self.robot_index), self.instance
-            )
+            recording_context.query_recording_state(self.robot_index, self.instance)
             is not None
         )
 
@@ -446,7 +444,7 @@ class Robot:
             recording is open.
         """
         recording = recording_context.query_recording_state(
-            str(self.robot_index), self.instance, timeout_s=timeout_s
+            self.robot_index, self.instance, timeout_s=timeout_s
         )
         return recording.cloud_recording_id if recording is not None else None
 
@@ -752,7 +750,7 @@ class Robot:
         """Return a reusable daemon recording context, creating it lazily."""
         if self._daemon_recording_context is None:
             context = DaemonRecordingContext()
-            context.bind_source(str(self.robot_index), self.instance)
+            context.bind_source(self.robot_index, self.instance)
             self._daemon_recording_context = context
         return self._daemon_recording_context
 

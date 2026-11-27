@@ -13,7 +13,7 @@
 //! recording identity on the wire.
 //!
 //! The surface the SDK's logging layer drives, all keyed by the **source**
-//! `(robot_id, robot_instance)`:
+//! `(robot_index, robot_instance)`:
 //!
 //! - [`start_recording`] / [`stop_recording`] / [`cancel_recording`] publish
 //!   one lifecycle envelope each, carrying the lifecycle wall-clock
@@ -82,18 +82,14 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 #[pyfunction]
 fn start_recording(
     py: Python<'_>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     robot_name: Option<String>,
     dataset_index: Option<i64>,
     dataset_name: Option<String>,
     timestamp_us: Option<i64>,
 ) -> PyResult<i64> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let robot_id = robot_id.to_string();
-    let robot_id_for_boundary = robot_id.clone();
+    let robot_index_for_boundary = robot_index;
     py.detach(|| -> PyResult<i64> {
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
@@ -101,7 +97,7 @@ fn start_recording(
         let capture_timestamp_us =
             timestamp_us.unwrap_or(publish_timestamp_ns / NANOSECONDS_PER_MICROSECOND);
         publish(&Envelope::StartRecording {
-            robot_id,
+            robot_index,
             robot_instance,
             robot_name,
             dataset_index,
@@ -113,7 +109,7 @@ fn start_recording(
         // process now holds the same identity a refresh would fetch — a
         // recording bracketed here needs no query at all.
         recording_state_cache::note_local_start(
-            &robot_id_for_boundary,
+            robot_index_for_boundary,
             robot_instance,
             capture_timestamp_us,
         );
@@ -134,25 +130,22 @@ fn start_recording(
 /// (~1000 joints ≈ 2 ms). The names are split and zipped with the values on the
 /// publisher thread, off this path.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, names, values, timestamp_us))]
+#[pyo3(signature = (robot_index, robot_instance, data_type, names, values, timestamp_us))]
 fn log_joints(
     py: Python<'_>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     names: &str,
     values: Vec<f64>,
     timestamp_us: i64,
 ) -> PyResult<()> {
-    if robot_id.is_empty() || data_type.is_empty() {
-        return Err(PyValueError::new_err(
-            "robot_id and data_type must not be empty",
-        ));
+    if data_type.is_empty() {
+        return Err(PyValueError::new_err("data_type must not be empty"));
     }
     if values.is_empty() {
         return Ok(());
     }
-    let robot_id = robot_id.to_string();
     let data_type = data_type.to_string();
     let joined_names = names.to_string();
     py.detach(move || {
@@ -163,7 +156,7 @@ fn log_joints(
         // commands buffer — off this call.
         let publish_timestamp_ns = now_ns();
         let _ = publisher_tx().send(PublishMsg::Joint {
-            robot_id,
+            robot_index,
             robot_instance,
             data_type,
             joined_names,
@@ -197,11 +190,11 @@ pyo3::create_exception!(
 /// boundary; every internal Rust component downstream works with the strongly
 /// typed [`FrameDtype`].
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_us, depth_scale_m = None, intrinsics = None, extrinsics = None))]
+#[pyo3(signature = (robot_index, robot_instance, data_type, name, width, height, dtype, payload, timestamp_us, depth_scale_m = None, intrinsics = None, extrinsics = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     name: &str,
@@ -214,9 +207,9 @@ fn log_frame(
     intrinsics: Option<Vec<f32>>,
     extrinsics: Option<Vec<f32>>,
 ) -> PyResult<()> {
-    if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
+    if data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
-            "robot_id, data_type and name must not be empty",
+            "data_type and name must not be empty",
         ));
     }
     let frame_dtype =
@@ -250,7 +243,7 @@ fn log_frame(
     };
 
     let job = FrameJob {
-        robot_id: robot_id.to_string(),
+        robot_index,
         robot_instance,
         data_type: data_type.to_string(),
         sensor_name: name.to_string(),
@@ -271,7 +264,7 @@ fn log_frame(
     // admitted before the spool-stall window elapses surfaces as an error rather
     // than being silently dropped, so the caller learns the daemon has stalled.
     py.detach(move || {
-        note_video_activity(&job.robot_id, job.robot_instance, job.publish_ns);
+        note_video_activity(job.robot_index, job.robot_instance, job.publish_ns);
         writer_queue().push(WriterMsg::Frame(Box::new(job)))
     })
     .map_err(|_| {
@@ -293,22 +286,21 @@ fn log_frame(
 /// here unchanged. The daemon classifies the label downstream
 /// (see `content_type_for`); it imposes no allowlist.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, payload, timestamp_us))]
+#[pyo3(signature = (robot_index, robot_instance, data_type, name, payload, timestamp_us))]
 fn log_json(
     py: Python<'_>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     name: &str,
     payload: &[u8],
     timestamp_us: i64,
 ) -> PyResult<()> {
-    if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
+    if data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
-            "robot_id, data_type and name must not be empty",
+            "data_type and name must not be empty",
         ));
     }
-    let robot_id = robot_id.to_string();
     let data_type = data_type.to_string();
     let name = name.to_string();
     let owned_payload = payload.to_vec();
@@ -317,7 +309,7 @@ fn log_json(
         // publishes the `Data` envelope off this call (see [`PublishMsg::Json`]).
         let publish_timestamp_ns = now_ns();
         let _ = publisher_tx().send(PublishMsg::Json {
-            robot_id,
+            robot_index,
             robot_instance,
             data_type,
             sensor_name: name,
@@ -351,18 +343,14 @@ fn log_json(
 /// stop and POSTed as the backend `end_time`, never used for window
 /// membership.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None, tags = Vec::new()))]
+#[pyo3(signature = (robot_index, robot_instance, timestamp_us = None, tags = Vec::new()))]
 fn stop_recording(
     py: Python<'_>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     timestamp_us: Option<i64>,
     tags: Vec<String>,
 ) -> PyResult<()> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
         // Drain the data publisher before stamping the window's upper bound.
         // `log_joint_*` / `log_json` only hand their envelope to the background
@@ -388,13 +376,13 @@ fn stop_recording(
         // strictly ordered: the stop can never be reordered behind the next
         // recording's `StartRecording` on this thread.
         publish(&Envelope::StopRecording {
-            robot_id: robot_id.clone(),
+            robot_index,
             robot_instance,
             publish_timestamp_ns,
             timestamp_us: capture_timestamp_us,
             tags,
         })?;
-        recording_state_cache::note_local_end(&robot_id, robot_instance);
+        recording_state_cache::note_local_end(robot_index, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
@@ -410,16 +398,12 @@ fn stop_recording(
 /// daemon's holdback and the `SourceFlushed` marker route them into the
 /// just-closed window. Idempotent.
 #[pyfunction]
-fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let robot_id = robot_id.to_string();
+fn flush_source(py: Python<'_>, robot_index: i64, robot_instance: i64) -> PyResult<()> {
     py.detach(|| {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
         let _ = writer_queue().push(WriterMsg::FlushSource {
-            robot_id,
+            robot_index,
             robot_instance,
             ack: ack_tx,
         });
@@ -441,17 +425,13 @@ fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult
 /// publish clock); the daemon stores it as the row's stop and POSTs it as the
 /// backend `end_time`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_us = None))]
+#[pyo3(signature = (robot_index, robot_instance, timestamp_us = None))]
 fn cancel_recording(
     py: Python<'_>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     timestamp_us: Option<i64>,
 ) -> PyResult<()> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
         let capture_timestamp_us =
             timestamp_us.unwrap_or_else(|| now_ns() / NANOSECONDS_PER_MICROSECOND);
@@ -462,7 +442,7 @@ fn cancel_recording(
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
         let _ = writer_queue().push(WriterMsg::DropSource {
-            robot_id: robot_id.clone(),
+            robot_index,
             robot_instance,
             ack: ack_tx,
         });
@@ -470,11 +450,11 @@ fn cancel_recording(
         // Publish `CancelRecording` from THIS (the calling) thread's publisher,
         // ordered with Start/Stop on the same port (see the writer module note).
         publish(&Envelope::CancelRecording {
-            robot_id: robot_id.clone(),
+            robot_index,
             robot_instance,
             timestamp_us: capture_timestamp_us,
         })?;
-        recording_state_cache::note_local_end(&robot_id, robot_instance);
+        recording_state_cache::note_local_end(robot_index, robot_instance);
         Ok(())
     })
 }
@@ -557,9 +537,9 @@ fn parse_frame_dtype(
 /// boundary; a caller that sees `None` is either outside a recording or ahead
 /// of the first refresh, and must treat both the same.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance))]
-fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
-    recording_state_cache::epoch(robot_id, robot_instance)
+#[pyo3(signature = (robot_index, robot_instance))]
+fn recording_epoch(robot_index: i64, robot_instance: i64) -> Option<i64> {
+    recording_state_cache::epoch(robot_index, robot_instance)
 }
 
 /// Which recording, if any, a source currently has open.
@@ -578,17 +558,15 @@ fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
 /// `None` or the recording's `recording_index` / `cloud_recording_id` /
 /// `start_timestamp_us`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timeout_s))]
+#[pyo3(signature = (robot_index, robot_instance, timeout_s))]
 fn recording_state<'py>(
     py: Python<'py>,
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     timeout_s: f64,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let answer = py.detach(|| recording_state_cache::display(robot_id, robot_instance, timeout_s));
+    let answer =
+        py.detach(|| recording_state_cache::display(robot_index, robot_instance, timeout_s));
     let Some(recording) = answer else {
         return Ok(None);
     };

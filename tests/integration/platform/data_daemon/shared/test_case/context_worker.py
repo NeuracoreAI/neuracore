@@ -279,7 +279,7 @@ def context_worker(
         ):
             robot = nc.connect_robot(spec.robot_name, overwrite=False)
 
-        source: tuple[str, int] = (robot.robot_id, int(robot.instance))
+        source: tuple[int, int] = (robot.robot_index, int(robot.instance))
 
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         ordinal_by_disk_key: dict[str, int] = {}

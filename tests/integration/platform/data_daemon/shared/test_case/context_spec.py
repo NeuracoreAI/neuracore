@@ -183,7 +183,7 @@ class ContextResult:
     )
     timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
     recording_indexes: list[int] = field(default_factory=list)
-    source: tuple[str, int] = ("", 0)
+    source: tuple[int, int] = (0, 0)
     depth_camera_names: list[str] = field(default_factory=list)
     depth_frame_count: int = 0
     depth_mode: DepthMode = "uint16_mm"

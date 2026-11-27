@@ -399,7 +399,7 @@ async fn with_rows(
 ) -> Result<Option<RecordingCommand>, StateStoreError> {
     let RecordingCommand::Open {
         recording_id,
-        robot_id,
+        cloud_robot_id,
         robot_instance,
         cloud_dataset_id,
         start_timestamp_ns,
@@ -410,7 +410,7 @@ async fn with_rows(
         return Ok(Some(open.clone()));
     };
     let Some(robot_index) = store
-        .robot_index_for_cloud_id(org_id, robot_id, *robot_instance)
+        .robot_index_for_cloud_id(org_id, cloud_robot_id, *robot_instance)
         .await?
     else {
         return Ok(None);
@@ -425,7 +425,8 @@ async fn with_rows(
     };
     Ok(Some(RecordingCommand::Open {
         recording_id: recording_id.clone(),
-        robot_id: robot_index.to_string(),
+        robot_index: Some(robot_index),
+        cloud_robot_id: cloud_robot_id.clone(),
         robot_instance: *robot_instance,
         dataset_index,
         cloud_dataset_id: None,
@@ -584,7 +585,8 @@ fn keep_opened_in_snapshot(command: &mut RecordingCommand, opened: &mut HashSet<
 fn open_command(payload: StartPayload) -> RecordingCommand {
     RecordingCommand::Open {
         recording_id: payload.recording_id,
-        robot_id: payload.robot_id,
+        robot_index: None,
+        cloud_robot_id: payload.robot_id,
         robot_instance: payload.instance,
         dataset_index: None,
         cloud_dataset_id: payload.dataset_ids.into_iter().next(),
@@ -646,7 +648,8 @@ mod tests {
             commands,
             vec![RecordingCommand::Open {
                 recording_id: "rec-1".into(),
-                robot_id: "robot-1".into(),
+                robot_index: None,
+                cloud_robot_id: "robot-1".into(),
                 robot_instance: 2,
                 dataset_index: None,
                 cloud_dataset_id: Some("ds-1".into()),
@@ -699,7 +702,8 @@ mod tests {
             vec![
                 RecordingCommand::Open {
                     recording_id: "rec-1".into(),
-                    robot_id: "robot-1".into(),
+                    robot_index: None,
+                    cloud_robot_id: "robot-1".into(),
                     robot_instance: 0,
                     dataset_index: None,
                     cloud_dataset_id: Some("ds-1".into()),
@@ -708,7 +712,8 @@ mod tests {
                 },
                 RecordingCommand::Open {
                     recording_id: "rec-2".into(),
-                    robot_id: "robot-2".into(),
+                    robot_index: None,
+                    cloud_robot_id: "robot-2".into(),
                     robot_instance: 1,
                     dataset_index: None,
                     cloud_dataset_id: None,
@@ -874,14 +879,14 @@ mod tests {
         matcher.forward(web_start("rec-1")).await.unwrap();
 
         let Some(RecordingCommand::Open {
-            robot_id,
+            robot_index: matched,
             dataset_index,
             ..
         }) = rx.recv().await
         else {
             panic!("expected an open");
         };
-        assert_eq!(robot_id, robot_index.to_string());
+        assert_eq!(matched, Some(robot_index));
         let dataset = store
             .get_dataset(dataset_index.expect("a dataset row"))
             .await
@@ -909,7 +914,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sent,
-            RecordingCommand::Open { ref robot_id, .. } if *robot_id == robot_index.to_string()
+            RecordingCommand::Open { robot_index: Some(matched), .. } if matched == robot_index
         ));
         assert!(nothing_sent(&mut rx).await, "the start is sent once");
     }
@@ -953,7 +958,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sent,
-            RecordingCommand::Open { ref robot_id, .. } if *robot_id == robot_index.to_string()
+            RecordingCommand::Open { robot_index: Some(matched), .. } if matched == robot_index
         ));
     }
 

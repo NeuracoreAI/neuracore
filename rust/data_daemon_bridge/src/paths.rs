@@ -40,28 +40,28 @@ pub(crate) fn recordings_root() -> Result<&'static Path, &'static str> {
 /// Composite registry key for one `(source, sensor)` video stream. The NUL
 /// separators cannot occur in any component, so the join is unambiguous.
 pub(crate) fn stream_key(
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     sensor_name: &str,
 ) -> String {
-    format!("{robot_id}\u{0}{robot_instance}\u{0}{data_type}\u{0}{sensor_name}")
+    format!("{robot_index}\u{0}{robot_instance}\u{0}{data_type}\u{0}{sensor_name}")
 }
 
 /// Prefix matching every video stream belonging to a source.
-pub(crate) fn source_prefix(robot_id: &str, robot_instance: i64) -> String {
-    format!("{robot_id}\u{0}{robot_instance}\u{0}")
+pub(crate) fn source_prefix(robot_index: i64, robot_instance: i64) -> String {
+    format!("{robot_index}\u{0}{robot_instance}\u{0}")
 }
 
-/// Split a `stream_key` back into `(robot_id, robot_instance, data_type,
-/// sensor_name)`. An unparseable instance reads as `0`.
-pub(crate) fn split_stream_key(key: &str) -> (String, i64, String, String) {
+/// Split a `stream_key` back into `(robot_index, robot_instance, data_type,
+/// sensor_name)`. An unparseable robot index or instance reads as `0`.
+pub(crate) fn split_stream_key(key: &str) -> (i64, i64, String, String) {
     let mut parts = key.splitn(4, '\u{0}');
-    let robot_id = parts.next().unwrap_or("").to_string();
+    let robot_index = parts.next().unwrap_or("").parse().unwrap_or(0);
     let robot_instance = parts.next().unwrap_or("").parse().unwrap_or(0);
     let data_type = parts.next().unwrap_or("").to_string();
     let sensor_name = parts.next().unwrap_or("").to_string();
-    (robot_id, robot_instance, data_type, sensor_name)
+    (robot_index, robot_instance, data_type, sensor_name)
 }
 
 /// Build the spool directory for a `(source, sensor)` stream, or `None` if the
@@ -75,14 +75,14 @@ pub(crate) fn split_stream_key(key: &str) -> (String, i64, String, String) {
 /// would silently kill the thread (no more frames, no error surfaced) instead
 /// of being logged and recovered from.
 pub(crate) fn spool_dir(
-    robot_id: &str,
+    robot_index: i64,
     robot_instance: i64,
     data_type: &str,
     sensor_name: &str,
 ) -> Option<PathBuf> {
     recordings_root().ok().map(|root| {
         root.join(SPOOL_DIRNAME)
-            .join(robot_id)
+            .join(robot_index.to_string())
             .join(robot_instance.to_string())
             .join(data_type)
             .join(sensor_name)
