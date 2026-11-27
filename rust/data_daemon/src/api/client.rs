@@ -143,7 +143,7 @@ const UPLOAD_POOL_MAX_IDLE_PER_HOST: usize = 128;
 const UPLOAD_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const UPLOAD_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
-/// Build the dedicated client the uploader PUTs file chunks through.
+/// Build the dedicated client the uploader PUTs file parts through.
 ///
 /// Pinned to **HTTP/1.1** so the uploader's concurrent per-file PUTs open
 /// *parallel* TCP connections (each with its own congestion window) instead of
@@ -154,9 +154,9 @@ const UPLOAD_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 /// generous idle pool + TCP keepalive keep those connections warm so files
 /// 2..N (and the next recording's burst) reuse them instead of re-handshaking.
 ///
-/// Deliberately sets **no client-level `timeout`**: a streaming chunk PUT is
-/// bounded by `upload_transfer::CHUNK_UPLOAD_TIMEOUT` (a per-chunk tokio
-/// timeout), which tolerates a full 16 MiB chunk on a slow link. The API
+/// Sets no client-level `timeout`. The per-part tokio timeout
+/// `upload_transfer::PART_UPLOAD_TIMEOUT` bounds each part PUT, and it allows a
+/// full part on a slow link. The API
 /// client's short overall timeout would cap that sustained-throughput floor.
 fn build_upload_client() -> Result<Client, reqwest::Error> {
     Client::builder()
@@ -173,7 +173,7 @@ pub struct ApiClient {
     /// status). HTTP/2-capable: many small request/response calls benefit from
     /// multiplexing over one connection.
     inner: Client,
-    /// Data-plane client for direct-to-GCS chunk PUTs. HTTP/1.1 with a warm
+    /// Data-plane client for presigned part PUTs. HTTP/1.1 with a warm
     /// connection pool — see [`build_upload_client`].
     upload_inner: Client,
     options: ApiClientOptions,
@@ -201,7 +201,7 @@ impl ApiClient {
     }
 
     /// Borrow the dedicated upload client — exposed for the uploader, which PUTs
-    /// chunks straight to GCS-issued URLs that are not relative to the configured
+    /// parts straight to presigned store URLs that are not relative to the configured
     /// `base_url`. This is the HTTP/1.1, warm-pool client (see
     /// [`build_upload_client`]), kept separate from the control-plane `inner`
     /// client so concurrent file PUTs fan out across parallel connections.
@@ -243,7 +243,6 @@ impl ApiClient {
     }
 
     /// `POST /v2/org/{org}/recording/traces/batch-register`.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub async fn batch_register(
         &self,
         org_id: &str,
@@ -263,6 +262,7 @@ impl ApiClient {
     }
 
     /// `POST /org/{org}/recording/traces/batch-register`.
+    #[expect(dead_code)]
     pub async fn batch_register_v1(
         &self,
         org_id: &str,

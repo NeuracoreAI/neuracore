@@ -62,10 +62,8 @@ pub fn is_video_family(data_type: &str) -> bool {
     matches!(content_type_for(data_type), ContentKind::Rgb)
 }
 
-/// The MIME content-type the daemon registers (and re-acquires session URIs)
-/// for an artefact, keyed off its filename suffix. The single source of truth
-/// for the mapping, shared by [`cloud_file_list`] and the uploader's session
-/// refresh so the two can't disagree. `.mp4` videos are `video/mp4`, the
+/// The MIME content-type the daemon registers for an artefact, keyed off its
+/// filename suffix. [`cloud_file_list`] uses it. `.mp4` videos are `video/mp4`, the
 /// `.bin` depth frames are `application/octet-stream`, and everything else
 /// (the JSON trace and sidecar) is `application/json`.
 pub fn content_type_for_filename(filename: &str) -> &'static str {

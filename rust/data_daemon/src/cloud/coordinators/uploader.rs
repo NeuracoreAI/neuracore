@@ -1,12 +1,13 @@
-//! Resumable file uploader coordinator.
+//! Multipart file uploader coordinator.
 //!
 //! Subscribes to [`DaemonEvent::ReadyForUpload`] (and re-scans the
 //! state store on startup for any traces already in the registered/queued
-//! state). For each on-disk artefact the coordinator PUTs `CHUNK_SIZE` (16 MiB)
-//! chunks to the GCS resumable session URI persisted by the registration coordinator,
-//! handling 308-continue, 410-session-expired, and 401-auth-refresh
-//! transitions. On completion the trace is marked `Uploaded` and the upload
-//! sub-system publishes `UploadComplete` for the status updater.
+//! state). For each on-disk artefact the coordinator PUTs the parts of the
+//! multipart upload persisted by the registration coordinator to presigned
+//! URLs, one part at a time, and saves each part's ETag. It then completes the
+//! upload and checks the CRC32C the store returns. On completion the trace is
+//! marked `Uploaded`. A file whose upload the store no longer holds restarts
+//! the trace's uploads.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,9 +19,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
 use super::status::StatusUpdate;
-use super::upload_transfer::{upload_one_file_resumable, ResumableUploadError, UploadFileOutcome};
+use super::upload_transfer::{upload_one_file, UploadFileError};
 use crate::api::ApiClient;
-use crate::cloud::cloud_files::content_type_for_filename;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::store::TraceUpdate;
@@ -34,6 +34,9 @@ use crate::storage::paths::TracePath;
 /// drain a large backlog in fewer rounds, but oversubscribing the link inflates
 /// per-request latency and its p95/p99 tail, which drives timeouts and retries.
 pub const MAX_CONCURRENT_UPLOADS: usize = 16;
+/// Restarts of a trace's uploads with new upload IDs before the trace fails,
+/// so a store that never returns a valid CRC32C cannot restart it forever.
+const MAX_UPLOAD_RESTARTS: i64 = 3;
 
 /// Handle returned by [`spawn_uploader`].
 pub struct UploaderHandle {
@@ -404,27 +407,32 @@ async fn upload_single(
             return;
         }
     };
-    let session_uris = match parse_session_uris(&trace) {
-        Some(uris) => uris,
-        None => return,
+    let uploads = match store.get_trace_uploads(trace_id).await {
+        Ok(uploads) => uploads,
+        Err(error) => {
+            tracing::warn!(%error, trace_id, "failed to load stored multipart uploads");
+            return;
+        }
     };
-    if session_uris.is_empty() {
-        // Every trace registers at least `trace.json`, so an empty map means
+    if uploads.is_empty() {
+        // Every trace registers at least `trace.json`, so no uploads means
         // the files would never be uploaded.
-        mark_failed_and_emit(store, bus, &trace, "no upload session URIs").await;
+        mark_failed_and_emit(store, bus, &trace, "no multipart uploads").await;
         return;
     }
-
-    // Resolve the cloud `recording_id` (needed for the resumable-upload-url
-    // refresh) before we touch the trace's upload state. A None here means
-    // registration hasn't minted the cloud id yet — leave the trace in its
-    // queued/retrying state and skip; a later drain re-enters once it lands.
-    let Some(recording_id) = recording_cloud_id(store, trace.recording_index).await else {
+    // A later drain retries once registration stamps the cloud recording_id.
+    let recording = store.get_recording(trace.recording_index).await;
+    if !matches!(recording, Ok(Some(row)) if row.recording_id.is_some()) {
         tracing::warn!(
             trace_id,
             recording_index = trace.recording_index,
             "recording has no cloud recording_id yet; deferring upload"
         );
+        return;
+    }
+    // Leave the trace queued until an org is selected; a later drain retries.
+    let Some(org_id) = org_rx.borrow().clone() else {
+        tracing::warn!(trace_id, "no current org_id configured; deferring upload");
         return;
     };
 
@@ -468,17 +476,13 @@ async fn upload_single(
         None,
         serde_json::json!({
             "data_type": data_type,
-            "file_count": session_uris.len(),
+            "file_count": uploads.len(),
         }),
     );
 
-    // Upload each on-disk artefact under its session URI and persist the
-    // refreshed URI back into the same slot (by index) for resume on retry.
     let mut total_uploaded: i64 = 0;
-    let mut session_uris = session_uris;
-    for index in 0..session_uris.len() {
-        let (filename, session_uri) = session_uris[index].clone();
-        let local_path = trace_dir.join(file_basename(&filename));
+    for (filename, upload) in &uploads {
+        let local_path = trace_dir.join(file_basename(filename));
         let local_len = local_path.metadata().map(|metadata| metadata.len()).ok();
         if local_len.unwrap_or(0) == 0 {
             tracing::warn!(
@@ -494,99 +498,88 @@ async fn upload_single(
                 &format!("missing or empty artefact {filename}"),
             )
             .await;
-            crate::perf_events::emit(
-                "upload",
-                "failed",
-                Some(trace.recording_index),
-                Some(trace_id),
-                Some(upload_started.elapsed()),
-                serde_json::json!({
-                    "outcome": "error",
-                    "reason": if local_len.is_none() { "missing_artefact" } else { "empty_artefact" },
-                    "filename": file_basename(&filename),
-                    "bytes_uploaded": total_uploaded,
-                }),
+            emit_upload_failed(
+                &trace,
+                filename,
+                upload_started,
+                total_uploaded,
+                if local_len.is_none() {
+                    "missing_artefact"
+                } else {
+                    "empty_artefact"
+                },
             );
             return;
         }
+        let local_len = local_len.unwrap_or(0) as i64;
+        if upload.completed {
+            total_uploaded = total_uploaded.saturating_add(local_len);
+            continue;
+        }
 
-        // `content_type` here drives the GCS-side metadata when we re-acquire a
-        // session URI on 410. Use the same filename→type mapping registration
-        // used (`cloud_files::content_type_for_filename`) so the refresh can't
-        // disagree with what was originally registered.
-        let content_type = content_type_for_filename(&filename);
-        let outcome = upload_one_file_resumable(
+        let outcome = upload_one_file(
+            store,
             client,
             trace_writer,
             bus,
-            org_rx,
             status_tx,
             &trace,
-            &recording_id,
+            &org_id,
             &local_path,
-            &filename,
-            content_type,
-            session_uri,
+            filename,
+            upload,
         )
         .await;
         match outcome {
-            Ok(UploadFileOutcome {
-                bytes_uploaded,
-                final_session_uri,
-            }) => {
-                total_uploaded = total_uploaded.saturating_add(bytes_uploaded);
-                // Persist the (possibly refreshed) URI so a subsequent
-                // restart resumes from the right session, even if the
-                // refresh path fired mid-stream.
-                if let Some(new_uri) = final_session_uri {
-                    session_uris[index].1 = new_uri;
-                    persist_session_uris(store, trace_id, &session_uris).await;
+            Ok(()) => {
+                total_uploaded = total_uploaded.saturating_add(local_len);
+                if let Err(error) = store.mark_trace_upload_completed(trace_id, filename).await {
+                    tracing::warn!(%error, trace_id, "failed to mark the file's upload completed");
                 }
             }
-            Err(ResumableUploadError::RecordingCancelled) => {
+            Err(UploadFileError::UploadMissing(reason)) => {
                 emit_upload_failed(
                     &trace,
-                    &filename,
+                    filename,
                     upload_started,
                     total_uploaded,
-                    "recording_cancelled",
+                    "upload_missing",
                 );
-                // Before the discard publishes the event that aborts this task.
-                mark_failed_and_emit(store, bus, &trace, "recording cancelled").await;
-                super::discard_recording_locally(store, bus, trace.recording_index).await;
+                if trace.upload_restarts >= MAX_UPLOAD_RESTARTS {
+                    let message = format!(
+                        "uploads restarted {MAX_UPLOAD_RESTARTS} times; last reason: {reason}"
+                    );
+                    tracing::warn!(
+                        trace_id,
+                        message,
+                        "upload restart limit reached; marking trace failed"
+                    );
+                    mark_failed_and_emit(store, bus, &trace, &message).await;
+                } else {
+                    super::restart_trace_uploads(store, trace_id, &reason).await;
+                }
                 return;
             }
-            Err(ResumableUploadError::RecordingNotFound) => {
+            Err(UploadFileError::TooManyParts(error)) => {
+                tracing::warn!(%error, trace_id, "file needs too many parts; marking trace failed");
                 emit_upload_failed(
                     &trace,
-                    &filename,
+                    filename,
                     upload_started,
                     total_uploaded,
-                    "recording_not_found",
+                    "too_many_parts",
                 );
-                super::stop_uploading_not_found_recording(
-                    store,
-                    bus,
-                    trace.recording_index,
-                    &recording_id,
-                )
-                .await;
+                mark_failed_and_emit(store, bus, &trace, &error).await;
                 return;
             }
-            Err(ResumableUploadError::Retry(error)) => {
+            Err(UploadFileError::Retry(error)) => {
                 tracing::warn!(%error, trace_id, "upload failed; rolling back to retrying");
-                crate::perf_events::emit(
-                    "upload",
-                    "failed",
-                    Some(trace.recording_index),
-                    Some(trace_id),
-                    Some(upload_started.elapsed()),
-                    serde_json::json!({
-                        "outcome": "error",
-                        "reason": "transfer_failed",
-                        "filename": file_basename(&filename),
-                        "bytes_uploaded": total_uploaded,
-                    }),
+                emit_upload_failed(
+                    &trace,
+                    filename,
+                    upload_started,
+                    total_uploaded,
+                    "transfer_failed",
                 );
                 let update = TraceUpdate {
                     upload_status: Some(TraceUploadStatus::Retrying),
@@ -609,7 +602,7 @@ async fn upload_single(
         Some(upload_started.elapsed()),
         serde_json::json!({
             "outcome": "ok",
-            "file_count": session_uris.len(),
+            "file_count": uploads.len(),
             "bytes_uploaded": total_uploaded,
         }),
     );
@@ -690,48 +683,6 @@ async fn mark_failed_and_emit(
     // files missing.
 }
 
-async fn persist_session_uris(
-    store: &Arc<SqliteStateStore>,
-    trace_id: &str,
-    uris: &[(String, String)],
-) {
-    let map: HashMap<&str, &str> = uris
-        .iter()
-        .map(|(filename, uri)| (filename.as_str(), uri.as_str()))
-        .collect();
-    let serialised = match serde_json::to_string(&map) {
-        Ok(serialised) => serialised,
-        Err(error) => {
-            tracing::warn!(%error, trace_id, "failed to serialise refreshed session URIs");
-            return;
-        }
-    };
-    let update = TraceUpdate {
-        upload_session_uris: Some(serialised),
-        ..TraceUpdate::default()
-    };
-    if let Err(error) = store.update_trace(trace_id, update).await {
-        tracing::warn!(%error, trace_id, "failed to persist refreshed session URIs");
-    }
-}
-
-fn parse_session_uris(trace: &TraceRecord) -> Option<Vec<(String, String)>> {
-    let Some(serialised) = &trace.upload_session_uris else {
-        tracing::warn!(
-            trace_id = trace.trace_id,
-            "trace ready-for-upload but no session URIs stored"
-        );
-        return None;
-    };
-    match serde_json::from_str::<HashMap<String, String>>(serialised) {
-        Ok(map) => Some(map.into_iter().collect()),
-        Err(error) => {
-            tracing::warn!(%error, trace_id = trace.trace_id, "failed to decode stored session URIs");
-            None
-        }
-    }
-}
-
 fn file_basename(path: &str) -> &str {
     match path.rsplit_once('/') {
         Some((_, tail)) => tail,
@@ -739,37 +690,29 @@ fn file_basename(path: &str) -> &str {
     }
 }
 
-/// Resolve the cloud `recording_id` (the backend handle every cloud URL needs)
-/// from its local `recording_index`. `None` when registration hasn't minted
-/// the cloud id yet, or the row is missing.
-async fn recording_cloud_id(store: &Arc<SqliteStateStore>, recording_index: i64) -> Option<String> {
-    match store.get_recording(recording_index).await {
-        Ok(Some(row)) => row.recording_id,
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(%error, recording_index, "uploader could not read recording cloud id");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::StaticAuthProvider;
+    use crate::api::auth::{AuthError, AuthProvider, StaticAuthProvider};
     use crate::api::client::ApiClientOptions;
     use crate::state::store::{NewRecording, TraceUpdate};
-    use crate::state::{RecordingTimestamp, TraceUploadStatus, TraceWriteStatus};
+    use crate::state::{
+        MultipartUpload, MultipartUploads, RecordingTimestamp, TraceRegistrationStatus,
+        TraceUploadStatus, TraceWriteStatus, UploadedParts,
+    };
     use crate::storage::paths::{LOSSY_VIDEO_FILENAME, TRACE_JSON_FILENAME};
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
-    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, timeout};
-    use wiremock::matchers::{header, method, path, path_regex};
+    use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    const JSON_FILEPATH: &str = "JOINT_POSITIONS/arm/trace.json";
+    const PARTS_ROUTE: &str = "/v2/org/org-1/uploads/parts";
 
     /// A live-org receiver fixed at `org`. The sender is leaked so the channel
     /// stays open for the test's duration.
@@ -794,66 +737,216 @@ mod tests {
         Arc::new(ApiClient::new(options, auth).unwrap())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn seed_ready_trace(
+    fn upload(server: &MockServer, upload_id: &str, part_size_bytes: u64) -> MultipartUpload {
+        MultipartUpload {
+            upload_id: upload_id.to_string(),
+            part_size_bytes,
+            active_part_url: None,
+            complete_url: format!("{}/complete/{upload_id}", server.uri()),
+            completed: false,
+        }
+    }
+
+    fn crc_base64(contents: &[u8]) -> String {
+        BASE64.encode(crc32c::crc32c(contents).to_be_bytes())
+    }
+
+    /// Seed `trace-1` of a start-notified recording `rec-1`, written and queued
+    /// with `uploads`, and write `on_disk` into its trace directory. Returns the
+    /// recording index.
+    async fn seed_trace(
         store: &SqliteStateStore,
         recordings_root: &std::path::Path,
-        cloud_recording_id: &str,
-        trace_id: &str,
-        data_type: &str,
-        data_type_name: &str,
-        session_uri: &str,
-        contents: &[u8],
-    ) -> (i64, std::path::PathBuf) {
-        let recording = store
+        (data_type, data_type_name): (&str, &str),
+        uploads: &MultipartUploads,
+        on_disk: &[(&str, &[u8])],
+    ) -> i64 {
+        let recording_index = store
             .create_recording(NewRecording::default())
             .await
-            .unwrap();
-        let recording_index = recording.recording_index;
-        // Stamp the cloud `recording_id` so the uploader's cloud-id resolution
-        // and the resumable-upload-url refresh see the same id the wiremock
-        // expectations assert on.
+            .unwrap()
+            .recording_index;
         store
-            .mark_recording_start_notified(recording_index, cloud_recording_id)
+            .mark_recording_start_notified(recording_index, "rec-1")
             .await
             .unwrap();
         store
             .create_trace(
                 recording_index,
-                trace_id,
+                "trace-1",
                 Some(data_type),
                 Some(data_type_name),
             )
             .await
             .unwrap();
         // On-disk artefacts are keyed by the local `recording_index`.
-        let dir = TracePath::new(recording_index.to_string(), data_type, trace_id.to_string())
-            .directory(recordings_root);
+        let dir = TracePath::new(
+            recording_index.to_string(),
+            data_type,
+            "trace-1".to_string(),
+        )
+        .directory(recordings_root);
         std::fs::create_dir_all(&dir).unwrap();
-        let local = dir.join(TRACE_JSON_FILENAME);
-        std::fs::write(&local, contents).unwrap();
-        let mut uris = HashMap::new();
-        uris.insert(
-            format!("{data_type}/{data_type_name}/{TRACE_JSON_FILENAME}"),
-            session_uri.to_string(),
-        );
+        for (basename, contents) in on_disk {
+            std::fs::write(dir.join(basename), contents).unwrap();
+        }
+        store
+            .mark_trace_registered("trace-1", uploads)
+            .await
+            .unwrap();
         store
             .update_trace(
-                trace_id,
+                "trace-1",
                 TraceUpdate {
                     write_status: Some(TraceWriteStatus::Written),
                     upload_status: Some(TraceUploadStatus::Queued),
-                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
-                    total_bytes: Some(contents.len() as i64),
                     ..TraceUpdate::default()
                 },
             )
             .await
             .unwrap();
-        (recording_index, local)
+        recording_index
     }
 
-    /// Drive `upload_single` for `trace_id` with the standard single-trace
+    /// Seed a joint trace whose `trace.json` holds `contents` and uploads as
+    /// `upload-1` in parts of `part_size_bytes`.
+    async fn seed_json_trace(
+        server: &MockServer,
+        store: &SqliteStateStore,
+        recordings_root: &std::path::Path,
+        contents: &[u8],
+        part_size_bytes: u64,
+    ) -> i64 {
+        let uploads = MultipartUploads::from([(
+            JSON_FILEPATH.to_string(),
+            upload(server, "upload-1", part_size_bytes),
+        )]);
+        seed_trace(
+            store,
+            recordings_root,
+            ("JOINT_POSITIONS", "arm"),
+            &uploads,
+            &[(TRACE_JSON_FILENAME, contents)],
+        )
+        .await
+    }
+
+    /// Answer the parts route with a URL on `server` for every requested part,
+    async fn mount_parts_route(server: &MockServer) {
+        let base_url = server.uri();
+        Mock::given(method("POST"))
+            .and(path(PARTS_ROUTE))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let uploads: Vec<serde_json::Value> = body["uploads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|upload| {
+                        let upload_id = upload["upload_id"].as_str().unwrap();
+                        let part_urls: serde_json::Map<String, serde_json::Value> = upload
+                            ["part_numbers"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|number| {
+                                let url = format!("{base_url}/part/{upload_id}/{number}");
+                                (number.to_string(), url.into())
+                            })
+                            .collect();
+                        serde_json::json!({
+                            "upload_id": upload_id,
+                            "part_urls": part_urls,
+                            "uploaded_parts": [],
+                        })
+                    })
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"uploads": uploads, "missing_upload_ids": []}),
+                )
+            })
+            .mount(server)
+            .await;
+    }
+
+    /// The ETag the part store returns for `/part/{upload_id}/{part_number}`:
+    /// `"{upload_id}-{part_number}"`, with the quotes.
+    fn store_etag(upload_id: &str, part_number: u32) -> String {
+        format!("\"{upload_id}-{part_number}\"")
+    }
+
+    async fn mount_part_store(server: &MockServer) {
+        Mock::given(method("PUT"))
+            .and(path_regex("^/part/"))
+            .respond_with(|request: &Request| {
+                let (upload_id, part_number) = request
+                    .url
+                    .path()
+                    .trim_start_matches("/part/")
+                    .rsplit_once('/')
+                    .unwrap();
+                ResponseTemplate::new(200)
+                    .insert_header("etag", store_etag(upload_id, part_number.parse().unwrap()))
+            })
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_complete(server: &MockServer, upload_id: &str, contents: &[u8]) {
+        Mock::given(method("POST"))
+            .and(path(format!("/complete/{upload_id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-amz-checksum-crc32c", crc_base64(contents))
+                    .set_body_string("<CompleteMultipartUploadResult/>"),
+            )
+            .mount(server)
+            .await;
+    }
+
+    fn complete_body(etags: &[String]) -> String {
+        let parts: String = etags
+            .iter()
+            .zip(1..)
+            .map(|(etag, part_number)| {
+                format!(
+                    "<Part><PartNumber>{part_number}</PartNumber><ETag>{}</ETag></Part>",
+                    etag.replace('"', "&quot;")
+                )
+            })
+            .collect();
+        format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>")
+    }
+
+    async fn complete_requests(server: &MockServer) -> Vec<(String, String)> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().starts_with("/complete/"))
+            .map(|request| {
+                (
+                    request.url.path().to_string(),
+                    String::from_utf8(request.body.clone()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// Paths of the part PUTs `server` received, in order.
+    async fn part_puts(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "PUT")
+            .map(|request| request.url.path().to_string())
+            .collect()
+    }
+
+    /// Drive `upload_single` for `trace-1` with the standard single-trace
     /// harness: an owned store handle, a fresh trace-event writer (held alive
     /// for the await), the `recordings_root`, and org `org-1`. The caller owns
     /// `bus`/`status_tx` so it can observe the emitted events and status updates.
@@ -863,7 +956,6 @@ mod tests {
         api: &Arc<ApiClient>,
         bus: &EventBus,
         status_tx: &mpsc::UnboundedSender<StatusUpdate>,
-        trace_id: &str,
     ) {
         let store_arc = Arc::new(store.clone());
         let (trace_writer, _trace_writer_owner) =
@@ -877,299 +969,986 @@ mod tests {
             &recordings_root,
             &org_rx(Some("org-1")),
             status_tx,
-            trace_id,
+            "trace-1",
         )
         .await;
     }
 
-    #[tokio::test]
-    async fn bad_server_checksum_marks_trace_retrying() {
-        // Server returns a deliberately wrong CRC32C (0) — the real payload's
-        // checksum is non-zero, so the guard must reject the upload and roll
-        // the trace back to `retrying`
-        // (the registration coordinator's recovery sweep takes it from
-        // there). The doc-claimed happy path is covered by
-        // `uploader_marks_uploaded_when_checksum_matches` below.
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(|_req: &Request| {
-                ResponseTemplate::new(200).insert_header("X-Goog-Hash", "crc32c=AAAAAA==")
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        let payload = b"some-bytes";
-        let (_recording_index, _) = seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            payload,
+    /// Upload `trace-1` against `server` and return its row and the completion
+    /// status update, if one was sent.
+    async fn upload_trace(
+        server: &MockServer,
+        store: &SqliteStateStore,
+        recordings_root: std::path::PathBuf,
+    ) -> (TraceRecord, Option<StatusUpdate>) {
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(
+            store,
+            recordings_root,
+            &client(server),
+            &EventBus::new(),
+            &status_tx,
         )
         .await;
-
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
+        let mut completion = None;
+        while let Ok(update) = status_rx.try_recv() {
+            if update.completed {
+                completion = Some(update);
+            }
+        }
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
-        assert_eq!(trace.upload_status, TraceUploadStatus::Retrying);
-        // Status updates are sent regardless.
-        let _ = status_rx.try_recv();
+        (trace, completion)
     }
 
     #[tokio::test]
-    async fn uploader_marks_uploaded_when_checksum_matches() {
+    async fn every_part_is_sent_then_the_upload_is_completed_with_their_etags() {
         let server = MockServer::start().await;
-        // Use the CRC32C of the payload below.
-        let payload = b"hello world";
-        let b64 = BASE64.encode(crc32c::crc32c(payload).to_be_bytes());
-        let header_value = format!("crc32c={b64}");
-        let header_value_clone = header_value.clone();
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(move |_req: &Request| {
-                ResponseTemplate::new(200).insert_header("X-Goog-Hash", header_value_clone.as_str())
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        let payload = b"ten bytes!";
+        mount_complete(&server, "upload-1", payload).await;
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let (_recording_index, _) = seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            payload,
-        )
-        .await;
+        seed_json_trace(&server, &store, &recordings_root, payload, 4).await;
 
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
 
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
         assert_eq!(trace.bytes_uploaded, payload.len() as i64);
-        // At least one in-progress + one final status update should have
-        // been queued.
-        let mut count = 0;
-        while status_rx.try_recv().is_ok() {
-            count += 1;
-        }
-        assert!(count >= 1);
+        assert_eq!(
+            part_puts(&server).await,
+            ["/part/upload-1/1", "/part/upload-1/2", "/part/upload-1/3"]
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.url.path().starts_with("/part/")
+                    || request.url.path().starts_with("/complete/"))
+                .all(|request| !request.headers.contains_key("authorization")),
+            "a presigned request carries no Authorization header"
+        );
+        let etags: Vec<String> = (1..=3)
+            .map(|number| store_etag("upload-1", number))
+            .collect();
+        assert_eq!(
+            complete_requests(&server).await,
+            [("/complete/upload-1".to_string(), complete_body(&etags))]
+        );
+        assert_eq!(
+            store
+                .get_uploaded_parts("trace-1", JSON_FILEPATH)
+                .await
+                .unwrap()
+                .into_values()
+                .collect::<Vec<_>>(),
+            etags,
+            "every part is saved for a restart"
+        );
+        assert!(store.get_trace_uploads("trace-1").await.unwrap()[JSON_FILEPATH].completed);
+        assert!(completion.is_some());
     }
 
-    /// Upload `trace-1` against an expired session whose URI refetch answers
-    /// `refetch`. Returns the store, its tempdir, the recording index, the
-    /// trace's local file and every event published.
-    async fn upload_with_refetch_answering(
-        refetch: ResponseTemplate,
-    ) -> (
-        SqliteStateStore,
-        TempDir,
-        i64,
-        std::path::PathBuf,
-        Vec<DaemonEvent>,
+    async fn save_parts(
+        store: &SqliteStateStore,
+        filepath: &str,
+        etags: &[&str],
+        next_part_url: Option<&str>,
     ) {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/dead"))
-            .respond_with(ResponseTemplate::new(410))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
-            .respond_with(refetch)
-            .expect(1)
-            .mount(&server)
-            .await;
+        for (etag, part_number) in etags.iter().zip(1..) {
+            store
+                .save_uploaded_part("trace-1", filepath, part_number, etag, next_part_url)
+                .await
+                .unwrap();
+        }
+    }
 
+    #[tokio::test]
+    async fn a_restart_sends_only_the_unsaved_parts_and_completes_with_the_saved_etags() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        let video = b"fake-mp4-bytes";
+        let sidecar = b"[1, 2, 3]";
+        mount_complete(&server, "upload-json", sidecar).await;
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let (recording_index, local) = seed_ready_trace(
+        let mut lossy = upload(&server, "upload-lossy", 4);
+        lossy.completed = true;
+        let json_filepath = format!("RGB_IMAGES/cam0/{TRACE_JSON_FILENAME}");
+        let uploads = MultipartUploads::from([
+            (format!("RGB_IMAGES/cam0/{LOSSY_VIDEO_FILENAME}"), lossy),
+            (json_filepath.clone(), upload(&server, "upload-json", 4)),
+        ]);
+        seed_trace(
             &store,
             &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/dead", server.uri()),
-            b"payload",
+            ("RGB_IMAGES", "cam0"),
+            &uploads,
+            &[
+                (LOSSY_VIDEO_FILENAME, video.as_slice()),
+                (TRACE_JSON_FILENAME, sidecar.as_slice()),
+            ],
         )
         .await;
+        let part_2_url = format!("{}/part/upload-json/2", server.uri());
+        save_parts(&store, &json_filepath, &["\"saved-1\""], Some(&part_2_url)).await;
 
-        let bus = EventBus::new();
-        let mut subscriber = bus.subscribe();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(
-            &store,
-            recordings_root,
-            &client(&server),
-            &bus,
-            &status_tx,
-            "trace-1",
-        )
-        .await;
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
 
-        let mut events = Vec::new();
-        while let Ok(event) = subscriber.try_recv() {
-            events.push(event);
-        }
-        (store, tempdir, recording_index, local, events)
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(
+            part_puts(&server).await,
+            ["/part/upload-json/2", "/part/upload-json/3"],
+            "no saved part is sent again"
+        );
+        assert_eq!(
+            parts_requests(&server).await,
+            [serde_json::json!({"uploads": [{"upload_id": "upload-json", "part_numbers": [3]}]})],
+            "part 2 uses the active part URL"
+        );
+        let etags = [
+            "\"saved-1\"".to_string(),
+            store_etag("upload-json", 2),
+            store_etag("upload-json", 3),
+        ];
+        assert_eq!(
+            complete_requests(&server).await,
+            [("/complete/upload-json".to_string(), complete_body(&etags))],
+            "only the file that is not completed is completed"
+        );
+        let stored = &store.get_trace_uploads("trace-1").await.unwrap()[&json_filepath];
+        assert!(stored.completed);
+        assert_eq!(stored.active_part_url, None);
+        assert!(completion.is_some());
     }
 
     #[tokio::test]
-    async fn session_uri_refetch_cancelled_410_discards_the_recording() {
-        let (store, _tempdir, recording_index, _local, events) =
-            upload_with_refetch_answering(ResponseTemplate::new(410).set_body_json(
-                serde_json::json!({
-                    "detail": { "error": "Recording has been cancelled.", "error_type": "RECORDING_CANCELLED" }
-                }),
-            ))
+    async fn a_failed_part_leaves_the_saved_parts_and_its_url_for_the_resume() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        Mock::given(method("PUT"))
+            .and(path("/part/upload-1/3"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .mount(&server)
+            .await;
+        mount_part_store(&server).await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(&server, &store, &recordings_root, b"ten bytes!", 4).await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Retrying);
+        assert!(completion.is_none());
+        assert!(complete_requests(&server).await.is_empty());
+        assert_eq!(
+            store
+                .get_uploaded_parts("trace-1", JSON_FILEPATH)
+                .await
+                .unwrap(),
+            UploadedParts::from([
+                (1, store_etag("upload-1", 1)),
+                (2, store_etag("upload-1", 2))
+            ])
+        );
+        assert_eq!(
+            store.get_trace_uploads("trace-1").await.unwrap()[JSON_FILEPATH].active_part_url,
+            Some(format!("{}/part/upload-1/3", server.uri()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_with_every_part_saved_only_sends_complete_again() {
+        let server = MockServer::start().await;
+        let payload = b"ten bytes!";
+        mount_complete(&server, "upload-1", payload).await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(&server, &store, &recordings_root, payload, 4).await;
+        let etags = ["\"saved-1\"", "\"saved-2\"", "\"saved-3\""];
+        save_parts(&store, JSON_FILEPATH, &etags, None).await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+        assert!(part_puts(&server).await.is_empty());
+        assert!(parts_requests(&server).await.is_empty());
+        let etags: Vec<String> = etags.iter().map(|etag| etag.to_string()).collect();
+        assert_eq!(
+            complete_requests(&server).await,
+            [("/complete/upload-1".to_string(), complete_body(&etags))]
+        );
+        assert!(completion.is_some());
+    }
+
+    #[tokio::test]
+    async fn bad_server_checksum_restarts_the_trace_uploads() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        mount_complete(&server, "upload-1", b"other bytes").await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"payload",
+            16 * 1024 * 1024,
+        )
+        .await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_restarted(&store, &trace).await;
+        assert!(completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_trace_fails_once_its_uploads_reach_the_restart_limit() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        mount_complete(&server, "upload-1", b"other bytes").await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"payload",
+            16 * 1024 * 1024,
+        )
+        .await;
+        let uploads = MultipartUploads::from([(
+            JSON_FILEPATH.to_string(),
+            upload(&server, "upload-1", 16 * 1024 * 1024),
+        )]);
+
+        for restarts in 1..=MAX_UPLOAD_RESTARTS {
+            let (trace, _) = upload_trace(&server, &store, recordings_root.clone()).await;
+            assert_restarted(&store, &trace).await;
+            assert_eq!(trace.upload_restarts, restarts);
+            store
+                .mark_trace_registered("trace-1", &uploads)
+                .await
+                .unwrap();
+            store
+                .update_trace(
+                    "trace-1",
+                    TraceUpdate {
+                        upload_status: Some(TraceUploadStatus::Queued),
+                        ..TraceUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        assert_eq!(trace.upload_restarts, MAX_UPLOAD_RESTARTS);
+        assert!(trace
+            .error_message
+            .unwrap()
+            .starts_with("uploads restarted 3 times; last reason: crc32c mismatch"));
+        assert!(completion.is_none());
+    }
+
+    async fn assert_restarted(store: &SqliteStateStore, trace: &TraceRecord) {
+        assert_eq!(
+            (trace.registration_status, trace.upload_status),
+            (TraceRegistrationStatus::Pending, TraceUploadStatus::Pending)
+        );
+        assert!(store.get_trace_uploads("trace-1").await.unwrap().is_empty());
+        assert!(store
+            .get_uploaded_parts("trace-1", JSON_FILEPATH)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_crc_is_read_from_the_complete_header_or_body() {
+        let payload = b"payload";
+        let crc32c = crc_base64(payload);
+        let responses = [
+            (
+                "header",
+                ResponseTemplate::new(200)
+                    .insert_header("x-amz-checksum-crc32c", crc32c.as_str())
+                    .set_body_string("<CompleteMultipartUploadResult/>"),
+            ),
+            (
+                "body",
+                ResponseTemplate::new(200).set_body_string(format!(
+                    "<CompleteMultipartUploadResult><ChecksumCRC32C>{crc32c}</ChecksumCRC32C>\
+                     </CompleteMultipartUploadResult>"
+                )),
+            ),
+        ];
+        for (label, response) in responses {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            mount_part_store(&server).await;
+            Mock::given(method("POST"))
+                .and(path("/complete/upload-1"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(&server, &store, &recordings_root, payload, 16 * 1024 * 1024).await;
+
+            let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded, "{label}");
+            assert!(completion.is_some(), "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_complete_without_a_valid_crc_restarts_the_trace_uploads() {
+        let responses = [
+            (
+                "no CRC",
+                ResponseTemplate::new(200).set_body_string("<CompleteMultipartUploadResult/>"),
+            ),
+            (
+                "malformed CRC",
+                ResponseTemplate::new(200)
+                    .insert_header("x-amz-checksum-crc32c", "AAAA")
+                    .set_body_string("<CompleteMultipartUploadResult/>"),
+            ),
+        ];
+        for (label, response) in responses {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            mount_part_store(&server).await;
+            Mock::given(method("POST"))
+                .and(path("/complete/upload-1"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(
+                &server,
+                &store,
+                &recordings_root,
+                b"payload",
+                16 * 1024 * 1024,
+            )
             .await;
 
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
-        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
-        let row = store.get_recording(recording_index).await.unwrap().unwrap();
-        assert!(
-            row.cancelled_at.is_some(),
-            "a cancelled 410 discards the recording"
-        );
-        assert!(
-            row.backend_cancel_notified_at.is_some(),
-            "the backend already has the cancel; it must not be POSTed back"
-        );
-        assert!(events.contains(&DaemonEvent::RecordingCancelled { recording_index }));
+            let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_restarted(&store, &trace).await;
+            assert!(completion.is_none(), "{label}");
+        }
     }
 
-    /// A 404 can mean the recording was saved or reaped, or nothing about the
-    /// recording at all, so uploading stops but the files stay.
     #[tokio::test]
-    async fn session_uri_refetch_404_stops_uploading_but_keeps_the_recording() {
-        let (store, _tempdir, recording_index, local, events) = upload_with_refetch_answering(
-            ResponseTemplate::new(404)
-                .set_body_json(serde_json::json!({ "detail": "Recording not found." })),
+    async fn a_complete_with_an_error_body_marks_trace_retrying() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/complete/upload-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-amz-checksum-crc32c", crc_base64(b"payload"))
+                    .set_body_string("<Error><Code>InternalError</Code></Error>"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"payload",
+            16 * 1024 * 1024,
         )
         .await;
 
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
-        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Retrying);
+        assert!(completion.is_none());
         assert_eq!(
-            trace.error_code,
-            Some(crate::state::TraceErrorCode::RecordingNotPending)
-        );
-        let row = store.get_recording(recording_index).await.unwrap().unwrap();
-        assert!(
-            row.cancelled_at.is_none(),
-            "a 404 must not cancel the recording"
-        );
-        assert!(row.backend_not_found_at.is_some());
-        assert!(local.exists(), "a 404 must not delete the local file");
-        assert!(events.contains(&DaemonEvent::RecordingNotFound { recording_index }));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, DaemonEvent::RecordingCancelled { .. })));
-        assert!(
-            store.traces_ready_for_upload().await.unwrap().is_empty(),
-            "nothing is left queued to retry"
-        );
-        assert!(
             store
-                .recordings_pending_reclaim()
+                .get_uploaded_parts("trace-1", JSON_FILEPATH)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the saved part is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transient_complete_failure_is_retried() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/complete/upload-1"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_complete(&server, "upload-1", b"payload").await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"payload",
+            16 * 1024 * 1024,
+        )
+        .await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(complete_requests(&server).await.len(), 2);
+        assert_eq!(part_puts(&server).await, ["/part/upload-1/1"]);
+        assert!(completion.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_complete_of_a_missing_upload_sends_the_trace_back_to_registration() {
+        for code in ["NoSuchUpload", "NoSuchPart"] {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            mount_part_store(&server).await;
+            Mock::given(method("POST"))
+                .and(path("/complete/upload-1"))
+                .respond_with(
+                    ResponseTemplate::new(404)
+                        .set_body_string(format!("<Error><Code>{code}</Code></Error>")),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(
+                &server,
+                &store,
+                &recordings_root,
+                b"payload",
+                16 * 1024 * 1024,
+            )
+            .await;
+
+            let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_restarted(&store, &trace).await;
+            assert!(completion.is_none(), "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_part_url_is_fetched_again() {
+        let gcs_expired_token = ResponseTemplate::new(400).set_body_string(
+            "<Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>",
+        );
+        for expired in [ResponseTemplate::new(403), gcs_expired_token] {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            Mock::given(method("PUT"))
+                .and(path("/part/upload-1/1"))
+                .respond_with(expired)
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_part_store(&server).await;
+            mount_complete(&server, "upload-1", b"payload").await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(
+                &server,
+                &store,
+                &recordings_root,
+                b"payload",
+                16 * 1024 * 1024,
+            )
+            .await;
+
+            let (trace, _) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+            assert_eq!(
+                part_puts(&server).await,
+                ["/part/upload-1/1", "/part/upload-1/1"]
+            );
+            let parts_requests = server
+                .received_requests()
                 .await
                 .unwrap()
                 .iter()
-                .all(|row| row.recording_index != recording_index),
-            "the reaper must not reclaim it"
+                .filter(|request| request.url.path() == PARTS_ROUTE)
+                .count();
+            assert_eq!(parts_requests, 2, "the expired URL fetches fresh URLs");
+        }
+    }
+
+    /// Seed `trace-1` whose `trace.json` holds `contents` and uploads as
+    /// `upload-1`, with the registration URL of part 1 on `server`.
+    async fn seed_json_trace_with_registration_url(
+        server: &MockServer,
+        store: &SqliteStateStore,
+        recordings_root: &std::path::Path,
+        contents: &[u8],
+        part_size_bytes: u64,
+    ) {
+        let mut registered = upload(server, "upload-1", part_size_bytes);
+        registered.active_part_url = Some(format!("{}/part/upload-1/1", server.uri()));
+        seed_trace(
+            store,
+            recordings_root,
+            ("JOINT_POSITIONS", "arm"),
+            &MultipartUploads::from([(JSON_FILEPATH.to_string(), registered)]),
+            &[(TRACE_JSON_FILENAME, contents)],
+        )
+        .await;
+    }
+
+    /// Bodies of the parts requests `server` received, in order.
+    async fn parts_requests(server: &MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == PARTS_ROUTE)
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_one_part_file_uploads_through_its_registration_url() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        mount_complete(&server, "upload-1", b"payload").await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let payload = b"payload";
+        seed_json_trace_with_registration_url(
+            &server,
+            &store,
+            &recordings_root,
+            payload,
+            16 * 1024 * 1024,
+        )
+        .await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(part_puts(&server).await, ["/part/upload-1/1"]);
+        assert!(parts_requests(&server).await.is_empty());
+        let stored = &store.get_trace_uploads("trace-1").await.unwrap()[JSON_FILEPATH];
+        assert!(stored.completed);
+        assert_eq!(stored.active_part_url, None, "the used URL is dropped");
+        assert!(completion.is_some());
+    }
+
+    #[tokio::test]
+    async fn parts_after_the_registration_url_come_from_the_parts_route() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        mount_complete(&server, "upload-1", b"ten bytes!").await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace_with_registration_url(&server, &store, &recordings_root, b"ten bytes!", 4)
+            .await;
+
+        let (trace, _) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(
+            part_puts(&server).await,
+            ["/part/upload-1/1", "/part/upload-1/2", "/part/upload-1/3"]
+        );
+        let requests = parts_requests(&server).await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["uploads"][0]["part_numbers"],
+            serde_json::json!([2, 3])
         );
     }
 
     #[tokio::test]
-    async fn session_expired_410_fetches_fresh_uri_and_restarts() {
-        // First PUT to /upload/dead returns 410 (expired session).
-        // GET resumable_upload_url returns a fresh /upload/live URI.
-        // Subsequent PUT to /upload/live succeeds with a valid checksum.
+    async fn a_registration_url_of_a_missing_upload_sends_the_trace_back_to_registration() {
         let server = MockServer::start().await;
-        let payload = b"resumable-payload";
-        let b64 = BASE64.encode(crc32c::crc32c(payload).to_be_bytes());
-        let header_value = format!("crc32c={b64}");
-
         Mock::given(method("PUT"))
-            .and(path("/upload/dead"))
-            .respond_with(ResponseTemplate::new(410))
+            .and(path_regex("^/part/"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("NoSuchUpload"))
             .expect(1)
             .mount(&server)
             .await;
-        let live_uri = format!("{}/upload/live", server.uri());
-        let fresh_response = serde_json::json!({"url": live_uri});
-        Mock::given(method("GET"))
-            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(fresh_response))
+        Mock::given(method("POST"))
+            .and(path(PARTS_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uploads": [],
+                "missing_upload_ids": ["upload-1"]
+            })))
             .expect(1)
             .mount(&server)
             .await;
-        let header_value_clone = header_value.clone();
-        Mock::given(method("PUT"))
-            .and(path("/upload/live"))
-            .respond_with(move |_req: &Request| {
-                ResponseTemplate::new(200).insert_header("X-Goog-Hash", header_value_clone.as_str())
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let dead_uri = format!("{}/upload/dead", server.uri());
-        let (_recording_index, _) = seed_ready_trace(
+        seed_json_trace_with_registration_url(
+            &server,
             &store,
             &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &dead_uri,
-            payload,
+            b"payload",
+            16 * 1024 * 1024,
+        )
+        .await;
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    registration_status: Some(TraceRegistrationStatus::Registered),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
+        assert!(
+            store.get_trace_uploads("trace-1").await.unwrap().is_empty(),
+            "the old uploads are cleared"
+        );
+        assert!(completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_missing_upload_sends_the_trace_back_to_registration() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(PARTS_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uploads": [],
+                "missing_upload_ids": ["upload-1"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"payload",
+            16 * 1024 * 1024,
+        )
+        .await;
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    registration_status: Some(TraceRegistrationStatus::Registered),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
+        assert_eq!(trace.upload_status, TraceUploadStatus::Pending);
+        assert!(
+            store.get_trace_uploads("trace-1").await.unwrap().is_empty(),
+            "the old uploads are cleared"
+        );
+        assert!(completion.is_none());
+        assert!(part_puts(&server).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_needing_more_than_10000_parts_fails_the_trace() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(PARTS_ROUTE))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(&server, &store, &recordings_root, &[b'x'; 10_001], 1).await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        assert!(
+            trace
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("10001 parts")),
+            "the error names the part count: {:?}",
+            trace.error_message
+        );
+        assert!(completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn transient_5xx_part_is_retried_then_uploaded() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        Mock::given(method("PUT"))
+            .and(path_regex("^/part/"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_part_store(&server).await;
+        mount_complete(&server, "upload-1", b"transient-ok").await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"transient-ok",
+            16 * 1024 * 1024,
         )
         .await;
 
-        let api = client(&server);
-        let bus = EventBus::new();
+        let (trace, _) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+    }
+
+    #[tokio::test]
+    async fn hard_4xx_part_error_rolls_trace_to_retrying() {
+        let server = MockServer::start().await;
+        mount_parts_route(&server).await;
+        Mock::given(method("PUT"))
+            .and(path_regex("^/part/"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"hard-error",
+            16 * 1024 * 1024,
+        )
+        .await;
+
+        let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+        assert_eq!(trace.upload_status, TraceUploadStatus::Retrying);
+        assert!(completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn every_transient_part_status_is_retried_then_uploaded() {
+        for status in [429, 500, 502, 503, 504] {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            Mock::given(method("PUT"))
+                .and(path_regex("^/part/"))
+                .respond_with(ResponseTemplate::new(status))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_part_store(&server).await;
+            mount_complete(&server, "upload-1", b"transient-ok").await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(
+                &server,
+                &store,
+                &recordings_root,
+                b"transient-ok",
+                16 * 1024 * 1024,
+            )
+            .await;
+
+            let (trace, _) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_eq!(
+                trace.upload_status,
+                TraceUploadStatus::Uploaded,
+                "status {status}"
+            );
+            assert_eq!(
+                part_puts(&server).await,
+                ["/part/upload-1/1", "/part/upload-1/1"],
+                "status {status} retries the same part"
+            );
+            assert_eq!(
+                parts_requests(&server).await.len(),
+                1,
+                "status {status} keeps the part URL"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_expired_url_signal_fetches_fresh_part_urls_then_uploads() {
+        let mut signals = vec![
+            ("403".to_string(), ResponseTemplate::new(403)),
+            ("404".to_string(), ResponseTemplate::new(404)),
+        ];
+        for marker in ["ExpiredToken", "Request has expired"] {
+            signals.push((
+                format!("400 {marker}"),
+                ResponseTemplate::new(400)
+                    .set_body_string(format!("<Error><Code>{marker}</Code></Error>")),
+            ));
+        }
+        for (label, expired) in signals {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            Mock::given(method("PUT"))
+                .and(path("/part/upload-1/1"))
+                .respond_with(expired)
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_part_store(&server).await;
+            mount_complete(&server, "upload-1", b"payload").await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(
+                &server,
+                &store,
+                &recordings_root,
+                b"payload",
+                16 * 1024 * 1024,
+            )
+            .await;
+
+            let (trace, _) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded, "{label}");
+            assert_eq!(
+                part_puts(&server).await,
+                ["/part/upload-1/1", "/part/upload-1/1"],
+                "{label}"
+            );
+            assert_eq!(
+                parts_requests(&server).await.len(),
+                2,
+                "{label} fetches fresh URLs"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_status_that_is_not_retried_rolls_trace_to_retrying() {
+        let rejections = [
+            (
+                "400 unrelated body",
+                ResponseTemplate::new(400).set_body_string("bad request"),
+            ),
+            ("401", ResponseTemplate::new(401)),
+            ("409", ResponseTemplate::new(409)),
+            ("422", ResponseTemplate::new(422)),
+        ];
+        for (label, rejection) in rejections {
+            let server = MockServer::start().await;
+            mount_parts_route(&server).await;
+            Mock::given(method("PUT"))
+                .and(path_regex("^/part/"))
+                .respond_with(rejection)
+                .mount(&server)
+                .await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            seed_json_trace(
+                &server,
+                &store,
+                &recordings_root,
+                b"hard-error",
+                16 * 1024 * 1024,
+            )
+            .await;
+
+            let (trace, completion) = upload_trace(&server, &store, recordings_root).await;
+
+            assert_eq!(trace.upload_status, TraceUploadStatus::Retrying, "{label}");
+            assert!(completion.is_none(), "{label}");
+            assert_eq!(part_puts(&server).await.len(), 1, "{label} is not retried");
+            assert_eq!(parts_requests(&server).await.len(), 1, "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_401_on_the_parts_route_reloads_the_token_once_then_uploads() {
+        struct CountingProvider {
+            reloads: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl AuthProvider for CountingProvider {
+            async fn bearer_token(&self) -> Result<String, AuthError> {
+                Ok("token".to_string())
+            }
+            async fn reload(&self) -> Result<(), AuthError> {
+                self.reloads.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(PARTS_ROUTE))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_parts_route(&server).await;
+        mount_part_store(&server).await;
+        mount_complete(&server, "upload-1", b"payload").await;
+        let reloads = Arc::new(AtomicUsize::new(0));
+        let auth = Arc::new(CountingProvider {
+            reloads: Arc::clone(&reloads),
+        });
+        let mut options = ApiClientOptions::new(server.uri());
+        options.max_backoff = Duration::from_millis(10);
+        let api = Arc::new(ApiClient::new(options, auth).unwrap());
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_json_trace(
+            &server,
+            &store,
+            &recordings_root,
+            b"payload",
+            16 * 1024 * 1024,
+        )
+        .await;
         let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+        run_upload_single(&store, recordings_root, &api, &EventBus::new(), &status_tx).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
-        // Persisted URI must be the refreshed one so a restart resumes
-        // against the live session, not the dead one.
-        let serialised = trace.upload_session_uris.as_ref().expect("uris stored");
-        assert!(
-            serialised.contains("/upload/live"),
-            "refreshed URI not persisted: {serialised}"
-        );
-        assert!(
-            !serialised.contains("/upload/dead"),
-            "dead URI still present: {serialised}"
-        );
+        assert_eq!(reloads.load(Ordering::SeqCst), 1);
+        assert_eq!(parts_requests(&server).await.len(), 2);
+        assert_eq!(part_puts(&server).await, ["/part/upload-1/1"]);
     }
 
     #[tokio::test]
@@ -1199,27 +1978,28 @@ mod tests {
             .create_trace(recording_index, "trace-1", None, None)
             .await
             .unwrap();
-        let mut uris = HashMap::new();
-        uris.insert("dummy".to_string(), "https://upload/abc".to_string());
+        let uploads =
+            MultipartUploads::from([("dummy".to_string(), upload(&server, "upload-1", 1))]);
+        store
+            .mark_trace_registered("trace-1", &uploads)
+            .await
+            .unwrap();
         store
             .update_trace(
                 "trace-1",
                 TraceUpdate {
                     write_status: Some(TraceWriteStatus::Written),
                     upload_status: Some(TraceUploadStatus::Queued),
-                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
                     ..TraceUpdate::default()
                 },
             )
             .await
             .unwrap();
 
-        let api = client(&server);
         let bus = EventBus::new();
         let mut subscriber = bus.subscribe();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+        run_upload_single(&store, recordings_root, &client(&server), &bus, &status_tx).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
@@ -1236,47 +2016,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_session_uris_fail_the_trace() {
+    async fn empty_uploads_fail_the_trace() {
         // An empty map would upload no files, so the trace fails without a
         // completed status, and UploadComplete still unblocks the progress gate.
         let server = MockServer::start().await;
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let recording = store
-            .create_recording(NewRecording::default())
-            .await
-            .unwrap();
-        store
-            .mark_recording_start_notified(recording.recording_index, "rec-1")
-            .await
-            .unwrap();
-        store
-            .create_trace(
-                recording.recording_index,
-                "trace-1",
-                Some("JOINT_POSITIONS"),
-                Some("arm"),
-            )
-            .await
-            .unwrap();
-        store
-            .update_trace(
-                "trace-1",
-                TraceUpdate {
-                    write_status: Some(TraceWriteStatus::Written),
-                    upload_status: Some(TraceUploadStatus::Queued),
-                    upload_session_uris: Some("{}".to_string()),
-                    ..TraceUpdate::default()
-                },
-            )
-            .await
-            .unwrap();
+        seed_trace(
+            &store,
+            &recordings_root,
+            ("JOINT_POSITIONS", "arm"),
+            &MultipartUploads::new(),
+            &[],
+        )
+        .await;
 
-        let api = client(&server);
         let bus = EventBus::new();
         let mut subscriber = bus.subscribe();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+        run_upload_single(&store, recordings_root, &client(&server), &bus, &status_tx).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
@@ -1285,55 +2043,6 @@ mod tests {
             Ok(DaemonEvent::UploadComplete { .. })
         ));
         assert!(!completed_status_sent(&mut status_rx));
-    }
-
-    #[tokio::test]
-    async fn no_session_uris_leaves_trace_queued() {
-        // Ready-for-upload but no stored session URIs (registration hasn't
-        // persisted them yet): the uploader returns without touching the trace
-        // so a later drain retries once they land.
-        let server = MockServer::start().await;
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        let recording = store
-            .create_recording(NewRecording::default())
-            .await
-            .unwrap();
-        store
-            .mark_recording_start_notified(recording.recording_index, "rec-1")
-            .await
-            .unwrap();
-        store
-            .create_trace(
-                recording.recording_index,
-                "trace-1",
-                Some("JOINT_POSITIONS"),
-                Some("arm"),
-            )
-            .await
-            .unwrap();
-        store
-            .update_trace(
-                "trace-1",
-                TraceUpdate {
-                    upload_status: Some(TraceUploadStatus::Queued),
-                    ..TraceUpdate::default() // no upload_session_uris
-                },
-            )
-            .await
-            .unwrap();
-
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
-        assert_eq!(
-            trace.upload_status,
-            TraceUploadStatus::Queued,
-            "no URIs → trace untouched for retry"
-        );
     }
 
     #[tokio::test]
@@ -1358,29 +2067,26 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut uris = HashMap::new();
-        uris.insert(
-            "JOINT_POSITIONS/arm/trace.json".to_string(),
-            "https://upload/abc".to_string(),
-        );
+        let uploads = MultipartUploads::from([(
+            JSON_FILEPATH.to_string(),
+            upload(&server, "upload-1", 16 * 1024 * 1024),
+        )]);
+        store
+            .mark_trace_registered("trace-1", &uploads)
+            .await
+            .unwrap();
         store
             .update_trace(
                 "trace-1",
                 TraceUpdate {
                     upload_status: Some(TraceUploadStatus::Queued),
-                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
                     ..TraceUpdate::default()
                 },
             )
             .await
             .unwrap();
 
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        let (trace, _) = upload_trace(&server, &store, recordings_root).await;
         assert_eq!(
             trace.upload_status,
             TraceUploadStatus::Queued,
@@ -1390,54 +2096,31 @@ mod tests {
 
     #[tokio::test]
     async fn missing_artefact_marks_trace_failed() {
-        // Session URI + cloud id + data_type all present, but the on-disk file
-        // is gone. The uploader marks the trace Failed and emits UploadComplete
-        // so the recording's progress gate isn't wedged on a vanished file, but
-        // never reports it completed to the backend.
+        // Uploads + data_type present, but the on-disk file is gone. The
+        // uploader marks the trace Failed and emits UploadComplete so the
+        // recording's progress gate isn't wedged on a vanished file, but never
+        // reports it completed to the backend.
         let server = MockServer::start().await;
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let recording = store
-            .create_recording(NewRecording::default())
-            .await
-            .unwrap();
-        store
-            .mark_recording_start_notified(recording.recording_index, "rec-1")
-            .await
-            .unwrap();
-        store
-            .create_trace(
-                recording.recording_index,
-                "trace-1",
-                Some("JOINT_POSITIONS"),
-                Some("arm"),
-            )
-            .await
-            .unwrap();
-        let mut uris = HashMap::new();
-        uris.insert(
-            "JOINT_POSITIONS/arm/trace.json".to_string(),
-            format!("{}/upload/abc", server.uri()),
-        );
-        store
-            .update_trace(
-                "trace-1",
-                TraceUpdate {
-                    write_status: Some(TraceWriteStatus::Written),
-                    upload_status: Some(TraceUploadStatus::Queued),
-                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
-                    ..TraceUpdate::default()
-                },
-            )
-            .await
-            .unwrap();
+        let uploads = MultipartUploads::from([(
+            JSON_FILEPATH.to_string(),
+            upload(&server, "upload-1", 16 * 1024 * 1024),
+        )]);
         // Deliberately do NOT create the on-disk artefact.
+        seed_trace(
+            &store,
+            &recordings_root,
+            ("JOINT_POSITIONS", "arm"),
+            &uploads,
+            &[],
+        )
+        .await;
 
-        let api = client(&server);
         let bus = EventBus::new();
         let mut subscriber = bus.subscribe();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+        run_upload_single(&store, recordings_root, &client(&server), &bus, &status_tx).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
@@ -1499,31 +2182,29 @@ mod tests {
     #[tokio::test]
     async fn an_abort_cuts_off_an_in_flight_upload() {
         let server = MockServer::start().await;
+        mount_parts_route(&server).await;
         // Never realistically returns, so an upload that is not aborted times
         // out rather than passing by luck.
         Mock::given(method("PUT"))
-            .and(path("/upload/slow"))
+            .and(path_regex("^/part/"))
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(120)))
             .mount(&server)
             .await;
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let (recording_index, _) = seed_ready_trace(
+        let recording_index = seed_json_trace(
+            &server,
             &store,
             &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/slow", server.uri()),
             b"payload",
+            16 * 1024 * 1024,
         )
         .await;
 
         let aborts = UploadAborts::default();
         let mut in_flight =
             dispatch_upload(&store, recordings_root, &client(&server), &aborts).await;
-        wait_for_put(&server, "/upload/slow").await;
+        wait_for_put(&server, "/part/upload-1/1").await;
         aborts.abort(recording_index);
 
         let joined = timeout(Duration::from_secs(10), in_flight.join_next())
@@ -1537,23 +2218,20 @@ mod tests {
     #[tokio::test]
     async fn a_trace_of_a_not_found_recording_is_never_uploaded() {
         let server = MockServer::start().await;
+        mount_parts_route(&server).await;
         Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
             .respond_with(ResponseTemplate::new(200))
             .expect(0)
             .mount(&server)
             .await;
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let (recording_index, _) = seed_ready_trace(
+        let recording_index = seed_json_trace(
+            &server,
             &store,
             &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
             b"payload",
+            16 * 1024 * 1024,
         )
         .await;
         // Not found after this trace was dispatched, before its task ran.
@@ -1582,33 +2260,22 @@ mod tests {
     async fn the_uploader_aborts_uploads_on_cancel_and_not_found_events() {
         for not_found in [false, true] {
             let server = MockServer::start().await;
-            let payload = b"hello world";
-            let checksum = format!(
-                "crc32c={}",
-                BASE64.encode(crc32c::crc32c(payload).to_be_bytes())
-            );
+            mount_parts_route(&server).await;
             // Completes after a short delay, so an upload that is not aborted
             // ends up `Uploaded`.
             Mock::given(method("PUT"))
-                .and(path("/upload/abc"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("X-Goog-Hash", checksum.as_str())
-                        .set_delay(Duration::from_millis(1500)),
-                )
+                .and(path_regex("^/part/"))
+                .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(1500)))
                 .mount(&server)
                 .await;
             let (store, tempdir) = open_store().await;
             let recordings_root = tempdir.path().join("recordings");
-            let (recording_index, _) = seed_ready_trace(
+            let recording_index = seed_json_trace(
+                &server,
                 &store,
                 &recordings_root,
-                "rec-1",
-                "trace-1",
-                "JOINT_POSITIONS",
-                "arm",
-                &format!("{}/upload/abc", server.uri()),
-                payload,
+                b"hello world",
+                16 * 1024 * 1024,
             )
             .await;
 
@@ -1630,7 +2297,7 @@ mod tests {
             );
             sleep(Duration::from_millis(50)).await;
             bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Up));
-            wait_for_put(&server, "/upload/abc").await;
+            wait_for_put(&server, "/part/upload-1/1").await;
 
             if not_found {
                 store
@@ -1735,306 +2402,45 @@ mod tests {
         );
     }
 
-    // The following drive the wire-level transfer layer (`upload_transfer.rs`)
-    // through the uploader entry point, exercising branches that only a live
-    // server reaches: transient-retry, auth refresh, a hard error, and the
-    // no-progress stall guard.
-
-    #[tokio::test]
-    async fn transient_5xx_chunk_is_retried_then_uploaded() {
-        // A 503 on the chunk PUT is transient: put_chunk retries within budget
-        // and the trace still settles as Uploaded.
-        let server = MockServer::start().await;
-        let payload = b"transient-ok";
-        let header = format!(
-            "crc32c={}",
-            BASE64.encode(crc32c::crc32c(payload).to_be_bytes())
-        );
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(move |_req: &Request| {
-                ResponseTemplate::new(200).insert_header("X-Goog-Hash", header.as_str())
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            payload,
-        )
-        .await;
-
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        assert_eq!(
-            store
-                .get_trace("trace-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .upload_status,
-            TraceUploadStatus::Uploaded
-        );
-    }
-
-    #[tokio::test]
-    async fn auth_401_on_chunk_is_reloaded_then_uploaded() {
-        // A 401 mid-upload triggers one token reload and then the retried PUT
-        // succeeds.
-        let server = MockServer::start().await;
-        let payload = b"auth-ok";
-        let header = format!(
-            "crc32c={}",
-            BASE64.encode(crc32c::crc32c(payload).to_be_bytes())
-        );
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(ResponseTemplate::new(401))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(move |_req: &Request| {
-                ResponseTemplate::new(200).insert_header("X-Goog-Hash", header.as_str())
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            payload,
-        )
-        .await;
-
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        assert_eq!(
-            store
-                .get_trace("trace-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .upload_status,
-            TraceUploadStatus::Uploaded
-        );
-    }
-
-    #[tokio::test]
-    async fn hard_4xx_chunk_error_rolls_trace_to_retrying() {
-        // A non-retryable 4xx is a hard error: put_chunk returns Failed,
-        // upload_one_file_resumable errors, and the uploader rolls the trace to Retrying
-        // for the registration recovery sweep to re-arm.
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            b"hard-error",
-        )
-        .await;
-
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        assert_eq!(
-            store
-                .get_trace("trace-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .upload_status,
-            TraceUploadStatus::Retrying
-        );
-    }
-
-    #[tokio::test]
-    async fn no_progress_308_stall_marks_trace_retrying() {
-        // A peer that keeps replying 308 without committing any bytes must not
-        // wedge the upload task (and its concurrency permit) forever: the
-        // stall guard bails after MAX_RETRIES and the trace rolls to Retrying.
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(ResponseTemplate::new(308)) // no Range → no forward progress
-            .mount(&server)
-            .await;
-
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            b"stall-me",
-        )
-        .await;
-
-        let api = client(&server);
-        let bus = EventBus::new();
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
-
-        assert_eq!(
-            store
-                .get_trace("trace-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .upload_status,
-            TraceUploadStatus::Retrying
-        );
-    }
-
-    /// Upload a written RGB trace for `cam0` whose map links `lossy.mp4` and
-    /// `trace.json` to `/upload/lossy` and `/upload/trace-json`, against a fake
-    /// GCS that accepts every PUT as the final chunk. Only the files in
+    /// Upload a written RGB trace for `cam0` with an upload for `lossy.mp4` and
+    /// `trace.json`, against a store that accepts every part. Only the files in
     /// `on_disk` are written to the trace directory.
     async fn upload_rgb_trace(
         server: &MockServer,
         on_disk: &[(&str, &[u8])],
-    ) -> (
-        SqliteStateStore,
-        TempDir,
-        mpsc::UnboundedReceiver<StatusUpdate>,
-    ) {
-        Mock::given(method("PUT"))
-            .and(path_regex("^/upload/"))
-            .respond_with(|request: &Request| {
-                let crc = BASE64.encode(crc32c::crc32c(&request.body).to_be_bytes());
-                ResponseTemplate::new(200)
-                    .insert_header("X-Goog-Hash", format!("crc32c={crc}").as_str())
-            })
-            .mount(server)
-            .await;
+    ) -> (SqliteStateStore, TempDir, Option<StatusUpdate>) {
+        mount_parts_route(server).await;
+        mount_part_store(server).await;
+        for (basename, contents) in on_disk {
+            let upload_id = if *basename == LOSSY_VIDEO_FILENAME {
+                "upload-lossy"
+            } else {
+                "upload-json"
+            };
+            mount_complete(server, upload_id, contents).await;
+        }
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        let recording_index = store
-            .create_recording(NewRecording::default())
-            .await
-            .unwrap()
-            .recording_index;
-        store
-            .mark_recording_start_notified(recording_index, "rec-1")
-            .await
-            .unwrap();
-        store
-            .create_trace(recording_index, "trace-1", Some("RGB_IMAGES"), Some("cam0"))
-            .await
-            .unwrap();
-        let dir = TracePath::new(
-            recording_index.to_string(),
-            "RGB_IMAGES",
-            "trace-1".to_string(),
-        )
-        .directory(&recordings_root);
-        std::fs::create_dir_all(&dir).unwrap();
-        for (basename, contents) in on_disk {
-            std::fs::write(dir.join(basename), contents).unwrap();
-        }
-        let uris = HashMap::from([
+        let uploads = MultipartUploads::from([
             (
                 format!("RGB_IMAGES/cam0/{LOSSY_VIDEO_FILENAME}"),
-                format!("{}/upload/lossy", server.uri()),
+                upload(server, "upload-lossy", 16 * 1024 * 1024),
             ),
             (
                 format!("RGB_IMAGES/cam0/{TRACE_JSON_FILENAME}"),
-                format!("{}/upload/trace-json", server.uri()),
+                upload(server, "upload-json", 16 * 1024 * 1024),
             ),
         ]);
-        store
-            .update_trace(
-                "trace-1",
-                TraceUpdate {
-                    write_status: Some(TraceWriteStatus::Written),
-                    upload_status: Some(TraceUploadStatus::Queued),
-                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
-                    ..TraceUpdate::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        let (status_tx, status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(
+        seed_trace(
             &store,
-            recordings_root,
-            &client(server),
-            &EventBus::new(),
-            &status_tx,
-            "trace-1",
+            &recordings_root,
+            ("RGB_IMAGES", "cam0"),
+            &uploads,
+            on_disk,
         )
         .await;
-        (store, tempdir, status_rx)
-    }
-
-    /// PUTs to `upload_path` that declare the object's total size, which is
-    /// what finalises a GCS resumable session.
-    async fn finalising_puts(server: &MockServer, upload_path: &str) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|request| request.method.as_str() == "PUT" && request.url.path() == upload_path)
-            .filter(|request| {
-                request
-                    .headers
-                    .get("content-range")
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.rsplit_once('/'))
-                    .is_some_and(|(_, total)| total != "*")
-            })
-            .count()
+        let (_, completion) = upload_trace(server, &store, recordings_root).await;
+        (store, tempdir, completion)
     }
 
     fn completed_status_sent(status_rx: &mut mpsc::UnboundedReceiver<StatusUpdate>) -> bool {
@@ -2046,9 +2452,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_registered_file_is_finalised_before_uploaded() {
+    async fn every_registered_file_is_uploaded_before_uploaded() {
         let server = MockServer::start().await;
-        let (store, _tempdir, mut status_rx) = upload_rgb_trace(
+        let (store, _tempdir, completion) = upload_rgb_trace(
             &server,
             &[
                 (LOSSY_VIDEO_FILENAME, b"fake-mp4-bytes"),
@@ -2059,15 +2465,26 @@ mod tests {
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
-        assert!(completed_status_sent(&mut status_rx));
-        assert_eq!(finalising_puts(&server, "/upload/lossy").await, 1);
-        assert_eq!(finalising_puts(&server, "/upload/trace-json").await, 1);
+        assert!(completion.is_some());
+        let mut completes: Vec<String> = complete_requests(&server)
+            .await
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        completes.sort();
+        assert_eq!(
+            completes,
+            ["/complete/upload-json", "/complete/upload-lossy"]
+        );
+        let mut puts = part_puts(&server).await;
+        puts.sort();
+        assert_eq!(puts, ["/part/upload-json/1", "/part/upload-lossy/1"]);
     }
 
     #[tokio::test]
     async fn zero_byte_sidecar_fails_trace_without_completion() {
         let server = MockServer::start().await;
-        let (store, _tempdir, mut status_rx) = upload_rgb_trace(
+        let (store, _tempdir, completion) = upload_rgb_trace(
             &server,
             &[
                 (LOSSY_VIDEO_FILENAME, b"fake-mp4-bytes"),
@@ -2078,83 +2495,20 @@ mod tests {
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
-        assert!(!completed_status_sent(&mut status_rx));
-        assert_eq!(finalising_puts(&server, "/upload/trace-json").await, 0);
+        assert!(completion.is_none());
+        assert!(!part_puts(&server)
+            .await
+            .contains(&"/part/upload-json/1".to_string()));
     }
 
     #[tokio::test]
     async fn missing_sidecar_fails_trace_without_completion() {
-        // Upload order is random, so `lossy.mp4` may already be up.
         let server = MockServer::start().await;
-        let (store, _tempdir, mut status_rx) =
+        let (store, _tempdir, completion) =
             upload_rgb_trace(&server, &[(LOSSY_VIDEO_FILENAME, b"fake-mp4-bytes")]).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
-        assert!(!completed_status_sent(&mut status_rx));
-    }
-
-    /// Upload a 13-byte trace whose data PUT gets a 308 with a full `Range`,
-    /// answering the `bytes */13` status query with `status_query_status`.
-    async fn upload_after_full_range_308(status_query_status: u16) -> TraceUploadStatus {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .and(header("content-range", "bytes */13"))
-            .respond_with(ResponseTemplate::new(status_query_status))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/upload/abc"))
-            .respond_with(ResponseTemplate::new(308).insert_header("Range", "bytes=0-12"))
-            .mount(&server)
-            .await;
-
-        let (store, tempdir) = open_store().await;
-        let recordings_root = tempdir.path().join("recordings");
-        seed_ready_trace(
-            &store,
-            &recordings_root,
-            "rec-1",
-            "trace-1",
-            "JOINT_POSITIONS",
-            "arm",
-            &format!("{}/upload/abc", server.uri()),
-            b"thirteen-byte",
-        )
-        .await;
-        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
-        run_upload_single(
-            &store,
-            recordings_root,
-            &client(&server),
-            &EventBus::new(),
-            &status_tx,
-            "trace-1",
-        )
-        .await;
-        store
-            .get_trace("trace-1")
-            .await
-            .unwrap()
-            .unwrap()
-            .upload_status
-    }
-
-    #[tokio::test]
-    async fn full_range_308_without_a_2xx_is_retried() {
-        assert_eq!(
-            upload_after_full_range_308(308).await,
-            TraceUploadStatus::Retrying
-        );
-    }
-
-    #[tokio::test]
-    async fn full_range_308_is_uploaded_once_the_status_query_returns_2xx() {
-        assert_eq!(
-            upload_after_full_range_308(200).await,
-            TraceUploadStatus::Uploaded
-        );
+        assert!(completion.is_none());
     }
 }

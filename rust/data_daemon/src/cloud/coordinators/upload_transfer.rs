@@ -1,14 +1,14 @@
-//! Wire-level upload transfer mechanics.
+//! Wire-level multipart upload transfer mechanics.
 //!
-//! [`upload_one_file`] uploads a file as a multipart upload. Parts that are
+//! [`super::uploader`] calls [`upload_one_file`] for each file. Parts that are
 //! not saved yet are PUT in order to presigned URLs, and the ETag of each part
 //! is saved. The upload is then completed with the saved parts and the CRC32C
 //! of the store is compared with the CRC32C of the file.
 //!
-//! [`super::uploader`] calls [`upload_one_file_resumable`] for each file. It
-//! streams the file as 16 MiB chunks to the GCS resumable session URI,
-//! handling the 308-continue, 410-session-expired, and 401-auth-refresh
-//! transitions, and verifies the server-side CRC32C checksum on completion.
+//! [`upload_one_file_resumable`] streams a file as 16 MiB chunks to a GCS
+//! resumable session URI instead, handling the 308-continue,
+//! 410-session-expired, and 401-auth-refresh transitions, and verifies the
+//! server-side CRC32C checksum on completion.
 
 use std::collections::btree_map::Entry;
 use std::collections::HashMap;
@@ -97,7 +97,6 @@ impl From<String> for UploadFileError {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[expect(dead_code)]
 pub(crate) async fn upload_one_file(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
@@ -648,6 +647,7 @@ impl From<String> for ResumableUploadError {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(dead_code)]
 pub(crate) async fn upload_one_file_resumable(
     client: &Arc<ApiClient>,
     trace_writer: &TraceWriteHandle,

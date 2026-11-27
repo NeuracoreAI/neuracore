@@ -110,7 +110,6 @@ pub struct NewRecording<'a> {
 /// `recording_index` the store allocates; the cloud `recording_id` is a
 /// separate, nullable column filled asynchronously.
 #[async_trait]
-#[cfg_attr(not(test), expect(dead_code))]
 pub trait StateStore: Send + Sync {
     /// Insert a new recording row, allocating its `recording_index`, and
     /// return it. Each `StartRecording` envelope opens a distinct recording,
@@ -559,10 +558,10 @@ pub struct TraceCreate {
 /// on-disk byte counter, `total_bytes`, the write-phase error). The uploader's
 /// rolling `bytes_uploaded` checkpoint is also coalesced here — it is the one
 /// cloud-owned column that is hot (one write per 64 MiB per concurrent upload),
-/// purely advisory (resume correctness comes from the server's 308 offset, not
-/// this row), and last-writer-wins, so it fits the write-behind exactly. The
-/// remaining cloud columns (`upload_status`, `registration_status`,
-/// `upload_session_uris`, `path`) stay on the synchronous write path: they gate
+/// purely advisory (resume correctness comes from the parts the backend
+/// reports uploaded, not this row), and last-writer-wins, so it fits the
+/// write-behind exactly. The remaining cloud columns (`upload_status`, `registration_status`,
+/// the `trace_uploads` rows, `path`) stay on the synchronous write path: they gate
 /// reads (e.g. `traces_ready_for_upload`) and must be ordered against the bus
 /// events the coordinators publish, so deferring them would reintroduce
 /// read-after-write races. `None` fields are left untouched
@@ -1469,7 +1468,7 @@ impl StateStore for SqliteStateStore {
     async fn promote_ready_traces_to_queued(&self) -> Result<Vec<(String, i64)>, StateStoreError> {
         // The `upload_status NOT IN (...)` guard makes each promotion fire at
         // most once. This is the ONLY path that lets a trace reach the uploader,
-        // so it must require BOTH a session URI (registered) and finalised bytes
+        // so it must require BOTH multipart uploads (registered) and finalised bytes
         // (written) — `traces_ready_for_upload` only checks `upload_status`.
         let now = Utc::now().naive_utc();
         let rows = sqlx::query_as::<_, (String, i64)>(
@@ -1779,7 +1778,7 @@ impl StateStore for SqliteStateStore {
         .await?;
         // `uploading` → `retrying` so the uploader's drain (which filters on
         // `Queued | Retrying`) re-picks it up. Stays inside the registered
-        // half of the pipeline because the session URI is still valid
+        // half of the pipeline because the multipart uploads stay open
         // (`registration_status` is preserved by definition).
         let upload_result = sqlx::query(
             "UPDATE traces \
@@ -2003,27 +2002,20 @@ mod tests {
         (store, tempdir)
     }
 
-    #[tokio::test]
-    async fn upgrade_splits_nanosecond_rows_into_microseconds_and_publish_times() {
-        // A recording still pending a backend notify survives a daemon
-        // upgrade: its nanosecond start and stop become the publish times, and
-        // the caller's value becomes microseconds.
-        let tempdir = TempDir::new().expect("tempdir");
-        let path = tempdir.path().join("state.db");
-        let earlier_migrations = tempdir.path().join("migrations");
+    /// Open a database at `path` that has the migrations up to `last` only,
+    /// as an older daemon left it.
+    async fn pool_migrated_up_to(path: &Path, last: &str) -> SqlitePool {
+        let migrations = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let earlier_migrations = path.with_extension("migrations");
         std::fs::create_dir(&earlier_migrations).unwrap();
-        for name in [
-            "0001_initial.sql",
-            "0002_trace_completion_reported.sql",
-            "0003_recording_backend_not_found.sql",
-        ] {
-            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("migrations")
-                .join(name);
-            std::fs::copy(source, earlier_migrations.join(name)).unwrap();
+        for entry in std::fs::read_dir(&migrations).unwrap() {
+            let name = entry.unwrap().file_name();
+            if name.to_str().unwrap() <= last {
+                std::fs::copy(migrations.join(&name), earlier_migrations.join(&name)).unwrap();
+            }
         }
         let options = SqliteConnectOptions::new()
-            .filename(&path)
+            .filename(path)
             .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .connect_with(options)
@@ -2035,6 +2027,17 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn upgrade_splits_nanosecond_rows_into_microseconds_and_publish_times() {
+        // A recording still pending a backend notify survives a daemon
+        // upgrade: its nanosecond start and stop become the publish times, and
+        // the caller's value becomes microseconds.
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let pool = pool_migrated_up_to(&path, "0003_recording_backend_not_found.sql").await;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "INSERT INTO recordings (start_timestamp_ns, stop_timestamp_ns, created_at, last_updated) \
@@ -2056,6 +2059,95 @@ mod tests {
             (row.stop_timestamp_us, row.stop_publish_timestamp_ns),
             (Some(1_700_000_005_123_456), Some(1_700_000_005_123_456_789))
         );
+    }
+
+    #[tokio::test]
+    async fn upgrade_registers_resumable_session_traces_again() {
+        // A trace registered for a GCS resumable session but not yet uploaded
+        // registers again for multipart uploads. An uploaded trace and a trace
+        // of a cancelled recording keep their state.
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let pool = pool_migrated_up_to(&path, "0006_recording_stop_tags.sql").await;
+        let now = Utc::now().naive_utc();
+        for (recording_index, cancelled_at) in [(1, None), (2, Some(now))] {
+            sqlx::query(
+                "INSERT INTO recordings (recording_index, cancelled_at, created_at, last_updated) \
+                 VALUES (?1, ?2, ?3, ?3)",
+            )
+            .bind(recording_index)
+            .bind(cancelled_at)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (trace_id, recording_index, upload_status) in [
+            ("uploading", 1, "uploading"),
+            ("uploaded", 1, "uploaded"),
+            ("cancelled", 2, "failed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO traces (trace_id, recording_index, write_status, \
+                     registration_status, upload_status, bytes_uploaded, \
+                     upload_session_uris, created_at, last_updated) \
+                 VALUES (?1, ?2, 'written', 'registered', ?3, 64, \
+                     '{\"J/arm/trace.json\": \"https://storage.example/session\"}', ?4, ?4)",
+            )
+            .bind(trace_id)
+            .bind(recording_index)
+            .bind(upload_status)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool.close().await;
+
+        let store = SqliteStateStore::open(&path).await.expect("open store");
+        let mut traces = store.list_traces_for_recording(1).await.unwrap();
+        traces.extend(store.list_traces_for_recording(2).await.unwrap());
+        let states: Vec<_> = traces
+            .into_iter()
+            .map(|trace| {
+                (
+                    trace.trace_id,
+                    trace.registration_status,
+                    trace.upload_status,
+                    trace.bytes_uploaded,
+                )
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (
+                    "uploaded".to_string(),
+                    TraceRegistrationStatus::Registered,
+                    TraceUploadStatus::Uploaded,
+                    64,
+                ),
+                (
+                    "uploading".to_string(),
+                    TraceRegistrationStatus::Pending,
+                    TraceUploadStatus::Pending,
+                    0,
+                ),
+                (
+                    "cancelled".to_string(),
+                    TraceRegistrationStatus::Registered,
+                    TraceUploadStatus::Failed,
+                    64,
+                ),
+            ]
+        );
+
+        let uploads = json_uploads("upload-1");
+        store
+            .mark_trace_registered("uploading", &uploads)
+            .await
+            .unwrap();
+        assert_eq!(store.get_trace_uploads("uploading").await.unwrap(), uploads);
     }
 
     const JSON_FILEPATH: &str = "JOINT_POSITIONS/arm/trace.json";
