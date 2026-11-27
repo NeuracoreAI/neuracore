@@ -16,5 +16,5 @@ pub use client::{ApiClient, ApiClientError, ApiClientOptions};
 #[allow(unused_imports)]
 pub use models::{
     BatchRegisterResponse, CloudFile, RegisterTraceRequest, ResumableUploadUrlResponse,
-    TraceStatusUpdate, TraceStatusValue,
+    TraceStatusUpdate, TraceStatusValue, UploadPartsRequest, UploadPartsResponse,
 };

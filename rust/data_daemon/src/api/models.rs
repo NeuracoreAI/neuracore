@@ -4,7 +4,7 @@
 //! reads are modelled, so a schema change on a field the daemon ignores does
 //! not break the client.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -48,8 +48,8 @@ pub struct RegisterTraceRequest {
 /// Backend response payload for `POST /traces/batch-register`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct BatchRegisterResponse {
-    /// Traces the backend accepted, with the GCS resumable session URIs the
-    /// daemon should PUT chunks to.
+    /// Traces the backend accepted, with a multipart upload for each file, or
+    /// with the GCS resumable session URIs the daemon should PUT chunks to.
     #[serde(default)]
     pub registered_traces: Vec<RegisteredTrace>,
     /// Traces the backend rejected, with a per-trace error message.
@@ -67,6 +67,25 @@ pub struct RegisteredTrace {
     /// (e.g. a metadata-only trace).
     #[serde(default)]
     pub upload_session_uris: BTreeMap<String, String>,
+    /// The multipart upload started for each of the trace's files.
+    #[serde(default)]
+    pub uploads: Vec<FileUpload>,
+}
+
+/// A multipart upload the backend started for one file.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileUpload {
+    /// Path inside the trace's cloud directory, as registered.
+    pub filepath: String,
+    /// Backend ID of the upload.
+    pub upload_id: String,
+    /// Size of every part except the last.
+    pub part_size_bytes: u64,
+    /// Presigned PUT URL of each of the first parts, by part number.
+    #[serde(default)]
+    pub part_urls: HashMap<u32, String>,
+    /// Presigned POST URL that completes the upload.
+    pub complete_url: String,
 }
 
 /// One failed entry in the batch-register response.
@@ -84,6 +103,33 @@ pub struct FailedTrace {
 pub struct ResumableUploadUrlResponse {
     /// Fresh resumable session URI.
     pub url: String,
+}
+
+/// Parts of one upload to sign, in a `POST /v2/org/{org}/uploads/parts` body.
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadPartsRequest {
+    /// Backend ID of the upload.
+    pub upload_id: String,
+    /// Numbers of the parts to sign, from 1 to 10,000.
+    pub part_numbers: Vec<u32>,
+}
+
+/// Response for `POST /v2/org/{org}/uploads/parts`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadPartsResponse {
+    /// Uploads that can still receive parts.
+    pub uploads: Vec<UploadParts>,
+    /// Uploads the backend no longer holds. Their files must start again.
+    pub missing_upload_ids: Vec<String>,
+}
+
+/// Part URLs of one upload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadParts {
+    /// Backend ID of the upload.
+    pub upload_id: String,
+    /// Presigned PUT URL of each requested part, by part number.
+    pub part_urls: HashMap<u32, String>,
 }
 
 /// Response for `POST /recording/start`.
@@ -203,6 +249,45 @@ mod tests {
         let body = serde_json::json!({
             "registered_traces": [{
                 "trace_id": "trace-1",
+                "uploads": [{
+                    "filepath": "rgb/cam_0/lossy.mp4",
+                    "upload_id": "upload-1",
+                    "part_size_bytes": 16_777_216,
+                    "part_urls": {"1": "https://storage.test/part-1"},
+                    "complete_url": "https://storage.test/complete"
+                }]
+            }],
+            "failed_traces": [{
+                "trace_id": "trace-2",
+                "error": "bad cloud file"
+            }],
+            "expected_trace_count": 2
+        });
+        let response: BatchRegisterResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(response.registered_traces.len(), 1);
+        assert_eq!(response.registered_traces[0].trace_id, "trace-1");
+        let upload = &response.registered_traces[0].uploads[0];
+        assert_eq!(
+            (
+                upload.filepath.as_str(),
+                upload.upload_id.as_str(),
+                upload.part_size_bytes
+            ),
+            ("rgb/cam_0/lossy.mp4", "upload-1", 16_777_216)
+        );
+        assert_eq!(
+            upload.part_urls,
+            HashMap::from([(1, "https://storage.test/part-1".to_string())])
+        );
+        assert_eq!(upload.complete_url, "https://storage.test/complete");
+        assert_eq!(response.failed_traces[0].trace_id, "trace-2");
+    }
+
+    #[test]
+    fn batch_register_response_reads_resumable_session_uris() {
+        let body = serde_json::json!({
+            "registered_traces": [{
+                "trace_id": "trace-1",
                 "upload_session_uris": {"rgb/cam_0/lossy.mp4": "https://upload.example/1"}
             }],
             "failed_traces": [{
@@ -221,5 +306,24 @@ mod tests {
             Some("https://upload.example/1")
         );
         assert_eq!(response.failed_traces[0].trace_id, "trace-2");
+    }
+
+    #[test]
+    fn upload_parts_response_reads_numbered_part_urls() {
+        let body = serde_json::json!({
+            "uploads": [{
+                "upload_id": "upload-1",
+                "part_urls": {"3": "https://store.example/3"},
+                "uploaded_parts": [1, 2]
+            }],
+            "missing_upload_ids": ["upload-2"]
+        });
+        let response: UploadPartsResponse = serde_json::from_value(body).unwrap();
+        let upload = &response.uploads[0];
+        assert_eq!(
+            upload.part_urls.get(&3).map(String::as_str),
+            Some("https://store.example/3")
+        );
+        assert_eq!(response.missing_upload_ids, vec!["upload-2"]);
     }
 }
