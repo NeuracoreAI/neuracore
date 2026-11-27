@@ -228,6 +228,15 @@ pub trait StateStore: Send + Sync {
         recording_index: i64,
     ) -> Result<Option<String>, StateStoreError>;
 
+    /// The dataset row for the server's dataset `cloud_dataset_id` in
+    /// `org_id`, made already confirmed (and with no name) when there is none:
+    /// a dataset the SDK read from the server is known by its server id.
+    async fn dataset_index_for_cloud_id(
+        &self,
+        org_id: &str,
+        cloud_dataset_id: &str,
+    ) -> Result<i64, StateStoreError>;
+
     /// Every saved robot package a robot row names, waiting to be sent.
     async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError>;
 
@@ -1066,6 +1075,22 @@ impl StateStore for SqliteStateStore {
         .await?;
 
         let recording_index = result.last_insert_rowid();
+        // A recording uses its robot and dataset rows: the reaper keeps rows
+        // that were used recently.
+        if let Some(robot_index) = new.robot_index {
+            sqlx::query("UPDATE robots SET last_used_at = ?2 WHERE robot_index = ?1")
+                .bind(robot_index)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(dataset_index) = new.dataset_index {
+            sqlx::query("UPDATE datasets SET last_used_at = ?2 WHERE dataset_index = ?1")
+                .bind(dataset_index)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+        }
         let row = Self::fetch_recording_locked(&mut tx, recording_index)
             .await?
             .ok_or_else(|| sqlx::Error::RowNotFound)?;
@@ -1359,6 +1384,44 @@ impl StateStore for SqliteStateStore {
         .fetch_optional(&self.read_pool)
         .await?;
         Ok(org.flatten())
+    }
+
+    async fn dataset_index_for_cloud_id(
+        &self,
+        org_id: &str,
+        cloud_dataset_id: &str,
+    ) -> Result<i64, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT dataset_index FROM datasets \
+              WHERE cloud_dataset_id = ?2 AND (org_id = ?1 OR org_id IS NULL) \
+           ORDER BY org_id IS NULL, dataset_index DESC \
+              LIMIT 1",
+        )
+        .bind(org_id)
+        .bind(cloud_dataset_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let dataset_index = match existing {
+            Some(dataset_index) => dataset_index,
+            None => {
+                let now = Utc::now().naive_utc();
+                sqlx::query(
+                    "INSERT INTO datasets ( \
+                         org_id, cloud_dataset_id, status, last_used_at, created_at \
+                     ) VALUES (?1, ?2, ?3, ?4, ?4)",
+                )
+                .bind(org_id)
+                .bind(cloud_dataset_id)
+                .bind(ResolutionStatus::Done.as_str())
+                .bind(now)
+                .execute(&mut *tx)
+                .await?
+                .last_insert_rowid()
+            }
+        };
+        tx.commit().await?;
+        Ok(dataset_index)
     }
 
     async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError> {

@@ -277,7 +277,9 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(self, dataset_id: str, timestamp: float | None = None) -> None:
+    def start_recording(
+        self, dataset_index: int, timestamp: float | None = None
+    ) -> None:
         """Start recording data from all active streams to a dataset.
 
         Asks the daemon to open a recording window; it owns recording identity
@@ -285,7 +287,7 @@ class Robot:
         here. Ask :meth:`get_cloud_recording_id` once it exists.
 
         Args:
-            dataset_id: Unique identifier of the dataset to record into.
+            dataset_index: The data daemon's row for the dataset to record into.
             timestamp: Optional capture time (Unix seconds) for the recording's
                 start, matching the ``log_*`` methods.
 
@@ -303,7 +305,7 @@ class Robot:
             robot_id=self.id,
             robot_instance=self.instance,
             robot_name=self.name,
-            dataset_id=dataset_id,
+            dataset_index=dataset_index,
             dataset_name=None,
             timestamp_us=timestamp_us,
         )

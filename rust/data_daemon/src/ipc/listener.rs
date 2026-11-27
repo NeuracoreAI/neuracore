@@ -439,6 +439,20 @@ async fn answer_registry_request(
                 )),
                 None => RegistryReply::Unknown,
             }),
+        RegistryRequest::DatasetForCloudId {
+            org_id,
+            cloud_dataset_id,
+        } => {
+            if org_id.is_empty() || cloud_dataset_id.is_empty() {
+                return RegistryReply::Refused(
+                    "the dataset has no organization or server id".into(),
+                );
+            }
+            store
+                .dataset_index_for_cloud_id(&org_id, &cloud_dataset_id)
+                .await
+                .map(RegistryReply::Index)
+        }
     };
     answered.unwrap_or_else(|error: StateStoreError| {
         tracing::warn!(%error, "failed to answer a registry request");
@@ -693,6 +707,45 @@ mod tests {
                 reason: None,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_dataset_read_from_the_server_gets_a_confirmed_row() {
+        let (store, _dir) = open_store().await;
+        let for_cloud_id = |org_id: &str| RegistryRequest::DatasetForCloudId {
+            org_id: org_id.into(),
+            cloud_dataset_id: "cloud-dataset-1".into(),
+        };
+        let first = index(&store, for_cloud_id("org-1")).await;
+        let again = index(&store, for_cloud_id("org-1")).await;
+
+        assert_eq!(again, first);
+        assert!(matches!(
+            answer_registry_request(
+                &store,
+                Path::new(NO_PACKAGES),
+                &EventBus::new(),
+                RegistryRequest::DatasetState {
+                    dataset_index: first
+                }
+            )
+            .await,
+            RegistryReply::State(RowState {
+                status: RowStatus::Done,
+                cloud_id: Some(ref cloud_id),
+                ..
+            }) if cloud_id == "cloud-dataset-1"
+        ));
+        assert!(matches!(
+            answer_registry_request(
+                &store,
+                Path::new(NO_PACKAGES),
+                &EventBus::new(),
+                for_cloud_id("")
+            )
+            .await,
+            RegistryReply::Refused(_)
+        ));
     }
 
     #[tokio::test]

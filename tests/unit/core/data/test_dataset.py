@@ -197,7 +197,6 @@ def test_nc_create_dataset_sets_global_state(
     dataset = nc.create_dataset("test_dataset", wait=True)
 
     assert GlobalSingleton()._active_dataset is dataset
-    assert GlobalSingleton()._active_dataset_id == dataset.id
 
 
 def test_a_dataset_the_user_must_fix_raises_when_waited_for(
@@ -293,7 +292,7 @@ def test_nc_clone_dataset_from_dataset_object(
 
     assert cloned.id == "cloned_dataset"
     assert cloned.name == "clone"
-    assert GlobalSingleton()._active_dataset_id == cloned.id
+    assert GlobalSingleton()._active_dataset is cloned
     assert mock_data_requests.last_request.json() == {
         "name": "clone",
         "sourceDatasetId": "source_dataset",
