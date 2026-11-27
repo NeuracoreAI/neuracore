@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_db_path
 from tests.integration.platform.data_daemon.shared.db_constants import (
+    COLUMN_DATASET_INDEX,
     COLUMN_EXPECTED_TRACE_COUNT,
     COLUMN_EXPECTED_TRACE_COUNT_REPORTED,
     COLUMN_LAST_UPDATED,
@@ -49,13 +50,17 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_RECORDING_INDEX,
     COLUMN_REGISTRATION_STATUS,
     COLUMN_ROBOT_ID,
+    COLUMN_ROBOT_INDEX,
     COLUMN_ROBOT_INSTANCE,
     COLUMN_STOPPED_AT,
     COLUMN_TRACE_ID,
     COLUMN_UPLOAD_STATUS,
     COLUMN_WRITE_STATUS,
+    DATASETS_TABLE,
     RECORDING_PROGRESS_REPORTED,
     RECORDINGS_TABLE,
+    ROBOTS_TABLE,
+    ROW_PENDING,
     STAT_EXPECTED_TRACE_COUNT,
     STAT_EXPECTED_TRACE_COUNT_REPORTED,
     STAT_NON_PENDING_REGISTRATION_TRACES,
@@ -1497,3 +1502,60 @@ def _is_online_upload_complete(stats: dict[str, int | str | None]) -> bool:
         and isinstance(uploaded_traces, int)
         and uploaded_traces == total_traces
     )
+
+
+def fetch_robot_row(robot_index: int) -> dict[str, Any] | None:
+    """Return the daemon's ``robots`` row for ``robot_index``, if any."""
+    with closing(_TEST_STORE.connect()) as conn:
+        row = conn.execute(
+            f"SELECT * FROM {ROBOTS_TABLE} WHERE {COLUMN_ROBOT_INDEX} = ?",
+            (robot_index,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def fetch_dataset_row(dataset_index: int) -> dict[str, Any] | None:
+    """Return the daemon's ``datasets`` row for ``dataset_index``, if any."""
+    with closing(_TEST_STORE.connect()) as conn:
+        row = conn.execute(
+            f"SELECT * FROM {DATASETS_TABLE} WHERE {COLUMN_DATASET_INDEX} = ?",
+            (dataset_index,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def assert_recordings_wait_on_unconfirmed_rows(results: list[ContextResult]) -> None:
+    """Assert offline recordings point at robot and dataset rows not yet confirmed.
+
+    Each process labels its data with its robot row, so a recording's source
+    key is the row's index; the rows hold the names the daemon registers them
+    by once online, with no server ids yet.
+
+    Raises:
+        AssertionError: If a row is missing, already confirmed, or misnamed.
+    """
+    for result in results:
+        rows_by_index = {
+            row[COLUMN_RECORDING_INDEX]: row
+            for row in fetch_recordings_for_source(result.source[0], result.source[1])
+        }
+        for recording_index in result.recording_indexes:
+            row = rows_by_index.get(recording_index)
+            assert row is not None, (
+                f"Offline recording_index {recording_index} for source "
+                f"{result.source} has no recordings row"
+            )
+            assert str(row[COLUMN_ROBOT_INDEX]) == result.source[0], row
+            robot = fetch_robot_row(row[COLUMN_ROBOT_INDEX])
+            dataset = fetch_dataset_row(row[COLUMN_DATASET_INDEX])
+            assert robot is not None and dataset is not None, row
+            assert (robot["name"], robot["status"], robot["cloud_robot_id"]) == (
+                result.robot_name,
+                ROW_PENDING,
+                None,
+            ), robot
+            assert (
+                dataset["name"],
+                dataset["status"],
+                dataset["cloud_dataset_id"],
+            ) == (result.dataset_name, ROW_PENDING, None), dataset
