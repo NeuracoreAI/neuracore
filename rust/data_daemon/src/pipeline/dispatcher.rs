@@ -901,6 +901,8 @@ impl Dispatcher {
         // gets as `start_time`, stored beside the start's publish time; the
         // window opens on the *publish* clock below.
         let new = NewRecording {
+            robot_index: None,
+            dataset_index: None,
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),

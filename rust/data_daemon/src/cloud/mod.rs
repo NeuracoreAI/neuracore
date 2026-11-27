@@ -89,3 +89,98 @@ fn parse_org_id(bytes: &[u8], path: &Path) -> Option<String> {
         }
     }
 }
+
+/// The organization a recording's server calls go to.
+///
+/// A recording goes to its robot row's organization, the one the robot was
+/// connected in, whichever organization is selected now: its robot and
+/// dataset were set up there, and the server lets the user upload there only
+/// if they can record there. A recording with no robot row, or one made
+/// before the `robots` table, goes to the organization selected now. `None`
+/// when neither is known yet.
+pub async fn recording_org_id(
+    store: &crate::state::SqliteStateStore,
+    recording_index: i64,
+    org_rx: &OrgIdRx,
+) -> Result<Option<String>, crate::state::StateStoreError> {
+    use crate::state::StateStore;
+    if let Some(org_id) = store.recording_org_id(recording_index).await? {
+        return Ok(Some(org_id));
+    }
+    Ok(org_rx.borrow().clone())
+}
+
+#[cfg(test)]
+mod recording_org_tests {
+    use super::*;
+    use crate::state::{NewRecording, SqliteStateStore, StateStore};
+    use data_daemon_shared::RobotSpec;
+    use tempfile::TempDir;
+
+    fn selected(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
+    }
+
+    #[tokio::test]
+    async fn a_recording_goes_to_the_org_its_robot_was_connected_in() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        let robot_index = store
+            .connect_robot(&RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 0,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .unwrap()
+            .robot_index;
+        let with_row = store
+            .create_recording(NewRecording {
+                robot_index: Some(robot_index),
+                robot_instance: Some(0),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+        let without_row = store
+            .create_recording(NewRecording {
+                robot_id: Some("cloud-robot-1"),
+                dataset_id: Some("cloud-dataset-1"),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+
+        for now in [Some("org-2"), None] {
+            assert_eq!(
+                recording_org_id(&store, with_row, &selected(now))
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("org-1")
+            );
+        }
+        assert_eq!(
+            recording_org_id(&store, without_row, &selected(Some("org-2")))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("org-2")
+        );
+        assert_eq!(
+            recording_org_id(&store, without_row, &selected(None))
+                .await
+                .unwrap(),
+            None
+        );
+    }
+}

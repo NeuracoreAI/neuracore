@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS datasets (
 
 ALTER TABLE recordings ADD COLUMN robot_index INTEGER REFERENCES robots (robot_index);
 ALTER TABLE recordings ADD COLUMN dataset_index INTEGER REFERENCES datasets (dataset_index);
+-- When the start notifier first sent the recording's start to the server.
+-- Until then no start of it can be in flight or already on the server, so it
+-- is safe to send on any re-check.
+ALTER TABLE recordings ADD COLUMN start_sent_at DATETIME;
 
 -- Recordings from before this table hold the server's ids. Give them rows that
 -- are already confirmed, in no organization: they keep using the selected one.

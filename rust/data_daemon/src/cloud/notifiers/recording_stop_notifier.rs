@@ -127,6 +127,8 @@ mod tests {
     async fn seed_notified_recording(store: &SqliteStateStore, recording_id: &str) -> i64 {
         let index = store
             .create_recording(NewRecording {
+                robot_index: None,
+                dataset_index: None,
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
                 dataset_id: Some("ds-1"),
