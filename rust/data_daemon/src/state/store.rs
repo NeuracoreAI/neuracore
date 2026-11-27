@@ -509,9 +509,6 @@ pub struct TraceUpdate {
     pub total_bytes: Option<i64>,
     /// Bytes uploaded so far.
     pub bytes_uploaded: Option<i64>,
-    /// JSON-encoded `{filepath: session_uri}` map persisted by the
-    /// registration coordinator.
-    pub upload_session_uris: Option<String>,
     /// Set the latest error code (use `Some(None)` to clear, `None` to leave
     /// untouched).
     pub error_code: Option<Option<TraceErrorCode>>,
@@ -530,7 +527,6 @@ impl TraceUpdate {
             && self.bytes_written.is_none()
             && self.total_bytes.is_none()
             && self.bytes_uploaded.is_none()
-            && self.upload_session_uris.is_none()
             && self.error_code.is_none()
             && self.error_message.is_none()
     }
@@ -1090,9 +1086,6 @@ impl StateStore for SqliteStateStore {
         if update.bytes_uploaded.is_some() {
             assignments.push("bytes_uploaded = ?");
         }
-        if update.upload_session_uris.is_some() {
-            assignments.push("upload_session_uris = ?");
-        }
         if update.error_code.is_some() {
             assignments.push("error_code = ?");
         }
@@ -1126,9 +1119,6 @@ impl StateStore for SqliteStateStore {
         }
         if let Some(bytes) = update.bytes_uploaded {
             query = query.bind(bytes);
-        }
-        if let Some(uris) = update.upload_session_uris {
-            query = query.bind(uris);
         }
         if let Some(code) = update.error_code {
             query = query.bind(code.map(|value| value.as_str().to_string()));

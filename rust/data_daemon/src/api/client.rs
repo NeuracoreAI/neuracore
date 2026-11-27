@@ -19,8 +19,8 @@ use tokio::time::sleep;
 
 use crate::api::auth::{AuthError, AuthProvider};
 use crate::api::models::{
-    BatchRegisterResponse, RecordingStartResponse, RegisterTraceRequest,
-    ResumableUploadUrlResponse, TraceStatusUpdate, UploadPartsRequest, UploadPartsResponse,
+    BatchRegisterResponse, RecordingStartResponse, RegisterTraceRequest, TraceStatusUpdate,
+    UploadPartsRequest, UploadPartsResponse,
 };
 
 /// Retry policy constants — match `const.py::BACKEND_API_*`.
@@ -261,26 +261,6 @@ impl ApiClient {
         serde_json::from_slice::<BatchRegisterResponse>(&bytes).map_err(ApiClientError::Decode)
     }
 
-    /// `POST /org/{org}/recording/traces/batch-register`.
-    #[expect(dead_code)]
-    pub async fn batch_register_v1(
-        &self,
-        org_id: &str,
-        traces: &[RegisterTraceRequest],
-    ) -> Result<BatchRegisterResponse, ApiClientError> {
-        let path = format!("/org/{org_id}/recording/traces/batch-register");
-        #[derive(Serialize)]
-        struct Body<'a> {
-            traces: &'a [RegisterTraceRequest],
-        }
-        let body = Body { traces };
-        let response = self
-            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
-            .await?;
-        let bytes = response.bytes().await?;
-        serde_json::from_slice::<BatchRegisterResponse>(&bytes).map_err(ApiClientError::Decode)
-    }
-
     /// `POST /v2/org/{org}/uploads/parts`.
     pub async fn upload_parts(
         &self,
@@ -298,25 +278,6 @@ impl ApiClient {
             .await?;
         let bytes = response.bytes().await?;
         serde_json::from_slice::<UploadPartsResponse>(&bytes).map_err(ApiClientError::Decode)
-    }
-
-    /// `GET /org/{org}/recording/{rec}/resumable_upload_url`.
-    pub async fn fetch_resumable_upload_url(
-        &self,
-        org_id: &str,
-        recording_id: &str,
-        filepath: &str,
-        content_type: &str,
-    ) -> Result<String, ApiClientError> {
-        let path = format!("/org/{org_id}/recording/{recording_id}/resumable_upload_url");
-        let query = [("filepath", filepath), ("content_type", content_type)];
-        let response = self
-            .send_with_retry(Method::GET, &path, |builder| builder.query(&query))
-            .await?;
-        let bytes = response.bytes().await?;
-        let parsed: ResumableUploadUrlResponse =
-            serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)?;
-        Ok(parsed.url)
     }
 
     /// `PUT /org/{org}/recording/{rec}/traces/batch-update`.

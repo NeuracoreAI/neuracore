@@ -15,6 +15,6 @@ pub use auth::{AuthError, AuthProvider, FileAuthProvider};
 pub use client::{ApiClient, ApiClientError, ApiClientOptions};
 #[allow(unused_imports)]
 pub use models::{
-    BatchRegisterResponse, CloudFile, RegisterTraceRequest, ResumableUploadUrlResponse,
-    TraceStatusUpdate, TraceStatusValue, UploadPartsRequest, UploadPartsResponse,
+    BatchRegisterResponse, CloudFile, RegisterTraceRequest, TraceStatusUpdate, TraceStatusValue,
+    UploadPartsRequest, UploadPartsResponse,
 };
