@@ -115,6 +115,11 @@ const IDLE_REAP: Duration = Duration::from_secs(30);
 /// negligible against the holdback.
 const HOUSEKEEP_INTERVAL: Duration = Duration::from_millis(25);
 
+/// How often a robot row whose data keeps arriving is marked used, so the
+/// reaper keeps the row of a script that stays connected without recording.
+/// Far below the reaper's retention, and rare enough to cost nothing.
+const ROBOT_USED_REFRESH: Duration = Duration::from_secs(60 * 60);
+
 /// Upper bound on how long a `RefreshConfig` may park the dispatcher loop
 /// waiting for the watcher's ack. The refresh is a fast `spawn_blocking` profile
 /// read, so this only guards against a stalled watcher wedging the hot path; on
@@ -491,6 +496,8 @@ struct Dispatcher {
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
     /// on every inbound envelope — only the cheap holdback release does.
     last_housekeep: Instant,
+    /// When each robot row was last marked used, by robot index.
+    robots_marked_used: HashMap<i64, Instant>,
 }
 
 impl Dispatcher {
@@ -510,6 +517,7 @@ impl Dispatcher {
             actor_handles: Vec::new(),
             orphan_drops: 0,
             last_housekeep: Instant::now(),
+            robots_marked_used: HashMap::new(),
         }
     }
 
@@ -1481,10 +1489,37 @@ impl Dispatcher {
         }
     }
 
+    /// Mark the robot row of every source whose data arrived since its row
+    /// was last marked, at most once per [`ROBOT_USED_REFRESH`]. The write
+    /// runs on its own task, off the data path.
+    fn mark_robots_used(&mut self, now: Instant) {
+        for (source, windows) in &self.windows {
+            let (Some(last_seen), Ok(robot_index)) = (windows.last_seen, source.0.parse::<i64>())
+            else {
+                continue;
+            };
+            let due = self
+                .robots_marked_used
+                .get(&robot_index)
+                .is_none_or(|marked| last_seen.duration_since(*marked) >= ROBOT_USED_REFRESH);
+            if !due {
+                continue;
+            }
+            self.robots_marked_used.insert(robot_index, now);
+            let store = self.store.clone();
+            tokio::spawn(async move {
+                if let Err(error) = store.mark_robot_used(robot_index).await {
+                    tracing::debug!(%error, robot_index, "failed to mark a robot row used");
+                }
+            });
+        }
+    }
+
     /// Evict windows past their retention and force-close idle sources. Two full
     /// window scans, so throttled to [`HOUSEKEEP_INTERVAL`] by the caller rather
     /// than run per inbound envelope.
     async fn housekeep(&mut self, now: Instant) {
+        self.mark_robots_used(now);
         let retention = self.holdback * 2;
         let (closing_actors, empty_sources) = self.evict_closing_windows(now, retention);
 
@@ -4569,6 +4604,58 @@ mod tests {
         let rows = store.list_recordings().await.expect("list recordings");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].stop_tags, vec!["good-run".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_robot_whose_data_keeps_arriving_is_marked_used() {
+        let (store, dir) = open_store().await;
+        let robot_index = store
+            .connect_robot(&data_daemon_shared::RobotSpec {
+                org_id: "org-1".into(),
+                name: "arm".into(),
+                shared: false,
+                instance: 0,
+                overwrite_urdf: false,
+                package_path: None,
+            })
+            .await
+            .unwrap()
+            .robot_index;
+        let connected_at = store
+            .get_robot(robot_index)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_used_at;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let robot = robot_index.to_string();
+        let now = Instant::now();
+        dispatcher.handle_inbound(datum(&robot, 100, 1), now).await;
+        dispatcher.housekeep(now).await;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = store.get_robot(robot_index).await.unwrap().unwrap();
+            if row.last_used_at > connected_at {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the robot row was never marked used"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Marked again only once ROBOT_USED_REFRESH has passed.
+        assert_eq!(dispatcher.robots_marked_used.get(&robot_index), Some(&now));
+        let later = now + Duration::from_secs(60);
+        dispatcher
+            .handle_inbound(datum(&robot, 200, 2), later)
+            .await;
+        dispatcher.housekeep(later).await;
+        assert_eq!(dispatcher.robots_marked_used.get(&robot_index), Some(&now));
     }
 
     #[tokio::test]

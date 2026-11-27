@@ -148,6 +148,15 @@ pub struct StatusCounts {
     pub failed: Vec<ReasonCount>,
 }
 
+/// What [`StateStore::delete_unused_rows`] deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnusedRows {
+    pub robots: u64,
+    pub datasets: u64,
+    /// Saved packages the deleted robot rows named, still to delete.
+    pub packages: Vec<String>,
+}
+
 /// A robot instance's row after [`StateStore::connect_robot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedRobot {
@@ -295,8 +304,43 @@ pub trait StateStore: Send + Sync {
     async fn robot_package_paths(&self) -> Result<Vec<String>, StateStoreError>;
 
     /// Count what the recordings, robots and datasets on this machine are
-    /// waiting on, for the status query. Read-only.
-    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError>;
+    /// waiting on, for the status query. Read-only. `failed_retention` is how
+    /// long after a recording is stamped `failed_at` the reaper deletes it, or
+    /// `None` when the reaper is off; a recording not stamped yet counts from
+    /// now.
+    async fn status_counts(
+        &self,
+        failed_retention: Option<std::time::Duration>,
+    ) -> Result<StatusCounts, StateStoreError>;
+
+    /// Clear `failed_at` on every recording that can upload again, such as
+    /// one whose refused dataset was selected again, so a later failure gets
+    /// the full retention. Then stamp `failed_at = now` on every recording
+    /// that can never upload and is not stamped yet: it was not registered and its robot or dataset row was
+    /// refused, the server no longer holds it, or a trace failed to write,
+    /// register or upload. Cancelled recordings are left alone. Returns how
+    /// many were stamped.
+    async fn stamp_failed_recordings(&self) -> Result<u64, StateStoreError>;
+
+    /// List the recordings that can never upload and were stamped `failed_at`
+    /// at or before `cutoff`, for the reaper to delete. Oldest first.
+    async fn recordings_failed_before(
+        &self,
+        cutoff: NaiveDateTime,
+    ) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Set robot row `robot_index`'s `last_used_at` to now: its data is still
+    /// arriving, so the reaper keeps it.
+    async fn mark_robot_used(&self, robot_index: i64) -> Result<(), StateStoreError>;
+
+    /// Delete the robot and dataset rows the reaper no longer needs: `done` or
+    /// `failed`, used by no recording, and last used at or before `cutoff`. A
+    /// process that connects or selects one again gets a new row. Returns the
+    /// saved packages the deleted robot rows named, for the caller to delete.
+    async fn delete_unused_rows(
+        &self,
+        cutoff: NaiveDateTime,
+    ) -> Result<UnusedRows, StateStoreError>;
 
     /// The start notifier's periodic set, oldest first: recordings not yet
     /// started on the server that are cancelled (to settle), or whose start
@@ -1503,7 +1547,10 @@ impl StateStore for SqliteStateStore {
         Ok(dataset_index)
     }
 
-    async fn status_counts(&self) -> Result<StatusCounts, StateStoreError> {
+    async fn status_counts(
+        &self,
+        failed_retention: Option<std::time::Duration>,
+    ) -> Result<StatusCounts, StateStoreError> {
         // Bytes left per recording: a trace's size is only final once it is
         // written, so the bytes written so far stand in until then.
         const BYTES_LEFT: &str = "SELECT recording_index, \
@@ -1565,8 +1612,12 @@ impl StateStore for SqliteStateStore {
         // daemon finds them: its robot, its dataset, then the server or the
         // upload. A robot or dataset row the server refused that no recording
         // uses is reported too, with none.
-        let failed: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
-            "SELECT reason, kind, name, SUM(counted) FROM ( \
+        // A recording not stamped yet by the reaper counts as failing now. The
+        // latest stamp bounds when all of a reason's recordings are deleted.
+        let now = Utc::now().naive_utc();
+        type Failed = (String, Option<String>, Option<String>, i64, NaiveDateTime);
+        let failed: Vec<Failed> = sqlx::query_as(&format!(
+            "SELECT reason, kind, name, SUM(counted), MAX(failed_at) FROM ( \
                  SELECT CASE \
                           WHEN r.recording_id IS NULL AND rb.status = 'failed' THEN rb.reason \
                           WHEN r.recording_id IS NULL AND ds.status = 'failed' THEN ds.reason \
@@ -1581,19 +1632,19 @@ impl StateStore for SqliteStateStore {
                           WHEN r.recording_id IS NULL AND rb.status = 'failed' THEN rb.name \
                           WHEN r.recording_id IS NULL AND ds.status = 'failed' THEN ds.name \
                         END AS name, \
-                        1 AS counted \
+                        1 AS counted, COALESCE(r.failed_at, ?3) AS failed_at \
                    FROM recordings r \
                    LEFT JOIN robots rb ON rb.robot_index = r.robot_index \
                    LEFT JOIN datasets ds ON ds.dataset_index = r.dataset_index \
                   WHERE r.cancelled_at IS NULL AND {NEVER_UPLOADS} \
                  UNION ALL \
-                 SELECT rb.reason, 'robot', rb.name, 0 FROM robots rb \
+                 SELECT rb.reason, 'robot', rb.name, 0, ?3 FROM robots rb \
                   WHERE rb.status = 'failed' AND rb.reason IS NOT NULL \
                     AND NOT EXISTS (SELECT 1 FROM recordings r \
                                      WHERE r.robot_index = rb.robot_index \
                                        AND r.cancelled_at IS NULL) \
                  UNION ALL \
-                 SELECT ds.reason, 'dataset', ds.name, 0 FROM datasets ds \
+                 SELECT ds.reason, 'dataset', ds.name, 0, ?3 FROM datasets ds \
                   WHERE ds.status = 'failed' AND ds.reason IS NOT NULL \
                     AND NOT EXISTS (SELECT 1 FROM recordings r \
                                      WHERE r.dataset_index = ds.dataset_index \
@@ -1602,6 +1653,7 @@ impl StateStore for SqliteStateStore {
         ))
         .bind(resolution_detail::NOT_ON_SERVER)
         .bind(resolution_detail::UPLOAD_FAILED)
+        .bind(now)
         .fetch_all(&self.read_pool)
         .await?;
 
@@ -1613,9 +1665,11 @@ impl StateStore for SqliteStateStore {
                       kind: Option<String>,
                       name: Option<String>,
                       org_id: Option<String>,
-                      recordings: i64| ReasonCount {
+                      recordings: i64,
+                      deleted_within_seconds: Option<u64>| ReasonCount {
             reason,
             recordings: u64::try_from(recordings).unwrap_or(0),
+            deleted_within_seconds,
             subject: kind
                 .as_deref()
                 .and_then(SubjectKind::parse)
@@ -1625,6 +1679,11 @@ impl StateStore for SqliteStateStore {
             // Looked up when a status query is answered, never stored.
             org_name: None,
         };
+        let deleted_within_seconds = |failed_at: NaiveDateTime| {
+            let retention = chrono::Duration::from_std(failed_retention?).ok()?;
+            let seconds = (failed_at + retention - now).num_seconds();
+            Some(u64::try_from(seconds).unwrap_or(0))
+        };
         Ok(StatusCounts {
             waiting: count(waiting),
             uploading: count(uploading),
@@ -1632,18 +1691,112 @@ impl StateStore for SqliteStateStore {
                 blocked
                     .into_iter()
                     .map(|(code, kind, name, org_id, recordings)| {
-                        reason(code, kind, name, org_id, recordings)
+                        reason(code, kind, name, org_id, recordings, None)
                     })
                     .collect(),
             ),
             failed: limit_reasons(
                 failed
                     .into_iter()
-                    .map(|(code, kind, name, recordings)| {
-                        reason(code, kind, name, None, recordings)
+                    .map(|(code, kind, name, recordings, failed_at)| {
+                        // Only recordings are deleted; a refused row on its
+                        // own has nothing to say when.
+                        let deleted = if recordings > 0 {
+                            deleted_within_seconds(failed_at)
+                        } else {
+                            None
+                        };
+                        reason(code, kind, name, None, recordings, deleted)
                     })
                     .collect(),
             ),
+        })
+    }
+
+    async fn stamp_failed_recordings(&self) -> Result<u64, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        sqlx::query(&format!(
+            "UPDATE recordings SET failed_at = NULL \
+              WHERE recording_index IN ( \
+                    SELECT r.recording_index FROM recordings r \
+                     WHERE r.failed_at IS NOT NULL AND NOT {NEVER_UPLOADS})"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        let result = sqlx::query(&format!(
+            "UPDATE recordings SET failed_at = ?1 \
+              WHERE recording_index IN ( \
+                    SELECT r.recording_index FROM recordings r \
+                     WHERE r.failed_at IS NULL AND r.cancelled_at IS NULL \
+                       AND {NEVER_UPLOADS})"
+        ))
+        .bind(Utc::now().naive_utc())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn recordings_failed_before(
+        &self,
+        cutoff: NaiveDateTime,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(&format!(
+            "SELECT r.* FROM recordings r \
+              WHERE r.failed_at <= ?1 AND r.cancelled_at IS NULL AND {NEVER_UPLOADS} \
+           ORDER BY r.failed_at ASC, r.recording_index ASC"
+        ))
+        .bind(cutoff)
+        .fetch_all(&self.read_pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn mark_robot_used(&self, robot_index: i64) -> Result<(), StateStoreError> {
+        sqlx::query("UPDATE robots SET last_used_at = ?2 WHERE robot_index = ?1")
+            .bind(robot_index)
+            .bind(Utc::now().naive_utc())
+            .execute(&self.write_pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_unused_rows(
+        &self,
+        cutoff: NaiveDateTime,
+    ) -> Result<UnusedRows, StateStoreError> {
+        const UNUSED_ROBOT: &str = "status IN ('done', 'failed') AND last_used_at <= ?1 \
+             AND NOT EXISTS (SELECT 1 FROM recordings r \
+                              WHERE r.robot_index = robots.robot_index)";
+        let mut tx = self.write_pool.begin().await?;
+        let packages: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT package_path FROM robots WHERE package_path IS NOT NULL AND {UNUSED_ROBOT}"
+        ))
+        .bind(cutoff)
+        .fetch_all(&mut *tx)
+        .await?;
+        let robots = sqlx::query(&format!("DELETE FROM robots WHERE {UNUSED_ROBOT}"))
+            .bind(cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let datasets = sqlx::query(
+            "DELETE FROM datasets WHERE status IN ('done', 'failed') AND last_used_at <= ?1 \
+               AND NOT EXISTS (SELECT 1 FROM recordings r \
+                                WHERE r.dataset_index = datasets.dataset_index)",
+        )
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(UnusedRows {
+            robots,
+            datasets,
+            packages,
         })
     }
 
@@ -3048,7 +3201,7 @@ mod tests {
                 .unwrap();
         }
 
-        let status = store.status_counts().await.unwrap();
+        let status = store.status_counts(None).await.unwrap();
 
         let held: Vec<(String, u64)> = status
             .blocked
@@ -3108,7 +3261,7 @@ mod tests {
             .await
             .unwrap();
 
-        let status = store.status_counts().await.unwrap();
+        let status = store.status_counts(None).await.unwrap();
 
         // The registered recording keeps uploading; only the waiting one fails,
         // and the robot row no recording uses is reported with none.
