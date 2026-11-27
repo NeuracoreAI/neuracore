@@ -255,15 +255,17 @@ def reset_neuracore():
     original_has_validated_version = global_state._has_validated_version
     original_robots = dict(nc.core.robot._robots)
     original_robot_name_id_mapping = dict(nc.core.robot._robot_name_id_mapping)
+    original_connected_robots = dict(nc.core.robot._connected_robots)
     original_active_dataset = global_state._active_dataset
 
     nc.api._active_robot = None
     nc.api._active_recording_id = None
     global_state._active_robot = None
-    global_state._active_dataset = None
     global_state._has_validated_version = False
+    global_state._active_dataset = None
     nc.core.robot._robots.clear()
     nc.core.robot._robot_name_id_mapping.clear()
+    nc.core.robot._connected_robots.clear()
 
     nc.core.auth._auth = nc.core.auth.Auth()
 
@@ -276,6 +278,8 @@ def reset_neuracore():
     nc.core.robot._robots.update(original_robots)
     nc.core.robot._robot_name_id_mapping.clear()
     nc.core.robot._robot_name_id_mapping.update(original_robot_name_id_mapping)
+    nc.core.robot._connected_robots.clear()
+    nc.core.robot._connected_robots.update(original_connected_robots)
     global_state._active_dataset = original_active_dataset
 
 

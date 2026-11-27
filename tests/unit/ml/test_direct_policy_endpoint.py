@@ -35,6 +35,14 @@ from tests.unit.ml.conftest import (
 
 TEST_ROBOT_ID = "test_robot"
 TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
+
+
+@pytest.fixture(autouse=True)
+def daemon_confirms_test_robot_with_mocked_id(fake_registry) -> None:
+    """connect_robot takes the robot id from the daemon, not the server mock."""
+    fake_registry.robot_ids[TEST_ROBOT_ID] = TEST_ROBOT_PAYLOAD["robot_id"]
+
+
 TRAIN_RUN_NAME = "test_run"
 TRAIN_JOB_ID = "job_123"
 

@@ -2,6 +2,7 @@ import re
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ from neuracore_types import DataType
 from neuracore_types.nc_data import DATA_TYPE_TO_NC_DATA_CLASS
 
 import neuracore as nc
+import neuracore.core.get_latest_sync_point as sync_point_module
 from neuracore.api.logging import ExperimentalPointCloudWarning
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
@@ -373,6 +375,37 @@ def test_sync_point_for_unregistered_robot_raises_robot_error(
 
     with pytest.raises(RobotError, match="not initialized"):
         nc.get_latest_sync_point(robot_name="robot-b", include_remote=False)
+
+
+def test_sync_point_does_not_wait_for_the_server_to_register_the_robot(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    fake_registry,
+    monkeypatch,
+):
+    """Before the server registers the robot, only this machine's data is returned."""
+    live_data_on = SimpleNamespace(is_disabled=lambda: False)
+    monkeypatch.setattr(
+        sync_point_module,
+        "get_consume_live_data_enabled_manager",
+        lambda: live_data_on,
+    )
+
+    def no_remote_nodes(org_id):
+        raise AssertionError("remote nodes are looked up by the server's robot id")
+
+    monkeypatch.setattr(sync_point_module, "get_org_nodes_manager", no_remote_nodes)
+    nc.login("test_api_key")
+    fake_registry.set_robot_state("robot-a", "pending", "daemon_offline")
+    nc.connect_robot("robot-a")
+    nc.log_joint_positions({"joint_on_a": 1.0}, robot_name="robot-a")
+
+    sync_point = nc.get_latest_sync_point(robot_name="robot-a", include_remote=True)
+
+    assert set(sync_point.data[DataType.JOINT_POSITIONS]) == {"joint_on_a"}
+    assert not nc.check_remote_nodes_connected(robot_name="robot-a")
 
 
 def test_sync_point_without_a_connected_robot_raises_robot_error(reset_neuracore):

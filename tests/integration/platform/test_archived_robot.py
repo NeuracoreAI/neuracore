@@ -1,7 +1,7 @@
 """Integration test for connecting to an archived robot.
 
 An archived robot must not be usable: the connect fails with an error that
-tells the user how to fix it, and no daemon starts for it.
+tells the user how to fix it.
 """
 
 import subprocess
@@ -14,8 +14,6 @@ import neuracore as nc
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot, list_organization_robots
-from neuracore.data_daemon.daemon_control import read_pid_from_file
-from neuracore.data_daemon.helpers import get_daemon_pid_path
 
 ALL_ROBOTS_LIST_MODE = "mixed"
 DEFAULT_INSTANCE = 0
@@ -37,7 +35,7 @@ def _delete_robots_by_name(robot_names: set[str]) -> None:
 
 
 def test_connect_to_archived_robot_is_refused_until_unarchived() -> None:
-    """Verify an archived robot gets an actionable error, no daemon and a rename."""
+    """Verify an archived robot gets an actionable error and can be renamed."""
     robot_name = f"testing_archived_robot_{uuid.uuid4().hex[:6]}"
     new_robot_name = f"{robot_name}_renamed"
     expected_error = (
@@ -55,7 +53,6 @@ def test_connect_to_archived_robot_is_refused_until_unarchived() -> None:
             nc.connect_robot(robot_name)
 
         assert str(raised.value) == expected_error
-        assert read_pid_from_file(get_daemon_pid_path()) is None
 
         assert nc.update_robot_name(robot.id, new_robot_name) == robot.id
 

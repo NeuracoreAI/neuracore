@@ -137,7 +137,10 @@ def wait_for_robot_id(robot_index: int, name: str, instance: int) -> str:
 
     def error(message: str, reason: str | None = None) -> Exception:
         if reason == "robot_archived":
-            return RobotArchivedError(f"Robot '{name}': {message}.")
+            return RobotArchivedError(
+                f"Robot '{name}' is archived. Unarchive it on the Archived Robots "
+                "page of the Neuracore dashboard, then connect again."
+            )
         return RobotError(f"Robot '{name}': {message}.")
 
     return _wait_for_row(lambda: bridge.robot_row_state(robot_index), describe, error)

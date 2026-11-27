@@ -56,16 +56,16 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
         num_remote_nodes: The number of remote nodes expected to be connected.
 
     Returns:
-        True if the specified number of remote nodes are connected, False otherwise.
-
-    Raises:
-        RobotError: If the robot is not initialized.
+        True if the specified number of remote nodes are connected, False
+        otherwise, and False until the server has registered the robot.
     """
     if get_consume_live_data_enabled_manager().is_disabled():
         return False
 
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+    if not robot.is_registered:
+        # Remote nodes find the robot by its server id, so none can connect
+        # before the server registers it. Reading robot.id would wait for it.
+        return False
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
 
@@ -100,8 +100,7 @@ def get_latest_sync_point(
         SynchronizedPoint containing all current sensor data.
 
     Raises:
-        RobotError: If no robot is given and none is connected, or if the robot
-            is not initialized.
+        RobotError: If no robot is given and none is connected.
     """
     if robot is None:
         robot = GlobalSingleton()._active_robot
@@ -120,8 +119,10 @@ def get_latest_sync_point(
     if not include_remote or get_consume_live_data_enabled_manager().is_disabled():
         return sync_point
 
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+    if not robot.is_registered:
+        # Remote nodes find the robot by its server id, so none has sent data
+        # before the server registers it. Reading robot.id would wait for it.
+        return sync_point
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
 
