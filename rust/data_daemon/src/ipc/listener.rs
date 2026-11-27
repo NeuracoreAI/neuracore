@@ -22,6 +22,7 @@ use std::time::Duration;
 use data_daemon_shared::{
     DatasetSpec, Envelope, HealthReply, HealthRequest, RecordingStateQuery, RecordingStateReply,
     RegistryReply, RegistryRequest, RobotSpec, RowState, RowStatus, VersionReply, VersionRequest,
+    DAEMON_OFFLINE_REASON,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
@@ -72,6 +73,7 @@ const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 /// The listener takes ownership of the [`IpcTransport`]; when this task
 /// returns the transport's destructor releases the iceoryx2 node back to the
 /// OS.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
@@ -79,6 +81,7 @@ pub async fn run(
     store: SqliteStateStore,
     packages_root: PathBuf,
     bus: EventBus,
+    offline: bool,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
@@ -143,7 +146,14 @@ pub async fn run(
         // -- Answer registry requests --------------------------------------------
         // Connecting a robot or selecting a dataset only writes its row; the
         // server is asked elsewhere, so no answer here waits on the network.
-        serve_registry_requests(transport.registry_server(), &store, &packages_root, &bus).await;
+        serve_registry_requests(
+            transport.registry_server(),
+            &store,
+            &packages_root,
+            &bus,
+            offline,
+        )
+        .await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -321,6 +331,7 @@ async fn serve_registry_requests(
     store: &SqliteStateStore,
     packages_root: &Path,
     bus: &EventBus,
+    offline: bool,
 ) {
     loop {
         let active = match server.receive() {
@@ -338,7 +349,10 @@ async fn serve_registry_requests(
                 continue;
             }
         };
-        let reply = answer_registry_request(store, packages_root, bus, request).await;
+        let mut reply = answer_registry_request(store, packages_root, bus, request).await;
+        if offline {
+            reply = mark_daemon_offline(reply);
+        }
         let bytes = match reply.encode() {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -456,6 +470,24 @@ fn refuse_dataset(spec: &DatasetSpec) -> Option<&'static str> {
     }
 }
 
+/// A reply from a daemon running offline: a pending row that nothing else
+/// holds gets [`DAEMON_OFFLINE_REASON`], since this daemon never asks the
+/// server. The SDK then knows not to wait for the server.
+fn mark_daemon_offline(reply: RegistryReply) -> RegistryReply {
+    match reply {
+        RegistryReply::State(RowState {
+            status: RowStatus::Pending,
+            cloud_id,
+            reason: None,
+        }) => RegistryReply::State(RowState {
+            status: RowStatus::Pending,
+            cloud_id,
+            reason: Some(DAEMON_OFFLINE_REASON.to_string()),
+        }),
+        other => other,
+    }
+}
+
 /// A row's state as the registry service reports it.
 fn row_state(
     status: ResolutionStatus,
@@ -551,6 +583,31 @@ mod tests {
 
     /// A package folder for the tests that save no package.
     const NO_PACKAGES: &str = "/nonexistent/.robot_packages";
+
+    #[test]
+    fn an_offline_daemon_marks_only_pending_rows_nothing_else_holds() {
+        let state = |status, reason: Option<&str>| {
+            RegistryReply::State(RowState {
+                status,
+                cloud_id: None,
+                reason: reason.map(str::to_string),
+            })
+        };
+        assert_eq!(
+            mark_daemon_offline(state(RowStatus::Pending, None)),
+            state(RowStatus::Pending, Some(DAEMON_OFFLINE_REASON))
+        );
+        // A reason the row already has says more than the daemon being offline.
+        for unchanged in [
+            state(RowStatus::Pending, Some("robot_archived")),
+            state(RowStatus::Done, None),
+            state(RowStatus::Failed, Some("rejected")),
+            RegistryReply::Index(3),
+            RegistryReply::Unknown,
+        ] {
+            assert_eq!(mark_daemon_offline(unchanged.clone()), unchanged);
+        }
+    }
 
     fn warehouse(name: &str) -> DatasetSpec {
         DatasetSpec {

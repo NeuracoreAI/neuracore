@@ -906,6 +906,11 @@ pub enum RowStatus {
     Failed,
 }
 
+/// The reason a daemon running offline gives for a pending row that nothing
+/// else holds: it never asks the server, so the row stays pending until the
+/// daemon runs online.
+pub const DAEMON_OFFLINE_REASON: &str = "daemon_offline";
+
 /// A robot or dataset row as the daemon holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowState {

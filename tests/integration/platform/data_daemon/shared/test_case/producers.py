@@ -501,7 +501,9 @@ def _producer_process(
     robot = None
     try:
         ensure_login()
-        nc.get_dataset(spec.dataset_name)
+        # Not get_dataset: that needs the server to have the dataset, which a
+        # daemon running offline never creates there.
+        nc.create_dataset(spec.dataset_name)
         robot = nc.connect_robot(spec.robot_name, overwrite=False)
         if (
             any(plan.is_video for plan in spec.plans)

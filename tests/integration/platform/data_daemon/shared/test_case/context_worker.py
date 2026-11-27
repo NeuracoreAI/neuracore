@@ -115,24 +115,29 @@ def log_frames(
 
 
 def _bind_worker_dataset(spec: ContextSpec) -> None:
-    """Poll until the worker pool-shared dataset is visible to this worker.
+    """Select the worker pool-shared dataset in this worker, retrying on error.
+
+    ``nc.create_dataset`` finds the dataset the parent made. Unlike
+    ``nc.get_dataset`` it works after an offline login, and with a daemon
+    running offline, which never creates the dataset on the server.
 
     The timeout RuntimeError is raised inside the Timer block on purpose:
     ``Timer.__exit__`` skips its deadline assertion when an exception is in
-    flight, so the real ``nc.get_dataset`` error (chained via ``last_error``)
-    propagates instead of being masked by the Timer's own AssertionError.
+    flight, so the real ``nc.create_dataset`` error (chained via
+    ``last_error``) propagates instead of being masked by the Timer's own
+    AssertionError.
     """
     last_error: Exception | None = None
     deadline = time.time() + MAX_TIME_TO_START_S
     with Timer(
         MAX_TIME_TO_START_S,
-        label="nc.get_dataset",
+        label="nc.create_dataset",
         always_log=True,
         assert_deadline=spec.assert_deadline,
     ):
         while time.time() < deadline:
             try:
-                nc.get_dataset(spec.dataset_name)
+                nc.create_dataset(spec.dataset_name)
                 return
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
