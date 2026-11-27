@@ -103,6 +103,12 @@ pub enum DaemonEvent {
         /// Local recording index the event applies to.
         recording_index: i64,
     },
+    /// A process selected a dataset: its row is new, or due to be checked
+    /// again with the server.
+    DatasetSelected {
+        /// The dataset row's index.
+        dataset_index: i64,
+    },
     /// Connection state to the backend changed.
     ConnectionStateChanged(ConnectionState),
 }

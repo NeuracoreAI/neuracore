@@ -34,7 +34,8 @@ use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingState;
 use crate::state::{
-    ResolutionReason, ResolutionStatus, SqliteStateStore, StateStore, StateStoreError,
+    DaemonEvent, EventBus, ResolutionReason, ResolutionStatus, SqliteStateStore, StateStore,
+    StateStoreError,
 };
 use crate::storage::paths::is_in_robot_packages;
 
@@ -77,6 +78,7 @@ pub async fn run(
     recording_state: RecordingState,
     store: SqliteStateStore,
     packages_root: PathBuf,
+    bus: EventBus,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
@@ -141,7 +143,7 @@ pub async fn run(
         // -- Answer registry requests --------------------------------------------
         // Connecting a robot or selecting a dataset only writes its row; the
         // server is asked elsewhere, so no answer here waits on the network.
-        serve_registry_requests(transport.registry_server(), &store, &packages_root).await;
+        serve_registry_requests(transport.registry_server(), &store, &packages_root, &bus).await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -318,6 +320,7 @@ async fn serve_registry_requests(
     server: &Server<ipc::Service, [u8], (), [u8], ()>,
     store: &SqliteStateStore,
     packages_root: &Path,
+    bus: &EventBus,
 ) {
     loop {
         let active = match server.receive() {
@@ -335,7 +338,7 @@ async fn serve_registry_requests(
                 continue;
             }
         };
-        let reply = answer_registry_request(store, packages_root, request).await;
+        let reply = answer_registry_request(store, packages_root, bus, request).await;
         let bytes = match reply.encode() {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -356,10 +359,12 @@ async fn serve_registry_requests(
     }
 }
 
-/// Answer one registry request from the state store.
+/// Answer one registry request from the state store, waking the resolver
+/// for a row it marks to be confirmed.
 async fn answer_registry_request(
     store: &SqliteStateStore,
     packages_root: &Path,
+    bus: &EventBus,
     request: RegistryRequest,
 ) -> RegistryReply {
     let answered = match request {
@@ -392,6 +397,7 @@ async fn answer_registry_request(
             }
             store.select_dataset(&spec).await.map(|dataset_index| {
                 tracing::info!(dataset_index, dataset = spec.name, "dataset selected");
+                bus.publish(DaemonEvent::DatasetSelected { dataset_index });
                 RegistryReply::Index(dataset_index)
             })
         }
@@ -554,7 +560,9 @@ mod tests {
     }
 
     async fn index(store: &SqliteStateStore, request: RegistryRequest) -> i64 {
-        match answer_registry_request(store, Path::new(NO_PACKAGES), request).await {
+        match answer_registry_request(store, Path::new(NO_PACKAGES), &EventBus::new(), request)
+            .await
+        {
             RegistryReply::Index(index) => index,
             other => panic!("expected an index, got {other:?}"),
         }
@@ -562,7 +570,7 @@ mod tests {
 
     async fn connect_with(store: &SqliteStateStore, packages: &Path, package: &Path) -> i64 {
         let request = RegistryRequest::ConnectRobot(arm(Some(package.display().to_string())));
-        match answer_registry_request(store, packages, request).await {
+        match answer_registry_request(store, packages, &EventBus::new(), request).await {
             RegistryReply::Index(index) => index,
             other => panic!("expected an index, got {other:?}"),
         }
@@ -615,6 +623,7 @@ mod tests {
             answer_registry_request(
                 &store,
                 Path::new(NO_PACKAGES),
+                &EventBus::new(),
                 RegistryRequest::RobotState { robot_index: first }
             )
             .await,
@@ -647,6 +656,7 @@ mod tests {
             answer_registry_request(
                 &store,
                 Path::new(NO_PACKAGES),
+                &EventBus::new(),
                 RegistryRequest::DatasetState {
                     dataset_index: first
                 }
@@ -665,6 +675,7 @@ mod tests {
         let robot = answer_registry_request(
             &store,
             Path::new(NO_PACKAGES),
+            &EventBus::new(),
             RegistryRequest::ConnectRobot(RobotSpec {
                 org_id: String::new(),
                 ..arm(None)
@@ -674,6 +685,7 @@ mod tests {
         let dataset = answer_registry_request(
             &store,
             Path::new(NO_PACKAGES),
+            &EventBus::new(),
             RegistryRequest::SelectDataset(DatasetSpec {
                 org_id: String::new(),
                 ..warehouse("warehouse")
@@ -692,6 +704,7 @@ mod tests {
             answer_registry_request(
                 &store,
                 Path::new(NO_PACKAGES),
+                &EventBus::new(),
                 RegistryRequest::RobotState { robot_index: 42 }
             )
             .await,
@@ -701,6 +714,7 @@ mod tests {
             answer_registry_request(
                 &store,
                 Path::new(NO_PACKAGES),
+                &EventBus::new(),
                 RegistryRequest::DatasetState { dataset_index: 42 }
             )
             .await,
