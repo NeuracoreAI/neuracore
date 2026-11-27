@@ -53,7 +53,7 @@ flowchart LR
       RP["reaper"]
     end
     DB --> CLOUD
-    UP -->|PUT chunks| GCS[("GCS / backend")]
+    UP -->|PUT parts| STORE[("object store")]
 ```
 
 A recording's lifecycle — the daemon assigns the local `recording_index`
