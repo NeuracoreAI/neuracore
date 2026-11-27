@@ -8,10 +8,8 @@ autotuning, and training execution.
 import gc
 import json
 import logging
-import multiprocessing as mp
 import os
 import tempfile
-from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, Mock, patch
@@ -39,7 +37,6 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.train import (
     DEFAULT_OPEN_FILE_LIMIT,
-    _any_rank_failed_to_load_checkpoint,
     _main,
     _raise_open_file_limit,
     _resolve_recording_cache_dir,
@@ -349,6 +346,7 @@ class RunTrainingTestSetup:
         if checkpoint_epoch is not None:
             self.mock_trainer.load_checkpoint.return_value = {"epoch": checkpoint_epoch}
         self.mock_trainer.train = Mock()
+        self.mock_trainer._any_rank_failed.return_value = False
         self.mock_trainer_class = Mock(return_value=self.mock_trainer)
 
         # Create storage and logging mocks
@@ -1648,70 +1646,6 @@ class TestAssertValidBatchSize:
         assert cleanup_call_counts["cuda_empty_cache"] == 2
 
 
-def _agree_on_resume_load_failure(
-    rank: int,
-    world_size: int,
-    local_failed: bool,
-    init_method: str,
-    result_path: str,
-) -> None:
-    """Run the resume-failure collective for one real distributed rank."""
-    import torch.distributed as dist
-
-    dist.init_process_group(
-        backend="gloo",
-        init_method=init_method,
-        rank=rank,
-        world_size=world_size,
-        timeout=timedelta(seconds=30),
-    )
-    try:
-        agreed = _any_rank_failed_to_load_checkpoint(
-            local_failed=local_failed,
-            rank=rank,
-            device=torch.device("cpu"),
-        )
-        Path(result_path).write_text("1" if agreed else "0")
-    finally:
-        dist.destroy_process_group()
-
-
-def _run_resume_failure_collective(
-    local_failures: list[bool], tmp_path: Path
-) -> dict[int, bool]:
-    """Launch one process per rank and return each rank's agreed result."""
-    init_method = f"file://{tmp_path / 'dist_init'}"
-    context = mp.get_context("spawn")
-    processes: list[mp.Process] = []
-    result_paths: list[Path] = []
-    for rank, local_failed in enumerate(local_failures):
-        result_path = tmp_path / f"rank_{rank}.txt"
-        result_paths.append(result_path)
-        process = context.Process(
-            target=_agree_on_resume_load_failure,
-            args=(
-                rank,
-                len(local_failures),
-                local_failed,
-                init_method,
-                str(result_path),
-            ),
-        )
-        process.start()
-        processes.append(process)
-
-    for process in processes:
-        process.join(60)
-        assert (
-            process.exitcode == 0
-        ), f"Rank process {process.pid} exited with {process.exitcode}"
-
-    return {
-        rank: result_path.read_text() == "1"
-        for rank, result_path in enumerate(result_paths)
-    }
-
-
 class TestRunTraining:
     """Tests for run_training function."""
 
@@ -1803,16 +1737,12 @@ class TestRunTraining:
         )
         synced_failures: list[bool] = []
 
-        def record_failure(*, local_failed: bool, rank: int) -> bool:
+        def record_failure(local_failed: bool) -> bool:
             synced_failures.append(local_failed)
-            assert rank == 0
             return False
 
-        monkeypatch.setattr(
-            "neuracore.ml.train._any_rank_failed_to_load_checkpoint",
-            record_failure,
-        )
         setup.setup_mocks()
+        setup.mock_trainer._any_rank_failed.side_effect = record_failure
 
         setup.call_run_training(mock_cfg_training, mock_dataset)
 
@@ -1888,16 +1818,12 @@ class TestRunTraining:
         setup.mock_trainer.load_checkpoint.side_effect = EOFError("Ran out of input")
         synced_failures: list[bool] = []
 
-        def record_failure(*, local_failed: bool, rank: int) -> bool:
+        def record_failure(local_failed: bool) -> bool:
             synced_failures.append(local_failed)
-            assert rank == 1
             return True
 
-        monkeypatch.setattr(
-            "neuracore.ml.train._any_rank_failed_to_load_checkpoint",
-            record_failure,
-        )
         setup.setup_mocks()
+        setup.mock_trainer._any_rank_failed.side_effect = record_failure
 
         with pytest.raises(RuntimeError, match="checkpoint.pth") as exc_info:
             setup.call_run_training(mock_cfg_training, mock_dataset)
@@ -1925,16 +1851,12 @@ class TestRunTraining:
             checkpoint_epoch=5,
         )
 
-        def peer_failed(*, local_failed: bool, rank: int) -> bool:
+        def peer_failed(local_failed: bool) -> bool:
             assert local_failed is False
-            assert rank == 0
             return True
 
-        monkeypatch.setattr(
-            "neuracore.ml.train._any_rank_failed_to_load_checkpoint",
-            peer_failed,
-        )
         setup.setup_mocks()
+        setup.mock_trainer._any_rank_failed.side_effect = peer_failed
 
         with pytest.raises(RuntimeError, match="checkpoint.pth") as exc_info:
             setup.call_run_training(mock_cfg_training, mock_dataset)
@@ -1943,22 +1865,6 @@ class TestRunTraining:
         assert "Another rank failed" in str(exc_info.value.__cause__)
         setup.mock_trainer.train.assert_not_called()
         setup.mock_cleanup.assert_called_once()
-
-    @pytest.mark.parametrize(
-        ("local_failures", "expected"),
-        [
-            ([False, False], {0: False, 1: False}),
-            ([False, True], {0: True, 1: True}),
-            ([True, True], {0: True, 1: True}),
-        ],
-    )
-    def test_resume_failure_collective_agrees_across_ranks(
-        self,
-        tmp_path: Path,
-        local_failures: list[bool],
-        expected: dict[int, bool],
-    ):
-        assert _run_resume_failure_collective(local_failures, tmp_path) == expected
 
     def test_run_training_sets_up_distributed_training_when_world_size_greater_than_one(
         self,

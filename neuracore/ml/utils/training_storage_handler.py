@@ -15,6 +15,7 @@ from torch import nn
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.core.utils.download import download_with_progress
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.nc_archive import create_nc_archive
@@ -469,31 +470,52 @@ class TrainingStorageHandler(UploadStorageMixin):
         else:
             return obj
 
+    def download_checkpoint(self, checkpoint_name: str) -> Path:
+        """Download a checkpoint from cloud storage onto the local job disk.
+
+        Writes to a sibling staging file and replaces the destination so
+        other ranks never observe a truncated checkpoint. Local-only handlers
+        leave the existing file in place.
+
+        Multi-GPU resume must call this on rank 0, then barrier, before any
+        rank calls ``load_checkpoint``. Concurrent downloads to the same path
+        race: ``open(..., "wb")`` truncates the file another rank is reading.
+
+        Args:
+            checkpoint_name: Name of the checkpoint file to download.
+
+        Returns:
+            Path of the local checkpoint file.
+
+        Raises:
+            ValueError: If the checkpoint download URL cannot be fetched.
+        """
+        load_path = self.local_dir / checkpoint_name
+        if not self.log_to_cloud:
+            return load_path
+
+        load_path.parent.mkdir(parents=True, exist_ok=True)
+        download_url = self._get_checkpoint_download_url(checkpoint_name)
+        return download_with_progress(
+            download_url,
+            f"Downloading {checkpoint_name}",
+            destination=load_path,
+        )
+
     def load_checkpoint(self, checkpoint_name: str) -> dict:
-        """Load checkpoint from storage.
+        """Load checkpoint from local storage.
+
+        Reads the file at ``local_dir / checkpoint_name``. Cloud resume must
+        call ``download_checkpoint`` first (rank 0, then a barrier) so this
+        path is already complete.
 
         Args:
             checkpoint_name: Name of the checkpoint file to load.
 
         Returns:
             dict: Loaded checkpoint dictionary.
-
-        Raises:
-            ValueError: If the checkpoint cannot be downloaded or loaded.
         """
-        load_path = self.local_dir / checkpoint_name
-        if self.log_to_cloud:
-            download_url = self._get_checkpoint_download_url(checkpoint_name)
-            session = thread_local_session(retry_transient=True)
-            response = session.get(download_url)
-            if response.status_code != 200:
-                raise ValueError(
-                    f"Failed to download checkpoint {checkpoint_name}: {response.text}"
-                )
-            with open(load_path, "wb") as f:
-                f.write(response.content)
-
-        return torch.load(load_path, weights_only=True)
+        return torch.load(self.local_dir / checkpoint_name, weights_only=True)
 
     def delete_checkpoint(self, relative_checkpoint_path: Path) -> None:
         """Delete checkpoint from storage.
