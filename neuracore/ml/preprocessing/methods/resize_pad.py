@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from neuracore_types import BatchedDepthData, BatchedNCData, BatchedRGBData, DataType
 
-from ..base import PreprocessingMethod
+from ..base import PreprocessingMethod, PreprocessingType
 
 
 class ResizePad(PreprocessingMethod):
@@ -17,7 +17,7 @@ class ResizePad(PreprocessingMethod):
 
     # Has to run before collation: recordings differ in source resolution, and
     # a batch cannot be stacked until every frame is the same size.
-    on_cpu = True
+    preprocessing_type = PreprocessingType.GEOMETRIC
 
     def __init__(self, size: list[int] | tuple[int, int] = (224, 224)) -> None:
         """Initialize resize target as (height, width)."""

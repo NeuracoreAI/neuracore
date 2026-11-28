@@ -2,6 +2,7 @@ import pytest
 import torch
 from neuracore_types import BatchedDepthData, BatchedRGBData
 
+from neuracore.ml.preprocessing.base import PreprocessingType
 from neuracore.ml.preprocessing.methods.color_jitter import ColorJitter
 
 
@@ -79,5 +80,5 @@ def test_color_jitter_returns_contiguous_frames():
     assert out.frame.is_contiguous()
 
 
-def test_color_jitter_runs_on_the_device_stage():
-    assert ColorJitter().on_cpu is False
+def test_color_jitter_runs_in_the_photometric_group():
+    assert ColorJitter.preprocessing_type is PreprocessingType.PHOTOMETRIC

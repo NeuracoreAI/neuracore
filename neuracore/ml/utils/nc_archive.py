@@ -130,23 +130,17 @@ def create_nc_archive(
             )
         with open(temp_path / "input_preprocessing_config.json", "w") as f:
             json.dump(
-                {
-                    data_type.value: [m.to_dict() for m in methods]
-                    for data_type, methods in (
-                        input_preprocessing_config or PreprocessingConfiguration()
-                    ).items()
-                },
+                (
+                    input_preprocessing_config or PreprocessingConfiguration()
+                ).to_serializable(),
                 f,
                 indent=2,
             )
         with open(temp_path / "output_preprocessing_config.json", "w") as f:
             json.dump(
-                {
-                    data_type.value: [m.to_dict() for m in methods]
-                    for data_type, methods in (
-                        output_preprocessing_config or PreprocessingConfiguration()
-                    ).items()
-                },
+                (
+                    output_preprocessing_config or PreprocessingConfiguration()
+                ).to_serializable(),
                 f,
                 indent=2,
             )

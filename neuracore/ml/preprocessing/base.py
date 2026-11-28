@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import re
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from neuracore_types import DataType
@@ -12,19 +14,41 @@ if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
 
 
+def class_name_to_method_name(class_name: str) -> str:
+    """Convert a CamelCase class name to its snake_case method name."""
+    words_split_after_acronyms = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", class_name)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", words_split_after_acronyms).lower()
+
+
+class PreprocessingType(str, Enum):
+    """Pipeline group a preprocessing method runs in."""
+
+    GEOMETRIC = "geometric"
+    PHOTOMETRIC = "photometric"
+
+
 class PreprocessingMethod(ABC):
     """Base interface for preprocessing implementations."""
 
+    # Key that names this method in a preprocessing config, derived from the
+    # class name: ColorJitter becomes color_jitter.
+    name: ClassVar[str]
+
     # Where in the pipeline this method runs.
     #
-    # True runs it in the dataset, per sample, inside a DataLoader worker.
+    # geometric runs it in the dataset, per sample, inside a DataLoader worker.
     #
-    # False runs it in the trainer, per batch, once the batch has reached the
-    # training device.
-    # A method that opts out must handle a batched input: it sees a whole
+    # photometric runs it in the trainer, per batch, once the batch has reached
+    # the training device.
+    # A photometric method must handle a batched input: it sees a whole
     # batch rather than one sample, so anything random has to draw per sample
     # explicitly or the entire batch gets one draw.
-    on_cpu: ClassVar[bool] = True
+    preprocessing_type: ClassVar[PreprocessingType] = PreprocessingType.GEOMETRIC
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Set the config name of each subclass from its class name."""
+        super().__init_subclass__(**kwargs)
+        cls.name = class_name_to_method_name(cls.__name__)
 
     @staticmethod
     @abstractmethod
@@ -36,8 +60,7 @@ class PreprocessingMethod(ABC):
         """Apply preprocessing and return transformed data."""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the preprocessing method to a OmegaConf-style dictionary."""
-        target_name = f"{self.__class__.__module__}.{self.__class__.__name__}"
+        """Serialize the preprocessing method to a one-key name to params mapping."""
         init_signature = inspect.signature(type(self).__init__)
         params = {}
         for param_name in init_signature.parameters:
@@ -47,11 +70,11 @@ class PreprocessingMethod(ABC):
                 continue
             params[param_name] = getattr(self, param_name, None)
 
-        return {"_target_": target_name, **params}
+        return {self.name: params}
 
     def __str__(self) -> str:
         """Return a human-readable representation of the preprocessing method."""
-        params = {k: v for k, v in self.to_dict().items() if k != "_target_"}
+        params = self.to_dict()[self.name]
         param_str = ", ".join(f"{name}={value!r}" for name, value in params.items())
         return f"{self.__class__.__name__}({param_str})"
 
@@ -66,23 +89,40 @@ class PreprocessingConfiguration(dict[DataType, list[PreprocessingMethod]]):
     def split_by_stage(
         self,
     ) -> tuple[PreprocessingConfiguration, PreprocessingConfiguration]:
-        """Partition into the worker-side and device-side halves.
+        """Partition into the geometric and photometric groups.
 
-        Order within each data type is preserved. Interleaving methods of
-        different stages reorders them relative to each other, so a pipeline
-        that depends on strict ordering should keep its methods on one side.
+        Order within each data type is preserved.
 
         Returns:
-            ``(on_cpu, on_device)``, each omitting data types left with
+            ``(geometric, photometric)``, each omitting data types left with
             nothing to do.
         """
-        on_cpu = PreprocessingConfiguration()
-        on_device = PreprocessingConfiguration()
+        geometric = PreprocessingConfiguration()
+        photometric = PreprocessingConfiguration()
         for data_type, methods in self.items():
             for method in methods:
-                target = on_cpu if method.on_cpu else on_device
+                target = (
+                    geometric
+                    if method.preprocessing_type is PreprocessingType.GEOMETRIC
+                    else photometric
+                )
                 target.setdefault(data_type, []).append(method)
-        return on_cpu, on_device
+        return geometric, photometric
+
+    def to_serializable(self) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        """Serialize to the data type to geometric and photometric lists shape."""
+        serialized: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for data_type, methods in self.items():
+            groups = serialized.setdefault(
+                data_type.value,
+                {
+                    preprocessing_type.value: []
+                    for preprocessing_type in PreprocessingType
+                },
+            )
+            for method in methods:
+                groups[method.preprocessing_type.value].append(method.to_dict())
+        return serialized
 
     def __str__(self) -> str:
         """Return a human-readable representation of the preprocessing pipeline."""
